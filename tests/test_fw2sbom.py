@@ -21,8 +21,10 @@ import io
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
+import time
 import unittest
 import zipfile
 
@@ -31,10 +33,12 @@ ROOT = os.path.dirname(HERE)
 sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
+import container                                        # noqa: E402
 import evidence_report                                  # noqa: E402
 import fw2sbom as core                                   # noqa: E402
 import make_fixtures                                     # noqa: E402
 import spdx_report                                       # noqa: E402
+import squashfs                                          # noqa: E402
 import service                                           # noqa: E402
 
 
@@ -77,17 +81,20 @@ def _analyze_uncached(name):
     arch = core.analyze_architecture(payload)
     opacity = core.analyze_opacity(payload, arch["label"])
     standards = core.detect_embedded_standards(payload)
-    strings = core.extract_strings(payload, 6)
-    hits = core.match_signatures(strings)
-    core.infer_versions(hits)
-    opacity = core.reconcile_opacity(opacity, hits, standards)
+    segments, rootfs, _warnings = core.analyze_segments(payload, 6)
+    strings = [pair for seg in segments for pair in seg.get("strings", [])]
+    hits = core.merge_segment_hits(segments)
+    packages = core.packages_to_components(rootfs)
+    opacity = core.reconcile_opacity(opacity, hits + packages, standards)
     bom = core.build_sbom(name, data, None, arch, hits, 6, len(strings),
                           container=container, opacity=opacity,
-                          payload=payload, standards=standards)
+                          payload=payload, standards=standards,
+                          segments=segments, rootfs=rootfs, packages=packages)
     spdx = spdx_report.build_spdx(bom, name, core.TOOL_NAME, core.TOOL_VERSION)
     return {"data": data, "container": container, "payload": payload,
             "arch": arch, "opacity": opacity, "standards": standards,
-            "strings": strings, "hits": hits, "bom": bom, "spdx": spdx}
+            "strings": strings, "hits": hits, "bom": bom, "spdx": spdx,
+            "segments": segments, "rootfs": rootfs, "packages": packages}
 
 
 def versions(result):
@@ -538,27 +545,122 @@ class SbomStructureTest(unittest.TestCase):
 
 # --------------------------------------------------------------------------- #
 
-class KnownGapTest(unittest.TestCase):
-    """Behaviour we know is wrong and have not fixed yet.
+class ContainerTest(unittest.TestCase):
+    """Linux images keep everything worth naming inside compressed regions.
 
-    These assertions exist to be inverted. When the Phase 2 container walker
-    lands, this test fails - and that failure is the signal that the roadmap
-    item is done, not a regression.
+    Until the walker existed, a router image produced the correct verdict
+    ("compressed") and a completely empty SBOM. These tests pin the capability
+    that replaced that.
     """
 
-    def test_compressed_linux_firmware_yields_nothing_today(self):
-        result = analyze("router_uimage.bin")
-        self.assertEqual(
-            result["hits"], [],
-            "router_uimage.bin now yields components - if the container walker "
-            "has landed, invert this test and record it in RELEASE.md")
+    def test_uimage_header_is_parsed(self):
+        header = container.parse_uimage(fixture("router_uimage.bin"))
+        self.assertIsNotNone(header)
+        self.assertEqual(header["os"], "Linux")
+        self.assertEqual(header["architecture"], "mips")
+        self.assertEqual(header["compression"], "gzip")
+        self.assertIn("Linux-5.10.110", header["name"])
 
-    def test_but_the_result_is_not_silently_presented_as_complete(self):
-        """Even with nothing found, the SBOM must carry its own limitations."""
+    def test_segments_are_identified_in_image_order(self):
+        segments = analyze("router_uimage.bin")["segments"]
+        kinds = [s["kind"] for s in segments]
+        self.assertEqual(kinds[0], "boot-header")
+        self.assertIn("kernel", kinds)
+        self.assertIn("filesystem", kinds)
+        offsets = [s["offset"] for s in segments]
+        self.assertEqual(offsets, sorted(offsets))
+
+    def test_the_kernel_is_decompressed(self):
+        kernel = next(s for s in analyze("router_uimage.bin")["segments"]
+                      if s["kind"] == "kernel")
+        self.assertTrue(kernel["expanded"])
+        self.assertGreater(len(kernel["content"]), kernel["length"])
+
+    def test_components_inside_the_compressed_kernel_are_found(self):
+        """The whole point: these strings are unreachable in the raw bytes."""
+        found = versions(analyze("router_uimage.bin"))
+        self.assertEqual(found.get("linux-kernel"), "5.10.110")
+        self.assertEqual(found.get("gcc"), "10.3.0")
+
+    def test_evidence_names_the_segment_a_match_came_from(self):
         bom = analyze("router_uimage.bin")["bom"]
-        props = {p["name"]: p["value"] for p in bom["metadata"]["properties"]}
-        self.assertIn("fw2sbom:disclaimer", props)
-        self.assertEqual(bom["components"], [])
+        kernel = next(c for c in bom["components"] if c["name"] == "linux-kernel")
+        value = kernel["evidence"]["identity"][0]["methods"][0]["value"]
+        self.assertIn("kernel", value.lower())
+        props = {p["name"]: p["value"] for p in kernel["properties"]}
+        self.assertIn("kernel", props["fw2sbom:found_in_segments"].lower())
+
+    def test_the_segment_map_reaches_the_sbom(self):
+        props = {p["name"]: p["value"] for p in
+                 analyze("router_uimage.bin")["bom"]["metadata"]["component"]["properties"]}
+        segment_props = [v for k, v in props.items() if k.startswith("fw2sbom:segment_")]
+        self.assertGreaterEqual(len(segment_props), 3)
+        self.assertTrue(any("SquashFS" in v for v in segment_props))
+
+    def test_a_damaged_filesystem_degrades_instead_of_crashing(self):
+        """Firmware comes from customers; a bad image must not be a traceback.
+
+        This fixture's SquashFS superblock is valid but its tables point past
+        the end of the image. The segment must still be reported, the analysis
+        must still finish, and the failure must be written down.
+        """
+        result = analyze("router_uimage.bin")
+        segment = next(s for s in result["segments"]
+                       if s["kind"] == "filesystem")
+        self.assertIsNotNone(segment.get("filesystem"),
+                             "the superblock is valid and must be recognised")
+        self.assertEqual(result["packages"], [],
+                         "no package database is readable from a broken image")
+        self.assertTrue(segment["warnings"],
+                        "an unreadable filesystem must record why")
+        # And the rest of the image was still analysed.
+        self.assertEqual(versions(result).get("linux-kernel"), "5.10.110")
+
+    def test_flat_mcu_images_still_see_one_segment(self):
+        """The microcontroller path must be untouched by any of this."""
+        for name in ("cortexm_rtos.bin", "mcs51_display.bin", "bare_unknown.bin"):
+            with self.subTest(fixture=name):
+                segments = analyze(name)["segments"]
+                self.assertEqual(len(segments), 1)
+                self.assertEqual(segments[0]["kind"], "image")
+                self.assertEqual(len(segments[0]["content"]),
+                                 len(analyze(name)["payload"]))
+
+    def test_unsupported_compression_is_named_not_hidden(self):
+        """lzo/lz4/zstd have no stdlib decompressor; say so, do not skip."""
+        with self.assertRaises(ValueError) as caught:
+            container._expand("lz4", b"\x00" * 64)
+        self.assertIn("lz4", str(caught.exception))
+
+
+class SquashFSTest(unittest.TestCase):
+
+    def test_superblock_rejects_what_it_cannot_read(self):
+        for blob, expected in [
+            (b"xxxx" + b"\x00" * 200, "superblock"),
+            (b"hsqs" + b"\x00" * 200, "supported"),
+        ]:
+            with self.subTest(expected=expected):
+                with self.assertRaises(squashfs.SquashFSError) as caught:
+                    squashfs.SquashFS(blob)
+                self.assertIn(expected, str(caught.exception).lower())
+
+    def test_unsupported_compressor_is_named(self):
+        blob = bytearray(b"hsqs" + b"\x00" * 200)
+        struct.pack_into("<HHHHHH", blob, 20, 3, 17, 0, 1, 4, 0)   # lzo, v4.0
+        with self.assertRaises(squashfs.SquashFSError) as caught:
+            squashfs.SquashFS(bytes(blob))
+        self.assertIn("lzo", str(caught.exception))
+
+    def test_find_offsets(self):
+        data = b"..." + squashfs.MAGIC + b"x" * 40 + squashfs.MAGIC
+        self.assertEqual(squashfs.find_offsets(data), [3, 47])
+
+    def test_limits_are_set_below_anything_plausible(self):
+        """These exist so a crafted image cannot hang or exhaust the analyser."""
+        self.assertLessEqual(squashfs.MAX_DEPTH, 128)
+        self.assertLessEqual(squashfs.MAX_ENTRIES, 1_000_000)
+        self.assertLessEqual(squashfs.MAX_TOTAL_READ, 1024 * 1024 * 1024)
 
 
 # --------------------------------------------------------------------------- #
@@ -877,6 +979,120 @@ class SpdxSchemaValidationTest(unittest.TestCase):
                                 key=lambda e: list(e.path))
                 self.assertEqual(
                     [], [f"{list(e.path)}: {e.message}" for e in errors])
+
+
+
+# --------------------------------------------------------------------------- #
+
+class RealFirmwareTest(unittest.TestCase):
+    """Run the whole pipeline over a real vendor image.
+
+    Synthetic fixtures prove the parsers follow the specifications. Only a real
+    image proves they survive what a vendor actually shipped, and that is where
+    firmware parsing usually breaks. The image is not in git; fetch it with
+    `python scripts/fetch-corpus.py` and these tests start running.
+    """
+
+    IMAGE = os.path.join(ROOT, "corpus", "router",
+                         "openwrt-mt300n-v2-4.3.25.bin")
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(cls.IMAGE):
+            raise unittest.SkipTest(
+                "corpus image missing; run python scripts/fetch-corpus.py")
+        with open(cls.IMAGE, "rb") as f:
+            cls.data = f.read()
+        cls.segments, cls.rootfs, cls.warnings = core.analyze_segments(
+            cls.data, 6)
+        cls.hits = core.merge_segment_hits(cls.segments)
+        cls.packages = core.packages_to_components(cls.rootfs)
+
+    def test_the_container_is_walked_without_warnings(self):
+        self.assertEqual(self.warnings, [])
+        kinds = [s["kind"] for s in self.segments]
+        self.assertEqual(kinds[:3], ["boot-header", "kernel", "filesystem"])
+
+    def test_the_uimage_header_names_the_kernel(self):
+        header = self.segments[0]["uimage"]
+        self.assertEqual(header["architecture"], "mips")
+        self.assertEqual(header["compression"], "lzma")
+        self.assertIn("Linux-5.10.176", header["name"])
+
+    def test_the_kernel_yields_its_version(self):
+        found = {h["sig"]["name"]: h["version"] for h in self.hits}
+        self.assertEqual(found.get("linux-kernel"), "5.10.176")
+
+    def test_a_mips_build_is_not_called_an_arm_toolchain(self):
+        """The generic GCC banner matches any target; the name must not lie."""
+        names = {h["sig"]["name"] for h in self.hits}
+        self.assertIn("gcc", names)
+        self.assertNotIn("gcc-arm-none-eabi", names)
+
+    def test_the_squashfs_rootfs_is_read(self):
+        image = next(s for s in self.segments
+                     if s["kind"] == "filesystem")["filesystem"]
+        self.assertEqual((image.version_major, image.version_minor), (4, 0))
+        self.assertEqual(image.compressor, "xz")
+        self.assertGreater(self.rootfs["file_count"], 3000)
+        self.assertEqual(image.warnings, [])
+
+    def test_the_distribution_is_identified(self):
+        release = self.rootfs["os_release"]
+        self.assertEqual(release["name"], "OpenWrt")
+        self.assertEqual(release["version"], "22.03.4")
+        self.assertEqual(release["architecture"], "mipsel_24kc")
+
+    def test_the_package_database_gives_exact_versions(self):
+        """The best component data a Linux firmware image contains."""
+        self.assertGreater(len(self.packages), 300)
+        self.assertTrue(all(p["version"] for p in self.packages),
+                        "every opkg entry carries a version")
+        by_name = {p["name"]: p["version"] for p in self.packages}
+        for name, version in [("busybox", "1.35.0-5"),
+                              ("dropbear", "2022.82-2"),
+                              ("libopenssl1.1", "1.1.1t-2"),
+                              ("zlib", "1.2.11-6"),
+                              ("libcurl4", "7.88.1-1")]:
+            with self.subTest(package=name):
+                self.assertEqual(by_name.get(name), version)
+
+    def test_packages_are_marked_as_database_evidence(self):
+        """A package record is not a heuristic and must not read like one."""
+        bom = core.build_sbom(
+            self.IMAGE, self.data, None,
+            {"label": None, "details": [], "looks_like_cortex_m": False},
+            self.hits, 6, 0, segments=self.segments, rootfs=self.rootfs,
+            packages=self.packages)
+        busybox = next(c for c in bom["components"] if c["name"] == "busybox")
+        props = {p["name"]: p["value"] for p in busybox["properties"]}
+        self.assertEqual(props["fw2sbom:evidence_class"], "package-database")
+        self.assertEqual(props["fw2sbom:version_source"], "package-database")
+        self.assertTrue(busybox["purl"].startswith("pkg:opkg/busybox@"))
+
+    def test_the_whole_image_produces_a_valid_sbom(self):
+        bom = core.build_sbom(
+            self.IMAGE, self.data, None,
+            {"label": None, "details": [], "looks_like_cortex_m": False},
+            self.hits, 6, 0, segments=self.segments, rootfs=self.rootfs,
+            packages=self.packages, firmware_version="4.3.25")
+        self.assertGreater(len(bom["components"]), 350)
+        refs = [c["bom-ref"] for c in bom["components"]]
+        self.assertEqual(len(refs), len(set(refs)))
+        self.assertEqual(bom["metadata"]["component"]["version"], "4.3.25")
+        # The distribution and the kernel are both operating-system components
+        # and both belong here: one is what the vendor shipped, the other is
+        # what it runs on, and a CVE feed has entries for each.
+        operating_systems = {c["name"]: c["version"] for c in bom["components"]
+                             if c["type"] == "operating-system"}
+        self.assertEqual(operating_systems.get("OpenWrt"), "22.03.4")
+        self.assertEqual(operating_systems.get("linux-kernel"), "5.10.176")
+
+    def test_a_real_image_is_analysed_in_reasonable_time(self):
+        """A customer waits for this in a browser."""
+        start = time.perf_counter()
+        core.analyze_segments(self.data, 6)
+        self.assertLess(time.perf_counter() - start, 60)
 
 
 if __name__ == "__main__":

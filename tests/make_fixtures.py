@@ -276,11 +276,17 @@ def build_random_flat():
 
 @fixture("router_uimage.bin")
 def build_router_uimage():
-    """Linux router image: uImage header, gzip kernel, squashfs rootfs.
+    """Linux router image: uImage header, gzip kernel, damaged squashfs.
 
-    Every component here is inside a compressed region, so fw2sbom finds none
-    of them today. This fixture is the Phase 2 target: the test asserts current
-    behaviour, and inverting that assertion is how the container walker lands.
+    Two things are under test. The kernel exercises the container walk and
+    decompression: its version banner is only reachable through the gzip
+    region, so finding it proves the walker works end to end.
+
+    The SquashFS superblock is deliberately well-formed enough to be
+    recognised but its tables are not real. A firmware analyser is fed images
+    from customers and vendors, and a damaged or truncated filesystem must
+    produce a warning and a partial result, never a traceback. Reading a real
+    SquashFS is covered by the corpus tests, which need an actual vendor image.
     """
     r = rng("router_uimage")
     kernel = strings_blob([
@@ -295,16 +301,34 @@ def build_router_uimage():
         "inflate 1.2.13 Copyright 1995-2022 Mark Adler",
     ]) * 8 + filler(r, 8192)
 
-    uimage_header = struct.pack(">IIIIIIII", 0x27051956, 0, 0, len(kernel),
-                                0x80000000, 0x80000000, 0, 0x05020200)
-    uimage_header += b"fw2sbom fixture kernel".ljust(32, b"\x00")
+    compressed_kernel = gzip.compress(kernel, 9)
+    # Trailing byte of the last word is the compression field: 1 = gzip. The
+    # header has to agree with the bytes, or the walker is being told to read
+    # a gzip region as if it were raw.
+    uimage_header = struct.pack(">IIIIIIII", 0x27051956, 0, 0,
+                                len(compressed_kernel),
+                                0x80000000, 0x80000000, 0, 0x05050201)
+    uimage_header += b"MIPS fixture Linux-5.10.110".ljust(32, b"\x00")
 
-    squashfs_super = b"hsqs" + struct.pack("<IIIIHHHHHH",
-                                           64, 0, 0x2000, 0, 0, 1, 1, 4, 0, 4)
-    squashfs_super = squashfs_super.ljust(96, b"\x00")
+    # A SquashFS 4.0 superblock claiming xz. inode/directory/fragment table
+    # offsets point past the end, so the reader must degrade rather than crash.
+    squashfs_super = b"hsqs" + struct.pack(
+        "<IIIIHHHHHHQQQQQQQQ",
+        16,                     # inode_count
+        0,                      # mtime
+        131072,                 # block_size
+        1,                      # fragment_count
+        4,                      # compressor: xz
+        17,                     # block_log
+        0,                      # flags
+        1,                      # id_count
+        4, 0,                   # version 4.0
+        0,                      # root inode reference
+        4096,                   # bytes_used
+        0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF, 0xFFFFFF)
 
     return (uimage_header
-            + gzip.compress(kernel, 9)
+            + compressed_kernel
             + b"\xff" * 1024                      # blank flash between volumes
             + squashfs_super + gzip.compress(rootfs, 9)
             + b"\xff" * 4096)

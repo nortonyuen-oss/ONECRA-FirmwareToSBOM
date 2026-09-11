@@ -1,14 +1,17 @@
 # fw2sbom
 
 Evidence-based **CycloneDX 1.6 / SPDX 2.3** SBOM generator for embedded firmware images
-(`.bin`):ARM Cortex-M / Zephyr-style 映像、MCS-51(8051)映像(顯示控制器 /
-monitor scaler 韌體),以及廠商 **packetized / ISP-dump** 格式(自動去框)。
+(`.bin`):Linux 裝置(router / gateway / NVR:uImage + 壓縮 kernel + SquashFS
+rootfs)、ARM Cortex-M 映像、MCS-51(8051)映像(顯示控制器 / monitor scaler
+韌體),以及廠商 **packetized / ISP-dump** 格式(自動去框)。
 Designed to run out-of-the-box on Kali Linux (Python 3.9+, stdlib only — no pip
 dependencies).
 
 ## 分析流程 (Pipeline)
 
 0. **封包容器偵測與去框 (de-framing)** — 見下方〈封包化映像〉
+0.5 **容器走訪與解壓** — uImage 檔頭、壓縮區段、SquashFS 檔案系統;每個區段
+   各自分析,rootfs 內的套件資料庫直接讀出(見下方〈Linux 裝置韌體〉)
 1. **Binary fingerprint 與指令集判定**
    - `file(1)` / libmagic 判讀(若系統有 `file` 指令,Kali 預設有)
    - SHA-256 / SHA-1 / MD5 hash
@@ -179,6 +182,56 @@ component(帶 payload 的 SHA-256/SHA-1/MD5、entropy 等 evidence,confidence 0.
 [fw2sbom]   - 338 repeated 16-byte aligned block(s): possible ECB-mode or repeating-keystream encryption
 [fw2sbom] recorded as a single opaque component; obtain a plaintext image or the vendor's SBOM to complete it
 ```
+
+## Linux 裝置韌體 (router / gateway / NVR)
+
+MCU 映像是一整塊平坦資料,掃字串就能找到所有東西。Linux 裝置映像不是:它是
+一個開機檔頭、一段壓縮過的 kernel、再一個壓縮過的根檔案系統,而**所有值得寫進
+SBOM 的東西都在壓縮區段裡面**。對原始位元組做字串掃描會得到零個元件 —— 這正是
+本工具在 v1.6.0 對一台真實 router 給出的結果:判定正確(「compressed」),SBOM
+完全是空的。
+
+v1.7.0 起會走訪容器:
+
+```
+[fw2sbom] segment 0x00000000 U-Boot uImage header (Linux/mips) (expanded)
+[fw2sbom] segment 0x00000040 Linux kernel (lzma) (expanded)
+[fw2sbom] segment 0x0023ec0d SquashFS 4.0 (xz) (read)
+[fw2sbom] distribution: OpenWrt 22.03.4 r20123-38ccc47687
+[fw2sbom] 359 package(s) from /usr/lib/opkg/status (opkg), 359 with exact versions
+[fw2sbom] 366 component(s) identified
+```
+
+| 來源 | 取得什麼 | Confidence |
+|---|---|---|
+| uImage 檔頭 | OS、架構、壓縮方式;OpenWrt 會把 kernel 版本寫進 name 欄位 | — |
+| 解壓後的 kernel | `Linux version`、GCC、binutils 版本 | 0.9–0.97 |
+| SquashFS rootfs | 檔案清單 | — |
+| `/etc/openwrt_release`、`/etc/os-release` | 發行版名稱與版本 | 0.97 |
+| **套件資料庫** | **每個已安裝套件的精確版本** | 0.97 |
+
+最後一項是 Linux 韌體 SBOM 品質的主要來源。`/usr/lib/opkg/status`(以及 dpkg、
+apk 的對應檔案)不是啟發式猜測,而是套件管理器自己的安裝紀錄。一份 14 MB 的
+router 映像可以得到三百多個帶精確版本的元件。
+
+### 支援與不支援
+
+| | 狀態 |
+|---|---|
+| 容器 | U-Boot legacy uImage;任意位置的壓縮區段 |
+| 解壓 | gzip、xz、lzma、bzip2(全部 stdlib) |
+| 未支援解壓 | lzo、lz4、zstd —— **會明確報告「未展開」並指名演算法**,不會靜默跳過 |
+| 檔案系統 | SquashFS 4.0(gzip / xz / lzma 壓縮) |
+| 未支援檔案系統 | JFFS2、UBIFS、CramFS |
+| 套件資料庫 | opkg、dpkg、apk |
+
+### 對不可信輸入的處理
+
+韌體來自客戶與供應商,不能假設它是善意的。SquashFS reader 對深度、entry 數、
+單檔大小與總解壓量都設了上限,並且做目錄迴圈偵測 —— 一個惡意構造的映像不可以
+讓分析器當掉、耗盡記憶體或無限遞迴。**任何一處讀不下去都不會拋例外**:會記錄
+一筆警告、回報讀得到的部分,並在 SBOM 的 segment 屬性裡寫明哪裡讀不到。
+「這個映像有一部分讀不了」本身是一項發現,traceback 不是。
 
 ## SBOM 格式:CycloneDX 與 SPDX
 
@@ -491,7 +544,17 @@ python -m unittest discover -s tests -v
 ```
 
 測試用的韌體映像是跑的時候即時合成的(`tests/make_fixtures.py`,固定 seed,
-每次產出 byte-identical),不進倉庫。涵蓋:架構判定、去框(含框架在後的已知
+每次產出 byte-identical),不進倉庫。
+
+另外有一組 **corpus 測試**,跑在真實的廠商韌體上(GL.iNet GL-MT300N-V2,
+OpenWrt 22.03.4,MIPS)。合成 fixture 只能證明解析器符合規格書;真實映像才能
+證明它扛得住廠商實際出貨的東西 —— 而那正是韌體解析通常出事的地方。映像不進
+倉庫,用以下指令取得,沒有它時這組測試會 skip:
+
+```bash
+python scripts/fetch-corpus.py
+```
+涵蓋:架構判定、去框(含框架在後的已知
 限制)、opacity 判定、簽章比對與版本擷取、EDID/MCCS 結構解析、SBOM 結構與
 bom-ref 一致性、Excel 報告、service 的記憶體存放區。
 
@@ -513,8 +576,10 @@ schema 沒抓下來或沒裝 `jsonschema` 時,該項測試會 skip 而不是假�
 
 - 萃取 ASCII 與 UTF-16LE 字串;不做反組譯、不做 code-similarity(FLIRT/BinDiff
   類)比對
-- **不會走訪壓縮容器**:Linux 類韌體(uImage/FIT + gzip kernel + squashfs rootfs)
-  的元件全在壓縮區段內,目前一個都找不到。壓縮 magic 只在檔案開頭檢查
+- 容器走訪目前只認 U-Boot legacy uImage;FIT、TRX 與各家廠商自訂檔頭尚未支援
+- 檔案系統只支援 SquashFS 4.0;JFFS2 / UBIFS / CramFS 會被偵測到但讀不出內容
+- 不做逐個 ELF 的分析(`.comment`、`NEEDED` 依賴);目前 rootfs 的元件全部來自
+  套件資料庫,沒有資料庫的映像只會得到檔案清單
 - 指令集判定僅涵蓋 ARM Cortex-M 與 MCS-51;其他架構(RISC-V、Xtensa、8051 以外
   的 8-bit 核心)會回報「未識別」,分析仍會繼續但少了架構這條證據
 - 8051 韌體通常由 Keil C51 等專有工具鏈編譯、內容多為廠商自有程式碼,不一定含
@@ -532,6 +597,8 @@ fw2sbom/
 ├── fw2sbom.py              # 主程式(CLI)
 ├── evidence_report.py      # Excel 證據報告產生器(stdlib-only xlsx writer)
 ├── spdx_report.py          # SPDX 2.3 JSON 輸出(由 CycloneDX 文件轉換)
+├── container.py            # 容器走訪、解壓、套件資料庫解析
+├── squashfs.py             # 唯讀 SquashFS 4.0 reader(stdlib only)
 ├── service.py              # 拖拉式本機網頁服務(localhost drag-and-drop UI)
 ├── onecra_logo.png         # 頁首品牌 logo(service.py 內嵌用)
 ├── onecra_icon.png         # 瀏覽器分頁 favicon(service.py 內嵌用)
@@ -549,6 +616,7 @@ fw2sbom/
 │   ├── build-portable.ps1        # 打包免簽章 portable 版(驗 hash + smoke test)
 │   ├── make_deterministic_zip.py # 可重現的 zip writer(固定排序/timestamp)
 │   ├── Start-fw2sbom.bat         # portable 版的啟動器(會被複製進包裡)
+│   ├── fetch-corpus.py           # 下載 corpus 測試用的真實廠商韌體
 │   └── python-embed.sha256       # 釘住的官方 CPython embeddable hash
 ├── .github/workflows/ci.yml      # Linux + Windows 測試、schema 驗證、可重現打包
 ├── fw2sbom-service.spec    # PyInstaller 設定(datas 帶 signatures/ 與 PNG)

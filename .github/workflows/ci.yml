@@ -66,6 +66,32 @@ jobs:
           python -c "import fw2sbom; s = fw2sbom.load_signatures(); print(len(s), 'signatures from', fw2sbom.SIGNATURE_PACKS)"
           python -c "import spdx_report; print('spdx renderer', spdx_report.SPDX_VERSION)"
 
+  real-firmware:
+    name: Real vendor firmware
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # Synthetic fixtures prove the parsers follow the specifications. Only a
+      # real image proves they survive what a vendor actually shipped - which
+      # is where firmware parsing usually breaks. Kept out of the matrix so the
+      # download happens once, and allowed to fail the build if the vendor's
+      # image stops parsing.
+      - name: Fetch the corpus
+        run: python scripts/fetch-corpus.py
+
+      - name: Analyse it end to end
+        run: |
+          python fw2sbom.py corpus/router/openwrt-mt300n-v2-4.3.25.bin             -d "$RUNNER_TEMP/out" --format both --pretty -v
+          ls -l "$RUNNER_TEMP/out"
+
+      - name: Run the corpus tests
+        run: python -m unittest discover -s tests -k RealFirmware -v
+
   portable-package:
     name: Portable package (Windows)
     runs-on: windows-latest

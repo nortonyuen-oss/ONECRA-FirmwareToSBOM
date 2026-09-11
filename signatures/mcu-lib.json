@@ -117,21 +117,21 @@
       "name": "gcc-arm-none-eabi",
       "supplier": "GNU Project",
       "type": "application",
-      "purl": "pkg:generic/gcc",
-      "description": "GCC toolchain (compiler identification strings)",
+      "purl": "pkg:generic/gcc-arm-none-eabi",
+      "description": "GCC configured for bare-metal ARM (arm-none-eabi / arm-zephyr-eabi)",
       "patterns": [
         {
-          "regex": "GCC:? \\([^)]*\\) ([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "regex": "GCC:? \\([^)]*(?:[Aa]rm|ARM) Embedded[^)]*\\) ([0-9]+\\.[0-9]+\\.[0-9]+)",
           "weight": 0.9,
           "vgroup": 1
         },
         {
           "regex": "arm-none-eabi-gcc",
-          "weight": 0.6
+          "weight": 0.7
         },
         {
           "regex": "arm-zephyr-eabi",
-          "weight": 0.5
+          "weight": 0.6
         }
       ]
     },

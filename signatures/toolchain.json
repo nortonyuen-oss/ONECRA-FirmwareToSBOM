@@ -1,0 +1,43 @@
+{
+  "pack": "toolchain",
+  "description": "Compiler and linker identification strings, which appear in any image built by the toolchain regardless of target architecture.",
+  "signatures": [
+    {
+      "name": "gcc",
+      "supplier": "GNU Project",
+      "type": "application",
+      "purl": "pkg:generic/gcc",
+      "description": "GNU Compiler Collection (version string left in .comment)",
+      "patterns": [
+        {
+          "regex": "GCC:? \\([^)]*\\) ([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "gcc version ([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        }
+      ]
+    },
+    {
+      "name": "gnu-binutils",
+      "supplier": "GNU Project",
+      "type": "application",
+      "purl": "pkg:generic/binutils",
+      "description": "GNU Binutils (linker version recorded in the image)",
+      "patterns": [
+        {
+          "regex": "GNU ld \\(GNU Binutils[^)]*\\) ([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "GNU Binutils",
+          "weight": 0.5
+        }
+      ]
+    }
+  ]
+}

@@ -42,11 +42,12 @@ import sys
 import uuid
 from datetime import datetime, timezone
 
+import container
 import evidence_report
 import spdx_report
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.6.0"
+TOOL_VERSION = "1.7.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1113,12 +1114,119 @@ def confidence_level(c):
 
 
 # --------------------------------------------------------------------------- #
+# Segment analysis
+# --------------------------------------------------------------------------- #
+
+def analyze_segments(payload, min_str_len=6, verbose=False):
+    """Split a payload into containers and analyse each one separately.
+
+    A flat microcontroller image produces exactly one segment covering the
+    whole payload, so its analysis is unchanged. A Linux image produces a boot
+    header, a decompressed kernel, a filesystem and whatever is left, and each
+    is scanned on its own - which is the only way the components inside a
+    compressed region are ever seen.
+
+    Returns (segments, rootfs, warnings). Each analysed segment gains
+    `strings`, `hits` and `opacity`; `rootfs` is the filesystem contents if one
+    was readable.
+    """
+    log_fn = (lambda msg: log(msg, verbose)) if verbose else None
+    segments, warnings = container.walk(payload, verbose, log_fn)
+
+    # Nothing recognised: treat the payload as one segment, exactly as the
+    # tool did before containers existed.
+    if not segments or all(seg["kind"] == "unclaimed" for seg in segments):
+        segments = [{"kind": "image", "offset": 0, "length": len(payload),
+                     "label": "firmware image", "content": payload,
+                     "expanded": False, "warnings": []}]
+
+    rootfs = None
+    for segment in segments:
+        if segment["kind"] == "filesystem" and rootfs is None:
+            rootfs = container.inspect_filesystem(segment, verbose, log_fn)
+        content = segment["content"]
+        if content is None:
+            segment["strings"], segment["hits"] = [], []
+            continue
+        segment["strings"] = extract_strings(content, min_str_len)
+        segment["hits"] = match_signatures(segment["strings"], False)
+        infer_versions(segment["hits"], False)
+        if segment["hits"]:
+            log(f"segment {segment['label']}: {len(segment['hits'])} component(s) "
+                f"from {len(segment['strings'])} strings", verbose)
+
+    return segments, rootfs, warnings
+
+
+def merge_segment_hits(segments):
+    """One component per name, carrying evidence from every segment it is in.
+
+    A library linked into both the kernel and a userland binary is one
+    component, not two; but which segments it was found in is evidence worth
+    keeping, so the occurrences list names all of them.
+    """
+    merged = {}
+    for segment in segments:
+        for hit in segment.get("hits", []):
+            name = hit["sig"]["name"]
+            hit = dict(hit)
+            hit["segment"] = segment["label"]
+            hit["segment_offset"] = segment["offset"]
+            existing = merged.get(name)
+            if existing is None:
+                hit["segments"] = [segment["label"]]
+                merged[name] = hit
+                continue
+            existing["segments"].append(segment["label"])
+            # Prefer the better-evidenced sighting, and never lose a version.
+            if hit["confidence"] > existing["confidence"]:
+                hit["segments"] = existing["segments"]
+                hit["version"] = existing["version"] or hit["version"]
+                merged[name] = hit
+            elif hit["version"] and not existing["version"]:
+                existing["version"] = hit["version"]
+                if hit.get("version_inferred"):
+                    existing["version_inferred"] = hit["version_inferred"]
+    return sorted(merged.values(), key=lambda h: -h["confidence"])
+
+
+def packages_to_components(rootfs):
+    """Turn an on-image package database into component records.
+
+    These are a different class of evidence from a signature match. A version
+    banner in a binary is a heuristic; the package manager's status file is the
+    build system's own record of what it installed. Confidence is 0.97 - the
+    same ceiling everything else obeys, because the file still had to be read
+    out of a firmware image that could have been altered.
+    """
+    if not rootfs or not rootfs.get("packages"):
+        return []
+    database = rootfs["packages"]
+    components = []
+    for package in database["packages"]:
+        purl = f"{package['purl_type']}/{package['name']}"
+        if package["version"]:
+            purl += f"@{package['version']}"
+        components.append({
+            "name": package["name"],
+            "version": package["version"],
+            "purl": purl,
+            "description": package["description"][:400],
+            "manager": database["manager"],
+            "source_path": database["path"],
+            "architecture": package["architecture"],
+            "confidence": 0.97 if package["version"] else 0.9,
+        })
+    return components
+
+
+# --------------------------------------------------------------------------- #
 # CycloneDX 1.6 output
 # --------------------------------------------------------------------------- #
 
 def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_strings,
                container=None, opacity=None, payload=None, standards=None,
-               firmware_version=None):
+               firmware_version=None, segments=None, rootfs=None, packages=None):
     fname = os.path.basename(input_path)
     hashes = file_hashes(data)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1141,6 +1249,25 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         fw_props.append({"name": "fw2sbom:vector_table_detail", "value": d})
     if file_magic:
         fw_props.append({"name": "fw2sbom:file_magic", "value": file_magic})
+    for i, segment in enumerate(segments or [], 1):
+        detail = (f"{segment['kind']} at 0x{segment['offset']:x}, "
+                  f"{segment['length']} bytes: {segment['label']}")
+        if segment.get("expanded"):
+            detail += f" (expanded to {len(segment['content'])} bytes)"
+        elif segment["content"] is None and segment["kind"] != "filesystem":
+            detail += " (not expanded)"
+        for warning in segment.get("warnings", [])[:2]:
+            detail += f" [{warning}]"
+        fw_props.append({"name": f"fw2sbom:segment_{i}", "value": detail})
+    if rootfs:
+        fw_props.append({"name": "fw2sbom:rootfs_files",
+                         "value": str(rootfs["file_count"])})
+        if rootfs.get("packages"):
+            fw_props.append({"name": "fw2sbom:package_database",
+                             "value": f"{rootfs['packages']['path']} "
+                                      f"({rootfs['packages']['manager']}, "
+                                      f"{len(rootfs['packages']['packages'])} entries)"})
+
     if container:
         fw_props += [
             {"name": "fw2sbom:container", "value": "packetized-record-framing"},
@@ -1186,13 +1313,14 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         ref = f"component-{i}-{sig['name']}"
         exact_version = hit["version"] and not hit.get("version_inferred")
         purl = sig["purl"] + (f"@{hit['version']}" if exact_version else "")
+        where = hit.get("segment") or offset_space
         methods = []
         for pat, offset, text, _v in hit["evidence"]:
             methods.append({
                 "technique": "binary-analysis",
                 "confidence": pat["weight"],
                 "value": f"regex '{pat['regex']}' matched '{text}' "
-                         f"at offset 0x{offset:x} of the {offset_space}",
+                         f"at offset 0x{offset:x} of the {where}",
             })
         comp = {
             "type": sig["type"],
@@ -1210,7 +1338,7 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
                     "location": fname,
                     "additionalContext":
                         f"first match at offset 0x{hit['evidence'][0][1]:x} "
-                        f"of the {offset_space}",
+                        f"of the {where}",
                 }],
             },
             "properties": [
@@ -1221,6 +1349,10 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         }
         if sig.get("supplier"):
             comp["supplier"] = {"name": sig["supplier"]}
+        if hit.get("segments"):
+            comp["properties"].append(
+                {"name": "fw2sbom:found_in_segments",
+                 "value": ", ".join(hit["segments"])})
         if hit["version"]:
             comp["version"] = hit["version"]
             inferred = hit.get("version_inferred")
@@ -1290,6 +1422,86 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             comp["properties"].append({"name": "fw2sbom:version_source",
                                        "value": "parsed-from-structure"})
         components.append(comp)
+        dep_refs.append(ref)
+
+    # Packages read from the image's own package database. This is a
+    # different class of evidence from a signature match: not a version banner
+    # found in a binary, but the package manager's record of what was
+    # installed. It is the best component data a Linux firmware image contains.
+    for i, package in enumerate(packages or [], 1):
+        ref = f"package-{i}-{package['name']}"
+        evidence_value = (
+            f"listed in {package['source_path']} "
+            f"({package['manager']} package database) with version "
+            f"{package['version'] or 'unset'}")
+        comp = {
+            "type": "library",
+            "bom-ref": ref,
+            "name": package["name"],
+            "description": package["description"],
+            "purl": package["purl"],
+            "evidence": {
+                "identity": [{
+                    "field": "name",
+                    "confidence": package["confidence"],
+                    "methods": [{"technique": "filename",
+                                 "confidence": package["confidence"],
+                                 "value": evidence_value}],
+                }],
+                "occurrences": [{"location": package["source_path"]}],
+            },
+            "properties": [
+                {"name": "fw2sbom:confidence", "value": str(package["confidence"])},
+                {"name": "fw2sbom:confidence_level",
+                 "value": confidence_level(package["confidence"])},
+                {"name": "fw2sbom:evidence_class", "value": "package-database"},
+                {"name": "fw2sbom:package_manager", "value": package["manager"]},
+            ],
+        }
+        if package["architecture"]:
+            comp["properties"].append({"name": "fw2sbom:target_architecture",
+                                       "value": package["architecture"]})
+        if package["version"]:
+            comp["version"] = package["version"]
+            comp["evidence"]["identity"].append({
+                "field": "version",
+                "confidence": package["confidence"],
+                "methods": [{"technique": "filename",
+                             "confidence": package["confidence"],
+                             "value": evidence_value}],
+            })
+            comp["properties"].append({"name": "fw2sbom:version_source",
+                                       "value": "package-database"})
+        components.append(comp)
+        dep_refs.append(ref)
+
+    # The distribution itself, when the rootfs names it.
+    release = (rootfs or {}).get("os_release")
+    if release:
+        ref = "operating-system"
+        detail = [f"{k} = {v}" for k, v in sorted(release["fields"].items())]
+        components.append({
+            "type": "operating-system",
+            "bom-ref": ref,
+            "name": release["name"],
+            "version": release["version"] or "unknown",
+            "description": release["description"],
+            "evidence": {
+                "identity": [{
+                    "field": "name",
+                    "confidence": 0.97,
+                    "methods": [{"technique": "filename", "confidence": 0.97,
+                                 "value": f"read from {release['path']}"}],
+                }],
+                "occurrences": [{"location": release["path"]}],
+            },
+            "properties": ([
+                {"name": "fw2sbom:evidence_class", "value": "os-release-file"},
+                {"name": "fw2sbom:confidence", "value": "0.97"},
+                {"name": "fw2sbom:confidence_level", "value": "high"},
+            ] + [{"name": f"fw2sbom:distribution_detail", "value": d}
+                 for d in detail[:12]]),
+        })
         dep_refs.append(ref)
 
     if opacity and opacity["opaque"] and payload is not None:
@@ -1544,24 +1756,42 @@ def main(argv=None):
 
     standards = detect_embedded_standards(payload, args.verbose)
 
-    strings = extract_strings(payload, args.min_str_len)
-    log(f"extracted {len(strings)} strings (min length {args.min_str_len})", args.verbose)
+    segments, rootfs, seg_warnings = analyze_segments(
+        payload, args.min_str_len, args.verbose)
+    for warning in seg_warnings:
+        log(f"container warning: {warning}", True)
+
+    strings = [pair for segment in segments
+               for pair in segment.get("strings", [])]
+    log(f"extracted {len(strings)} strings across {len(segments)} segment(s) "
+        f"(min length {args.min_str_len})", args.verbose)
 
     if args.dump_strings:
         try:
             with open(args.dump_strings, "w", encoding="utf-8") as f:
-                for off, s in strings:
-                    f.write(f"0x{off:08x}\t{s}\n")
+                for segment in segments:
+                    for off, text in segment.get("strings", []):
+                        f.write(f"0x{off:08x}\t{segment['label']}\t{text}\n")
         except OSError as e:
             die(f"cannot write strings dump: {e}")
 
-    hits = match_signatures(strings, args.verbose)
-    infer_versions(hits, args.verbose)
-    opacity = reconcile_opacity(opacity, hits, standards, args.verbose)
+    hits = merge_segment_hits(segments)
+    packages = packages_to_components(rootfs)
+    for hit in hits:
+        log(f"match: {hit['sig']['name']} confidence={hit['confidence']} "
+            f"version={hit['version']}", args.verbose)
+    if packages:
+        log(f"{len(packages)} package(s) read from the on-image database",
+            args.verbose)
+
+    # Components read out of the payload settle the opacity question, and a
+    # package database is the most decisive evidence of all.
+    opacity = reconcile_opacity(opacity, hits + packages, standards, args.verbose)
     bom = build_sbom(args.input, data, file_magic, arm_info, hits,
                      args.min_str_len, len(strings),
                      container=container, opacity=opacity, payload=payload,
-                     standards=standards, firmware_version=args.firmware_version)
+                     standards=standards, firmware_version=args.firmware_version,
+                     segments=segments, rootfs=rootfs, packages=packages)
 
     stem = os.path.splitext(os.path.basename(args.input))[0]
     want_cdx = args.format in ("cyclonedx", "both")
@@ -1613,7 +1843,8 @@ def main(argv=None):
     if arm_info["label"]:
         print(f"[fw2sbom] architecture: {arm_info['label']}", file=sys.stderr)
 
-    total = len(hits) + len(standards)
+    total = len(hits) + len(standards) + len(packages) + (1 if rootfs and
+                                                          rootfs.get("os_release") else 0)
     if evidence_path:
         context = build_evidence_context(
             os.path.basename(args.input), data, payload, arm_info, container,
@@ -1629,6 +1860,23 @@ def main(argv=None):
     print(f"[fw2sbom] {total} component(s) identified", file=sys.stderr)
     for line in written:
         print(f"[fw2sbom]   {line}", file=sys.stderr)
+    for segment in segments:
+        if segment["kind"] == "image":
+            continue
+        state = ("expanded" if segment.get("expanded")
+                 else "read" if segment["kind"] == "filesystem"
+                 else "not expanded")
+        print(f"[fw2sbom] segment 0x{segment['offset']:08x} "
+              f"{segment['label']} ({state})", file=sys.stderr)
+    if rootfs and rootfs.get("os_release"):
+        release = rootfs["os_release"]
+        print(f"[fw2sbom] distribution: {release['description']}", file=sys.stderr)
+    if packages:
+        database = rootfs["packages"]
+        versioned = sum(1 for p in packages if p["version"])
+        print(f"[fw2sbom] {len(packages)} package(s) from {database['path']} "
+              f"({database['manager']}), {versioned} with exact versions",
+              file=sys.stderr)
     for h in hits:
         v = h["version"] or "?"
         print(f"[fw2sbom]   {h['sig']['name']:<22} version={v:<12} "

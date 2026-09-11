@@ -407,15 +407,18 @@ def analyze_bytes(filename, data):
     arm_info = core.analyze_architecture(payload)
     opacity = core.analyze_opacity(payload, arm_info["label"])
     standards = core.detect_embedded_standards(payload)
-    strings = core.extract_strings(payload, 6)
-    hits = core.match_signatures(strings, False)
-    core.infer_versions(hits, False)
-    opacity = core.reconcile_opacity(opacity, hits, standards)
+    segments, rootfs, _warnings = core.analyze_segments(payload, 6, False)
+    strings = [pair for segment in segments
+               for pair in segment.get("strings", [])]
+    hits = core.merge_segment_hits(segments)
+    packages = core.packages_to_components(rootfs)
+    opacity = core.reconcile_opacity(opacity, hits + packages, standards)
     name = filename or "firmware.bin"
     stem = os.path.splitext(os.path.basename(name))[0]
     bom = core.build_sbom(name, data, None, arm_info, hits, 6,
                           len(strings), container=container, opacity=opacity,
-                          payload=payload, standards=standards)
+                          payload=payload, standards=standards,
+                          segments=segments, rootfs=rootfs, packages=packages)
 
     spdx = spdx_report.build_spdx(bom, name, core.TOOL_NAME, core.TOOL_VERSION)
     sbom_filename = stem + "_SBOM.cdx.json"
@@ -436,7 +439,13 @@ def analyze_bytes(filename, data):
         "confidence": s["confidence"],
         "confidence_level": core.confidence_level(s["confidence"]),
         "evidence_class": "embedded-standard-data",
-    } for s in standards]
+    } for s in standards] + [{
+        "name": p["name"],
+        "version": p["version"],
+        "confidence": p["confidence"],
+        "confidence_level": core.confidence_level(p["confidence"]),
+        "evidence_class": "package-database",
+    } for p in packages]
     return {
         "sbom_json": json.dumps(bom, indent=2),
         "sbom_filename": sbom_filename,

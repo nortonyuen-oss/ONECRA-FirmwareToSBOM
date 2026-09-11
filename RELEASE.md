@@ -31,6 +31,106 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.7.0
+
+| | |
+|---|---|
+| Tag | `v1.7.0` |
+| Build 日期 | 2026-09-11 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 2(第一階段)**:Linux 裝置韌體。Router / gateway / NVR 由
+「0 個元件」變成「完整套件清單」。
+
+### 對真實韌體嘅效果
+
+GL.iNet GL-MT300N-V2(Mango),OpenWrt 22.03.4,MIPS,14.6 MB:
+
+| | v1.6.0 | v1.7.0 |
+|---|---|---|
+| 元件數 | **0** | **366** |
+| 判定 | `opaque (compressed)` | 逐區段分析 |
+| 帶精確版本 | 0 | 362 |
+| 分析時間 | 6.7 秒 | 10.2 秒 |
+
+搵到嘅嘢包括 OpenWrt 22.03.4、Linux 5.10.176、GCC 11.2.0、binutils 2.37,
+加上 opkg 資料庫入面 359 個套件嘅精確版本 —— BusyBox 1.35.0、OpenSSL 1.1.1t、
+dropbear 2022.82、curl 7.88.1、zlib 1.2.11、nginx 1.17.7、OpenVPN 2.5.7 等等。
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,209,894 bytes |
+| SHA-256 | `736095fff98937ad8571b923d72e9b89759ef4d5a192c6f50fca5348449d8543` |
+| 內容 | 50 個檔案(多咗 `container.py`、`squashfs.py`、`toolchain.json`) |
+| Reproducible | 是 —— `.\scripts\build-portable.ps1` |
+
+### PyInstaller 單檔 exe
+
+**呢個版本冇 build。** 用 `pyinstaller fw2sbom-service.spec`。
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `2693c306e15a2baa48fbc3de55af581f335e863c28d057a143f3641c0408c3d4` |
+| `container.py` | `322f3e638388c7e50122fa689c8b1c50c2e1458db71d799ac2cd30c5290ed510` |
+| `squashfs.py` | `0ff94cf6468983c694ebdccd71a9c85799c5de21fe00674747311ffccaf92326` |
+| `service.py` | `08f4f58f72db7eb594918dad3d283959475a8f47ffd33bc4612791522c9abecc` |
+| `evidence_report.py` | `5d22a065d38f2213ac9f7a4c310f135ca75bfa914e413b1f0ba14e43a65bbdcc` |
+| `spdx_report.py` | `ba3f0a59854c530d849ca830d1492b551760d78f3de25bffa65575542b2c97aa` |
+| `onecra_logo.png` | `a870f4d03b9bdbcc4c6bbc0077c09872bfe49a627400338a46d42a72b4a0c589` |
+| `onecra_icon.png` | `21b5280d2f905b5c7ccbcd1b8f284371f24e374e212f71a2838813f98b7596a1` |
+| `Start-fw2sbom.bat` | `1c52c4f0c7d2cae205dc199475c8a666e20e180a7301b7354499c1106a7adee5` |
+| `signatures/linux.json` | `699af29a5c54c678820bfdf928b7ecbef211012b5bf9ada9b3cd94edfbbddba4` |
+| `signatures/mcu-lib.json` | `167b56b5107e1eb4bc8474a812cea962b916e0c8de712d0af62668c4d37bce8d` |
+| `signatures/mcu-rtos.json` | `b87ccae1c638bd469f2c6d6766c54fc800ec7cee669fa1eba93235f8446271e3` |
+| `signatures/toolchain.json` | `ab1f9a59e1c7c1011cee3f9e5b38777b8135153ef4e14856730fd9ef1a4c2c08` |
+| `signatures/vendor-nordic.json` | `fef65845009fb7cb2d1522ffd03dbc087d2c725a4c03af06cdf4ff11ccabad3c` |
+| `signatures/vendor-st.json` | `fe10c9a08959248b3bb00e847c2c69bcd4bbe4c9d8c2bb7d37b0c842cbccaf0d` |
+
+### 新增
+
+- **`container.py`** —— 容器走訪:U-Boot legacy uImage 檔頭、任意位置嘅壓縮區段、
+  SquashFS superblock。每個區段獨立分析,SBOM 記低成個 segment map。
+  解壓支援 gzip / xz / lzma / bzip2(全部 stdlib)。**lzo / lz4 / zstd 會明確
+  報告「未展開」並指名演算法**,唔會靜默跳過。
+- **`squashfs.py`** —— 唯讀 SquashFS 4.0 reader,純 stdlib。真實 12 MB rootfs
+  走訪 3274 個檔案用 0.02 秒。
+- **套件資料庫解析** —— opkg / dpkg / apk。呢個係 Linux 韌體 SBOM 品質嘅主要
+  來源:唔係從 binary 估版本,而係套件管理員自己嘅安裝紀錄。
+  `fw2sbom:evidence_class = package-database`。
+- **發行版識別** —— `/etc/openwrt_release`、`/etc/os-release`。
+- **`scripts/fetch-corpus.py`** 同 corpus 測試 —— 跑喺真實廠商韌體上。
+  合成 fixture 只證明解析器符合規格書;真實映像先證明佢扛得住廠商實際出貨嘅嘢。
+  CI 有獨立 job 跑呢組。
+- 新簽章包 `toolchain.json`:通用 `gcc` 同 `gnu-binutils`。
+
+### 修正
+
+- **`gcc-arm-none-eabi` 會喺任何 GCC 編譯嘅映像上命中**,包括 MIPS。佢最高權重
+  嘅 pattern 係通用嘅 `GCC: (...) x.y.z`,同個名完全唔夾 —— 喺稽核文件入面報
+  「MIPS router 用 arm-none-eabi 工具鏈」係一句錯嘅陳述。通用嗰部分已拆去新嘅
+  `gcc` 簽章;`gcc-arm-none-eabi` 而家淨係認 ARM 專屬字串。
+
+### 對不可信輸入嘅處理
+
+SquashFS reader 對深度、entry 數、單檔大小同總解壓量都設上限,並做目錄迴圈
+偵測。呢啲唔係理論問題:開發期間一個**正常**嘅 OpenWrt rootfs 就令早期版本
+遞迴咗 1000 層(當時係另一個 bug),而惡意構造嘅映像更加唔可以令分析器當掉或
+耗盡記憶體。任何讀唔到嘅地方都唔會拋例外 —— 記一筆警告、回報讀得到嘅部分、
+喺 SBOM segment 屬性寫明。
+
+### 測試
+
+88 個(由 73 增加)。新增 container、SquashFS 同 corpus 三組。
+`KnownGapTest`(斷言「壓縮 Linux 韌體搵唔到嘢」)如預期失效,已換成
+`ContainerTest` 斷言相反嘅能力 —— 呢個就係 roadmap 項目完成嘅訊號。
+
+---
+
 ## v1.6.0
 
 | | |

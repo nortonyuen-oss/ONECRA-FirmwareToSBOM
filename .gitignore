@@ -16,3 +16,6 @@ dist-portable/
 tests/fixtures/
 # Third-party schemas fetched for validation (python tests/fetch_schema.py)
 tests/schema/
+
+# Real vendor firmware for the corpus tests (python scripts/fetch-corpus.py)
+corpus/
