@@ -1,0 +1,534 @@
+<title>fw2sbom</title>
+<meta name="description" content="從韌體二進位映像產生 CycloneDX 1.6 / SPDX 2.3 SBOM,每個元件都帶證據與 confidence。免安裝、免簽章、可重現。">
+<link rel="icon" href="onecra_icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<style>
+  :root {
+    /* Sampled from the Onecra mark: navy ink, crimson, teal. */
+    --navy: #010D32;
+    --navy-2: #07104C;
+    --navy-3: #141F5C;
+    --crimson: #E30040;
+    --crimson-dim: #B00032;
+    --teal: #009B93;
+    --teal-soft: #E0F2F1;
+
+    --paper: #F5F6F8;          /* cool neutral, biased toward the navy */
+    --surface: #FFFFFF;
+    --surface-2: #ECEFF4;
+    --ink: #101528;
+    --ink-2: #47506B;
+    --ink-3: #78829C;
+    --rule: #D6DAE2;
+    --on-dark: #E9ECF4;
+    --on-dark-2: #9AA4C4;
+    --on-dark-rule: #26305F;
+
+    --display: "Archivo", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+    --sans: "IBM Plex Sans", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0A0F22;
+      --surface: #111832;
+      --surface-2: #19203F;
+      --ink: #E7EAF3;
+      --ink-2: #AEB6CE;
+      --ink-3: #7D87A4;
+      --rule: #242C4C;
+      --teal-soft: #0C2E2C;
+      /* The brand crimson is too dark to sit on a dark ground; lift it just
+         enough to stay legible without leaving the brand. */
+      --crimson: #FF3D68;
+      --crimson-dim: #E30040;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0A0F22;
+    --surface: #111832;
+    --surface-2: #19203F;
+    --ink: #E7EAF3;
+    --ink-2: #AEB6CE;
+    --ink-3: #7D87A4;
+    --rule: #242C4C;
+    --teal-soft: #0C2E2C;
+    --crimson: #FF3D68;
+    --crimson-dim: #E30040;
+  }
+
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    * { animation: none !important; transition: none !important; }
+  }
+  body {
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; }
+  :focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
+
+  .wrap { max-width: 1040px; margin: 0 auto; padding: 0 28px; }
+  .narrow { max-width: 68ch; }
+
+  /* ---- masthead ---------------------------------------------------- */
+  .masthead {
+    background: var(--navy);
+    border-bottom: 1px solid var(--on-dark-rule);
+  }
+  .masthead .wrap {
+    display: flex; align-items: center; gap: 18px;
+    padding-top: 18px; padding-bottom: 18px;
+  }
+  .masthead img { height: 26px; width: auto; display: block; }
+  .masthead .sep { width: 1px; height: 22px; background: var(--on-dark-rule); }
+  .masthead .product {
+    font-family: var(--mono); font-size: 14px; letter-spacing: .02em;
+    color: var(--on-dark);
+  }
+  .masthead .ver {
+    margin-left: auto; font-family: var(--mono); font-size: 13px;
+    color: var(--on-dark-2);
+  }
+
+  /* ---- hero -------------------------------------------------------- */
+  .hero {
+    background: var(--navy);
+    color: var(--on-dark);
+    position: relative;
+    overflow: hidden;
+  }
+  /* One echo of the mark's mosaic, at low contrast. Decorative only. */
+  .hero::before {
+    content: "";
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(45deg, rgba(0,155,147,.10) 25%, transparent 25%, transparent 75%, rgba(0,155,147,.10) 75%),
+      linear-gradient(45deg, rgba(227,0,64,.07) 25%, transparent 25%, transparent 75%, rgba(227,0,64,.07) 75%);
+    background-size: 34px 34px, 34px 34px;
+    background-position: 0 0, 17px 17px;
+    -webkit-mask-image: radial-gradient(ellipse 60% 80% at 88% 15%, #000, transparent 70%);
+    mask-image: radial-gradient(ellipse 60% 80% at 88% 15%, #000, transparent 70%);
+    pointer-events: none;
+  }
+  .hero .wrap { position: relative; padding-top: 56px; padding-bottom: 56px; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .14em;
+    text-transform: uppercase; color: var(--teal); margin: 0 0 14px;
+  }
+  h1 {
+    font-family: var(--display); font-weight: 700;
+    font-size: clamp(34px, 5vw, 52px); line-height: 1.08;
+    letter-spacing: -.02em; margin: 0 0 18px; text-wrap: balance;
+    max-width: 18ch;
+  }
+  .hero p.lede {
+    font-size: 18px; color: var(--on-dark-2); max-width: 58ch;
+    margin: 0 0 34px; text-wrap: pretty;
+  }
+  .hero p.lede strong { color: var(--on-dark); font-weight: 500; }
+
+  /* ---- the two things that matter: get it, and check it ------------ */
+  .getit {
+    display: grid; gap: 20px;
+    grid-template-columns: minmax(280px, 380px) minmax(300px, 1fr);
+    align-items: stretch;
+  }
+  @media (max-width: 780px) { .getit { grid-template-columns: 1fr; } }
+
+  .dl {
+    background: var(--navy-2); border: 1px solid var(--on-dark-rule);
+    padding: 22px; display: flex; flex-direction: column; gap: 14px;
+  }
+  .dl-btn {
+    display: block; text-decoration: none; text-align: center;
+    background: var(--crimson); color: #fff;
+    font-family: var(--display); font-weight: 700; font-size: 17px;
+    letter-spacing: .01em; padding: 15px 20px;
+    transition: background .15s ease;
+  }
+  .dl-btn:hover { background: var(--crimson-dim); }
+  .dl-btn .sub {
+    display: block; font-family: var(--mono); font-weight: 400;
+    font-size: 12px; opacity: .85; margin-top: 4px; letter-spacing: 0;
+  }
+  .dl dl {
+    margin: 0; display: grid; grid-template-columns: auto 1fr;
+    gap: 6px 14px; font-size: 13.5px;
+  }
+  .dl dt { color: var(--on-dark-2); }
+  .dl dd { margin: 0; font-family: var(--mono); font-size: 13px; color: var(--on-dark); }
+  .dl .note { font-size: 13px; color: var(--on-dark-2); margin: 0; line-height: 1.55; }
+
+  .verify {
+    background: transparent; border: 1px solid var(--on-dark-rule);
+    padding: 22px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .verify h2 {
+    font-family: var(--display); font-size: 16px; font-weight: 600;
+    margin: 0; color: var(--on-dark); letter-spacing: .01em;
+  }
+  .verify p { margin: 0; font-size: 13.5px; color: var(--on-dark-2); line-height: 1.6; }
+  .hash {
+    font-family: var(--mono); font-size: 12.5px; line-height: 1.7;
+    color: var(--teal); word-break: break-all;
+    background: rgba(0,155,147,.08); border-left: 2px solid var(--teal);
+    padding: 9px 12px;
+  }
+  .verify pre {
+    margin: 0; font-family: var(--mono); font-size: 12.5px; line-height: 1.7;
+    color: var(--on-dark); background: rgba(255,255,255,.04);
+    border: 1px solid var(--on-dark-rule); padding: 10px 12px;
+    overflow-x: auto;
+  }
+  .verify pre .c { color: var(--on-dark-2); }
+
+  /* ---- body sections ----------------------------------------------- */
+  section.band { padding: 62px 0; border-bottom: 1px solid var(--rule); }
+  section.band:last-of-type { border-bottom: 0; }
+  h2.sec {
+    font-family: var(--display); font-weight: 700; font-size: 26px;
+    letter-spacing: -.01em; margin: 0 0 8px; text-wrap: balance;
+  }
+  .sec-note { color: var(--ink-2); margin: 0 0 26px; max-width: 62ch; text-wrap: pretty; }
+  p { text-wrap: pretty; }
+
+  /* coverage: a status list, not cards */
+  .coverage { border-top: 1px solid var(--rule); }
+  .cov {
+    display: grid; grid-template-columns: 200px 120px 1fr; gap: 4px 24px;
+    padding: 16px 0; border-bottom: 1px solid var(--rule); align-items: baseline;
+  }
+  @media (max-width: 720px) { .cov { grid-template-columns: 1fr; gap: 6px; } }
+  .cov .what { font-weight: 600; font-size: 15.5px; }
+  .cov .what span { display: block; font-weight: 400; font-size: 13px; color: var(--ink-3); font-family: var(--mono); }
+  .cov .how { font-size: 14px; color: var(--ink-2); line-height: 1.6; }
+  .state {
+    display: inline-block; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+    padding: 2px 9px; white-space: nowrap; line-height: 1.7;
+  }
+  .state.full { background: var(--teal-soft); color: var(--teal); }
+  .state.part { background: #FBEEDC; color: #9A6410; }
+  .state.none { background: var(--surface-2); color: var(--ink-3); }
+
+  /* the readout: the product's own voice */
+  .readout {
+    background: var(--navy); color: var(--on-dark);
+    font-family: var(--mono); font-size: 13px; line-height: 1.75;
+    padding: 20px 22px; overflow-x: auto; border-left: 3px solid var(--teal);
+  }
+  .readout .dim { color: var(--on-dark-2); }
+  .readout .hi { color: var(--teal); }
+  .readout .num { color: #FF6B8F; }
+
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 34px; }
+  @media (max-width: 760px) { .split { grid-template-columns: 1fr; gap: 26px; } }
+  .split h3, .steps h3 {
+    font-family: var(--display); font-size: 16px; font-weight: 600;
+    margin: 0 0 8px; letter-spacing: .01em;
+  }
+  .split p, .steps p { margin: 0 0 10px; color: var(--ink-2); font-size: 15px; }
+  ul.plain { margin: 0; padding-left: 20px; color: var(--ink-2); font-size: 15px; }
+  ul.plain li { margin-bottom: 5px; }
+  ul.plain li::marker { color: var(--ink-3); }
+
+  /* quick start: a real 3-step sequence, so numbering is information */
+  .steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; }
+  @media (max-width: 760px) { .steps { grid-template-columns: 1fr; } }
+  .step { border-top: 2px solid var(--navy); padding-top: 14px; }
+  .step .n {
+    font-family: var(--mono); font-size: 12px; color: var(--crimson);
+    letter-spacing: .1em; display: block; margin-bottom: 6px;
+  }
+  code.inline {
+    font-family: var(--mono); font-size: .9em; background: var(--surface-2);
+    padding: 1px 5px; color: var(--ink);
+  }
+  pre.cmd {
+    font-family: var(--mono); font-size: 13px; line-height: 1.7; margin: 10px 0 0;
+    background: var(--surface); border: 1px solid var(--rule);
+    padding: 11px 13px; overflow-x: auto; color: var(--ink);
+  }
+
+  .caution {
+    border-left: 3px solid var(--crimson); background: var(--surface);
+    padding: 18px 22px; margin: 0;
+  }
+  .caution h3 {
+    font-family: var(--display); font-size: 16px; font-weight: 600; margin: 0 0 8px;
+  }
+  .caution p { margin: 0 0 10px; color: var(--ink-2); font-size: 15px; }
+  .caution p:last-child { margin-bottom: 0; }
+
+  .tw { overflow-x: auto; border: 1px solid var(--rule); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+  th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+  th { font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); background: var(--surface-2); font-weight: 600; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td.mono { font-family: var(--mono); font-size: 13px; font-variant-numeric: tabular-nums; }
+
+  footer {
+    background: var(--navy); color: var(--on-dark-2); padding: 34px 0;
+    font-size: 13.5px;
+  }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 10px 28px; align-items: baseline; }
+  footer strong { color: var(--on-dark); font-weight: 500; }
+  footer .right { margin-left: auto; font-family: var(--mono); font-size: 12.5px; }
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <img src="onecra_logo.png" alt="Onecra">
+    <div class="sep"></div>
+    <div class="product">fw2sbom</div>
+    <div class="ver">v1.7.0 · 2026-09-11</div>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="wrap">
+    <p class="eyebrow">Firmware → SBOM</p>
+    <h1>把韌體變成有證據的 SBOM</h1>
+    <p class="lede">
+      從 <strong>.bin</strong> 映像產生 <strong>CycloneDX 1.6</strong> 或
+      <strong>SPDX 2.3</strong>,每個元件都附上命中的字串、檔案位移與 confidence。
+      不需要安裝 Python,不需要任何 pip 套件,分析全部在本機記憶體完成。
+    </p>
+
+    <div class="getit">
+      <div class="dl">
+        <a class="dl-btn" href="downloads/fw2sbom-portable-1.7.0.zip">
+          下載 Windows 版
+          <span class="sub">fw2sbom-portable-1.7.0.zip · 10.7 MB</span>
+        </a>
+        <dl>
+          <dt>版本</dt><dd>1.7.0</dd>
+          <dt>直譯器</dt><dd>CPython 3.12.7 (embeddable)</dd>
+          <dt>內容</dt><dd>50 個檔案</dd>
+          <dt>簽章</dt><dd>無 — 見右</dd>
+        </dl>
+        <p class="note">
+          解壓後雙擊 <code class="inline">Start-fw2sbom.bat</code>,瀏覽器會自動開啟
+          <code class="inline">127.0.0.1:8765</code>。macOS / Linux 請用
+          <code class="inline">python3 service.py</code>。
+        </p>
+      </div>
+
+      <div class="verify">
+        <h2>先核對,再執行</h2>
+        <p>
+          這個套件<strong>刻意不含任何我們自己編譯的執行檔</strong> —— 裡面只有
+          python.org 官方發佈的直譯器,加上我們的 Python 原始碼。所以它不會觸發
+          Windows SmartScreen 的「未知發行者」警告,但也因此沒有數位簽章可以驗。
+          請改用雜湊核對:
+        </p>
+        <div class="hash">SHA-256<br>736095fff98937ad8571b923d72e9b89759ef4d5a192c6f50fca5348449d8543</div>
+        <pre><span class="c"># Windows PowerShell</span>
+Get-FileHash -Algorithm SHA256 .\fw2sbom-portable-1.7.0.zip
+
+<span class="c"># macOS / Linux</span>
+shasum -a 256 fw2sbom-portable-1.7.0.zip</pre>
+        <p>
+          這個套件是<strong>可重現</strong>的:同一個原始碼版本、同一個官方 CPython,
+          任何人在任何機器上重新打包都會得到位元組完全相同的檔案,因此也會得到上面
+          這個雜湊。它不只是「我們那次 build 的紀錄」。
+        </p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<section class="band">
+  <div class="wrap">
+    <h2 class="sec">它看得懂什麼</h2>
+    <p class="sec-note">
+      這張表寫的是實際覆蓋範圍,不是規劃。標為「部分」或「未支援」的,工具會
+      明確講出來,不會產生一份看起來完整的空 SBOM。
+    </p>
+    <div class="coverage">
+      <div class="cov">
+        <div class="what">IoT / MCU 裝置<span>ARM Cortex-M · MCS-51</span></div>
+        <div><span class="state full">支援</span></div>
+        <div class="how">
+          向量表架構識別、廠商 packetized / ISP-dump 格式自動去框、加密映像判定、
+          內嵌標準資料(VESA E-EDID、DDC/CI MCCS)。Zephyr、FreeRTOS、mbed TLS、
+          lwIP、MCUboot、littlefs、Nordic 與 STM32 SDK 等 36 組簽章。
+        </div>
+      </div>
+      <div class="cov">
+        <div class="what">Router / Gateway<span>Linux · MIPS / ARM</span></div>
+        <div><span class="state full">支援</span></div>
+        <div class="how">
+          U-Boot uImage 檔頭、壓縮 kernel(gzip / xz / lzma / bzip2)、SquashFS 4.0
+          根檔案系統。<strong>直接讀出 opkg / dpkg / apk 套件資料庫</strong>,
+          得到每個已安裝套件的精確版本。FIT / TRX 與廠商自訂檔頭尚未支援。
+        </div>
+      </div>
+      <div class="cov">
+        <div class="what">CCTV / NVR<span>Linux · 專有 SoC</span></div>
+        <div><span class="state part">部分</span></div>
+        <div class="how">
+          使用標準 uImage + SquashFS 的機型與 router 相同。廠商自訂容器需逐個支援;
+          整段加密的機型會被判定為 opaque 並如實標記,需要向供應商索取原廠 SBOM。
+        </div>
+      </div>
+      <div class="cov">
+        <div class="what">PC BIOS / UEFI<span>x86 · EDK2</span></div>
+        <div><span class="state none">未支援</span></div>
+        <div class="how">
+          Flash Descriptor / Firmware Volume / FFS 解析尚未實作。目前分析這類映像
+          會回報「未識別架構」,不會產生誤導性的結果。
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2 class="sec">一台真實的 router</h2>
+    <p class="sec-note">
+      GL.iNet GL-MT300N-V2,OpenWrt 22.03.4,MIPS,14.6 MB。整份映像只有檔頭是明文,
+      kernel 是 LZMA、根檔案系統是 xz —— 直接掃字串會得到零個元件。
+    </p>
+    <div class="readout"><span class="dim">$</span> fw2sbom openwrt-mt300n-v2-4.3.25.bin -d out/ --format both
+
+<span class="dim">[fw2sbom]</span> segment 0x00000000 U-Boot uImage header (Linux/mips) <span class="hi">(expanded)</span>
+<span class="dim">[fw2sbom]</span> segment 0x00000040 Linux kernel (lzma) <span class="hi">(expanded)</span>
+<span class="dim">[fw2sbom]</span> segment 0x0023ec0d SquashFS 4.0 (xz) <span class="hi">(read)</span>
+<span class="dim">[fw2sbom]</span> distribution: OpenWrt 22.03.4 r20123-38ccc47687
+<span class="dim">[fw2sbom]</span> <span class="num">359</span> package(s) from /usr/lib/opkg/status (opkg), <span class="num">359</span> with exact versions
+<span class="dim">[fw2sbom]</span> <span class="num">366</span> component(s) identified
+<span class="dim">[fw2sbom]</span>   linux-kernel     version=5.10.176   confidence=0.97 (high)
+<span class="dim">[fw2sbom]</span>   gnu-binutils     version=2.37       confidence=0.95 (high)
+<span class="dim">[fw2sbom]</span>   gcc              version=11.2.0     confidence=0.9  (high)</div>
+    <p class="sec-note" style="margin-top:22px;margin-bottom:0">
+      這 359 個套件的版本不是從二進位猜出來的,而是讀自映像裡套件管理器自己的
+      安裝紀錄 —— 包含 BusyBox 1.35.0、OpenSSL 1.1.1t、dropbear 2022.82、
+      curl 7.88.1、zlib 1.2.11。這是 Linux 裝置 SBOM 品質的主要來源。
+    </p>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2 class="sec">你會拿到什麼</h2>
+    <div class="split">
+      <div>
+        <h3>兩種 SBOM 格式</h3>
+        <p>
+          CycloneDX 1.6 與 SPDX 2.3,由<strong>同一次分析</strong>產生,所以兩份
+          文件不可能互相矛盾。兩者都通過各自規格的官方 schema 驗證。
+        </p>
+        <ul class="plain">
+          <li>CycloneDX 有為 binary-derived SBOM 設計的 <code class="inline">evidence</code> 物件,confidence 與命中證據都能結構化表達</li>
+          <li>SPDX 2.3 沒有對應欄位,那些資訊會放進 <code class="inline">annotations</code> 與 <code class="inline">comment</code>,文件本身會註明以 CycloneDX 為準</li>
+        </ul>
+      </div>
+      <div>
+        <h3>一份人看的證據報告</h3>
+        <p>
+          七張工作表的 Excel 檔,給稽核人員而不是機器看。裡面同時記錄
+          <strong>負面證據</strong>。
+        </p>
+        <ul class="plain">
+          <li>掃描過但未命中的每一個簽章 —— 「我們找過 BusyBox,它不在裡面」本身就是一項發現</li>
+          <li>被判定為誤報的弱 magic 命中,以及判定理由</li>
+          <li>逐 64 KiB bank 的熵值與雜湊、掃描覆蓋率、EDID 設定檔</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2 class="sec">三個步驟</h2>
+    <div class="steps">
+      <div class="step">
+        <span class="n">01</span>
+        <h3>解壓縮</h3>
+        <p>把 zip 解到任何資料夾。裡面是一個完整的 Python 執行環境,不會動到系統。</p>
+      </div>
+      <div class="step">
+        <span class="n">02</span>
+        <h3>雙擊啟動</h3>
+        <p>執行 <code class="inline">Start-fw2sbom.bat</code>。終端機視窗會顯示服務狀態,瀏覽器自動開啟。</p>
+        <pre class="cmd">listening on http://127.0.0.1:8765/</pre>
+      </div>
+      <div class="step">
+        <span class="n">03</span>
+        <h3>把韌體拖進去</h3>
+        <p>分析完成後下載 SBOM 與證據報告。關閉終端機視窗即停止服務。</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap narrow">
+    <div class="caution">
+      <h3>這是 binary-derived SBOM</h3>
+      <p>
+        元件與版本是從已編譯的映像推斷出來的,不是從建置系統的清單讀來的。判定為
+        啟發式,可能不完整或有誤 —— <strong>「沒偵測到」不等於「不存在」</strong>。
+        Confidence 上限刻意設在 0.97,永遠不會是 1.0。
+      </p>
+      <p>
+        映像加密時,工具會產生一個標記為 opaque 的元件並說明判定依據,而不是交出一份
+        空的 SBOM。「無法分析」與「沒有元件」必須是兩件不同的事。
+      </p>
+    </div>
+  </div>
+</section>
+
+<section class="band">
+  <div class="wrap">
+    <h2 class="sec">系統需求</h2>
+    <div class="tw">
+      <table>
+        <thead>
+          <tr><th>平台</th><th>需求</th><th>取得方式</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Windows 10 / 11 (x64)</td>
+            <td class="mono">無</td>
+            <td>下載上面的 portable zip,直譯器已包含在內</td>
+          </tr>
+          <tr>
+            <td>macOS / Linux</td>
+            <td class="mono">Python 3.9+</td>
+            <td>取得原始碼後執行 <code class="inline">python3 service.py</code>;無需 pip 套件</td>
+          </tr>
+          <tr>
+            <td>網路</td>
+            <td class="mono">不需要</td>
+            <td>只綁定 <code class="inline">127.0.0.1</code>;檔案不會離開這台機器</td>
+          </tr>
+          <tr>
+            <td>單檔大小上限</td>
+            <td class="mono">512 MiB</td>
+            <td>分析在記憶體中進行,不寫入磁碟</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <strong>Onecra</strong>
+    <span>fw2sbom v1.7.0 — 韌體 SBOM 產生器</span>
+    <span class="right">SHA-256 736095ff…449d8543</span>
+  </div>
+</footer>

@@ -6,4 +6,6 @@
 *.bat  text eol=lf
 *.ps1  text eol=lf
 *.json text eol=lf
+*.html text eol=lf
+*.md   text eol=lf
 *.png  binary
