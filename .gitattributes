@@ -1,0 +1,8 @@
+# The portable package's SHA-256 is part of the release record (RELEASE.md), so
+# every file that ends up inside it has to check out byte-identically on every
+# machine. This repo has core.autocrlf=true, which would otherwise rewrite the
+# sources on checkout and silently change the published hash.
+*.py   text eol=lf
+*.bat  text eol=lf
+*.ps1  text eol=lf
+*.png  binary

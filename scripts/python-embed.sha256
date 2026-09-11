@@ -1,0 +1,14 @@
+# SHA-256 of the official CPython embeddable archives this project builds on.
+# scripts/build-portable.ps1 refuses to build from an archive whose hash is
+# pinned here and does not match, and deletes the offending download.
+#
+# Adding a line: run the build once, check the SHA-256 it prints against the
+# release page on python.org, then re-run with -PinHash. Pinning without
+# checking just launders an unverified download into a trusted-looking file.
+#   https://www.python.org/downloads/release/python-<version-without-dots>/
+#
+# Format: <version>-<arch>  <sha256>
+#
+# No entries yet -- the v1.4.0 package was built from an interpreter that was
+# already unpacked on the build machine, so its original archive was not
+# available to hash. The next `build-portable.ps1 -PinHash` run fills this in.

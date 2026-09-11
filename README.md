@@ -324,7 +324,28 @@ pyinstaller --onefile --console --name fw2sbom-service \
 
 PyInstaller 的 `.exe` 沒有數位簽章,客戶電腦的 Windows SmartScreen / 防毒軟體
 可能直接攔下或跳警告,要真的解決得買 EV 程式碼簽章憑證。如果想避開這件事,
-可以改發布「隨附 Python 直譯器的資料夾」,一樣不需要客戶自己裝 Python:
+可以改發布「隨附 Python 直譯器的資料夾」,一樣不需要客戶自己裝 Python。
+
+**這件事已經腳本化了**,不用手動做:
+
+```powershell
+.\scripts\build-portable.ps1
+```
+
+腳本會下載官方 embeddable CPython、比對 `scripts/python-embed.sha256` 裡釘住的
+SHA-256(對不上就刪掉下載檔並中止)、把 fw2sbom 的檔案放到 `python.exe` 旁邊、
+用打包好的直譯器自己跑一次 smoke test,最後輸出 `dist-portable/fw2sbom-portable.zip`
+並印出要抄進 [RELEASE.md](RELEASE.md) 的 hash。
+
+zip 是用 `scripts/make_deterministic_zip.py` 寫的(entry 排序、timestamp、壓縮
+等級全部固定),所以**同一個 commit 重新打包會得到完全相同的 SHA-256** —— 客戶
+手上那個檔案可以被獨立驗證,而不是只能相信我們的紀錄。
+
+第一次在新機器上打包、或換 CPython 版本時,pin 檔裡可能還沒有對應的 hash,腳本
+會警告並印出下載到的 SHA-256;去 python.org 的 release 頁對過之後,再用
+`-PinHash` 記錄下來。
+
+腳本實際做的事(手動重現時的步驟):
 
 ```bash
 # 1) 下載官方 embeddable 版 Python(以 3.12.7 為例),解壓縮成一個資料夾,
@@ -333,12 +354,8 @@ PyInstaller 的 `.exe` 沒有數位簽章,客戶電腦的 Windows SmartScreen / 
 # 2) 把 service.py / fw2sbom.py / evidence_report.py /
 #    onecra_logo.png / onecra_icon.png 複製到同一個資料夾(跟 python.exe 平行,
 #    不要放進子資料夾 —— 這樣 ._pth 的 "." 才找得到它們)
-# 3) 資料夾裡放一個 Start-fw2sbom.bat:
-#      @echo off
-#      title fw2sbom - Firmware SBOM Generator
-#      cd /d "%~dp0"
-#      "%~dp0python.exe" "%~dp0service.py"
-#      pause >nul
+# 3) 把 scripts/Start-fw2sbom.bat 一起複製進去
+# 4) 整個資料夾壓成 zip
 ```
 
 - `.bat` 裡呼叫直譯器**一定要用 `"%~dp0python.exe"` 這種絕對路徑**,不能寫裸的
@@ -382,6 +399,12 @@ fw2sbom/
 ├── service.py              # 拖拉式本機網頁服務(localhost drag-and-drop UI)
 ├── onecra_logo.png         # 頁首品牌 logo(service.py 內嵌用)
 ├── onecra_icon.png         # 瀏覽器分頁 favicon(service.py 內嵌用)
+├── scripts/
+│   ├── build-portable.ps1        # 打包免簽章 portable 版(驗 hash + smoke test)
+│   ├── make_deterministic_zip.py # 可重現的 zip writer(固定排序/timestamp)
+│   ├── Start-fw2sbom.bat         # portable 版的啟動器(會被複製進包裡)
+│   └── python-embed.sha256       # 釘住的官方 CPython embeddable hash
+├── RELEASE.md              # 每個交付 build 的 hash / commit / CPython 版本紀錄
 ├── README.md
 └── requirements.txt
 ```
