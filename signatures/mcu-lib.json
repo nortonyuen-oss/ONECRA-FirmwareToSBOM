@@ -1,0 +1,297 @@
+{
+  "pack": "mcu-lib",
+  "description": "Libraries, bootloaders, filesystems and toolchain traces common to bare-metal and RTOS microcontroller images.",
+  "signatures": [
+    {
+      "name": "mbedtls",
+      "supplier": "Arm / Trusted Firmware",
+      "type": "library",
+      "purl": "pkg:github/Mbed-TLS/mbedtls",
+      "description": "Mbed TLS cryptographic library",
+      "patterns": [
+        {
+          "regex": "[Mm]bed ?TLS[ /]v?([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "MBEDTLS_[A-Z0-9_]+",
+          "weight": 0.5
+        },
+        {
+          "regex": "mbedtls_[a-z0-9_]+",
+          "weight": 0.5
+        }
+      ]
+    },
+    {
+      "name": "wolfssl",
+      "supplier": "wolfSSL Inc.",
+      "type": "library",
+      "purl": "pkg:github/wolfSSL/wolfssl",
+      "description": "wolfSSL embedded TLS library",
+      "patterns": [
+        {
+          "regex": "wolfSSL[ v]+([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "wolfSSL|wolfcrypt",
+          "weight": 0.5
+        }
+      ]
+    },
+    {
+      "name": "lwip",
+      "supplier": "lwIP project",
+      "type": "library",
+      "purl": "pkg:github/lwip-tcpip/lwip",
+      "description": "lwIP TCP/IP stack",
+      "patterns": [
+        {
+          "regex": "lwIP[ v/]+([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "lwIP",
+          "weight": 0.6
+        },
+        {
+          "regex": "lwip_[a-z_]+|LWIP_[A-Z_]+",
+          "weight": 0.4
+        }
+      ]
+    },
+    {
+      "name": "newlib",
+      "supplier": "Red Hat / newlib project",
+      "type": "library",
+      "purl": "pkg:generic/newlib",
+      "description": "newlib C standard library",
+      "patterns": [
+        {
+          "regex": "newlib[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.85,
+          "vgroup": 1
+        },
+        {
+          "regex": "newlib[-/]([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.8,
+          "vgroup": 1
+        },
+        {
+          "regex": "newlib-nano|newlib/libc/",
+          "weight": 0.7
+        },
+        {
+          "regex": "newlib",
+          "weight": 0.5
+        },
+        {
+          "regex": "_impure_ptr|__sinit|_reent",
+          "weight": 0.3
+        }
+      ]
+    },
+    {
+      "name": "picolibc",
+      "supplier": "picolibc project",
+      "type": "library",
+      "purl": "pkg:github/picolibc/picolibc",
+      "description": "picolibc C standard library",
+      "patterns": [
+        {
+          "regex": "picolibc[- ]?v?([0-9]+\\.[0-9]+(?:\\.[0-9]+)?)",
+          "weight": 0.85,
+          "vgroup": 1
+        },
+        {
+          "regex": "picolibc",
+          "weight": 0.6
+        }
+      ]
+    },
+    {
+      "name": "gcc-arm-none-eabi",
+      "supplier": "GNU Project",
+      "type": "application",
+      "purl": "pkg:generic/gcc",
+      "description": "GCC toolchain (compiler identification strings)",
+      "patterns": [
+        {
+          "regex": "GCC:? \\([^)]*\\) ([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "arm-none-eabi-gcc",
+          "weight": 0.6
+        },
+        {
+          "regex": "arm-zephyr-eabi",
+          "weight": 0.5
+        }
+      ]
+    },
+    {
+      "name": "mcuboot",
+      "supplier": "MCUboot project",
+      "type": "application",
+      "purl": "pkg:github/mcu-tools/mcuboot",
+      "description": "MCUboot secure bootloader",
+      "patterns": [
+        {
+          "regex": "MCUboot[ v]+([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "MCUBOOT|mcuboot",
+          "weight": 0.55
+        },
+        {
+          "regex": "boot_go|img_mgmt",
+          "weight": 0.3
+        }
+      ]
+    },
+    {
+      "name": "littlefs",
+      "supplier": "littlefs project",
+      "type": "library",
+      "purl": "pkg:github/littlefs-project/littlefs",
+      "description": "littlefs embedded filesystem",
+      "patterns": [
+        {
+          "regex": "littlefs[ v/]+([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "littlefs",
+          "weight": 0.6
+        },
+        {
+          "regex": "lfs_(?:mount|format|file_open)",
+          "weight": 0.45
+        }
+      ]
+    },
+    {
+      "name": "fatfs",
+      "supplier": "ChaN",
+      "type": "library",
+      "purl": "pkg:generic/fatfs",
+      "description": "FatFs FAT filesystem module",
+      "patterns": [
+        {
+          "regex": "FatFs.{0,20}R([0-9]+\\.[0-9]+[a-z]?)",
+          "weight": 0.85,
+          "vgroup": 1
+        },
+        {
+          "regex": "FatFs",
+          "weight": 0.6
+        },
+        {
+          "regex": "f_mount|f_open|ff\\.c",
+          "weight": 0.3
+        }
+      ]
+    },
+    {
+      "name": "cmsis",
+      "supplier": "Arm",
+      "type": "library",
+      "purl": "pkg:github/ARM-software/CMSIS_5",
+      "description": "Arm CMSIS (Cortex Microcontroller Software Interface Standard)",
+      "patterns": [
+        {
+          "regex": "CMSIS[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.85,
+          "vgroup": 1
+        },
+        {
+          "regex": "CMSIS",
+          "weight": 0.5
+        },
+        {
+          "regex": "SysTick_Handler|NVIC_[A-Za-z]+|__NVIC",
+          "weight": 0.35
+        }
+      ]
+    },
+    {
+      "name": "tinycrypt",
+      "supplier": "Intel",
+      "type": "library",
+      "purl": "pkg:github/intel/tinycrypt",
+      "description": "TinyCrypt cryptographic library",
+      "patterns": [
+        {
+          "regex": "tinycrypt",
+          "weight": 0.6
+        },
+        {
+          "regex": "tc_(?:aes|sha256|hmac|ecc)_",
+          "weight": 0.5
+        }
+      ]
+    },
+    {
+      "name": "openthread",
+      "supplier": "Google / Thread Group",
+      "type": "library",
+      "purl": "pkg:github/openthread/openthread",
+      "description": "OpenThread mesh networking stack",
+      "patterns": [
+        {
+          "regex": "OPENTHREAD[/ ]+([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "openthread|OpenThread",
+          "weight": 0.6
+        }
+      ]
+    },
+    {
+      "name": "nimble",
+      "supplier": "Apache Software Foundation",
+      "type": "library",
+      "purl": "pkg:github/apache/mynewt-nimble",
+      "description": "Apache NimBLE Bluetooth LE stack",
+      "patterns": [
+        {
+          "regex": "NimBLE",
+          "weight": 0.7
+        },
+        {
+          "regex": "ble_hs_|ble_gap_|ble_gatt",
+          "weight": 0.45
+        }
+      ]
+    },
+    {
+      "name": "trusted-firmware-m",
+      "supplier": "Trusted Firmware",
+      "type": "firmware",
+      "purl": "pkg:generic/trusted-firmware-m",
+      "description": "Trusted Firmware-M (TF-M)",
+      "patterns": [
+        {
+          "regex": "TF-M[ v]+([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "TF-M|tfm_|psa_call",
+          "weight": 0.45
+        }
+      ]
+    }
+  ]
+}

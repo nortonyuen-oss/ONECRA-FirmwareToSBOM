@@ -1,0 +1,91 @@
+{
+  "pack": "vendor-nordic",
+  "description": "Nordic Semiconductor SDKs and protocol stacks (nRF5 SDK and nRF Connect SDK families).",
+  "signatures": [
+    {
+      "name": "nrfx",
+      "supplier": "Nordic Semiconductor",
+      "type": "library",
+      "purl": "pkg:github/NordicSemiconductor/nrfx",
+      "description": "Nordic nrfx peripheral drivers",
+      "patterns": [
+        {
+          "regex": "nrfx_[a-z0-9_]+",
+          "weight": 0.6
+        },
+        {
+          "regex": "NRF_[A-Z0-9]+_NS|nRF[0-9]{4,5}",
+          "weight": 0.45
+        }
+      ]
+    },
+    {
+      "name": "nrf-connect-sdk",
+      "supplier": "Nordic Semiconductor",
+      "type": "framework",
+      "purl": "pkg:github/nrfconnect/sdk-nrf",
+      "description": "nRF Connect SDK (NCS) - Nordic's Zephyr-based SDK; banner version is the Zephyr fork tag, not the NCS release",
+      "patterns": [
+        {
+          "regex": "Booting nRF Connect SDK",
+          "weight": 0.9
+        },
+        {
+          "regex": "v[0-9]+\\.[0-9]+\\.[0-9]+-ncs[0-9]+",
+          "weight": 0.6
+        }
+      ]
+    },
+    {
+      "name": "nordic-softdevice-controller",
+      "supplier": "Nordic Semiconductor",
+      "type": "library",
+      "purl": "pkg:generic/nordic-softdevice-controller",
+      "description": "Nordic SoftDevice Controller (BLE link layer, closed source)",
+      "patterns": [
+        {
+          "regex": "SoftDevice Controller",
+          "weight": 0.85
+        },
+        {
+          "regex": "dragoon/",
+          "weight": 0.5
+        }
+      ]
+    },
+    {
+      "name": "nordic-mpsl",
+      "supplier": "Nordic Semiconductor",
+      "type": "library",
+      "purl": "pkg:generic/nordic-mpsl",
+      "description": "Nordic Multiprotocol Service Layer (MPSL)",
+      "patterns": [
+        {
+          "regex": "MPSL ASSERT|MPSL Work|mpsl_[a-z_]+",
+          "weight": 0.75
+        }
+      ]
+    },
+    {
+      "name": "nrf5-sdk-ble-dfu",
+      "supplier": "Nordic Semiconductor",
+      "type": "library",
+      "purl": "pkg:generic/nrf5-sdk-ble-dfu-bootloader",
+      "description": "Nordic nRF5 SDK (legacy, non-Zephyr) BLE DFU bootloader/transport service",
+      "patterns": [
+        {
+          "regex": "ble_dfu_buttonless_bootloader_[a-z_]+",
+          "weight": 0.75
+        },
+        {
+          "regex": "ble_dfu_[a-z_]+",
+          "weight": 0.5
+        },
+        {
+          "regex": "nrf_dfu_[a-z_]+",
+          "weight": 0.45
+        }
+      ]
+    }
+  ]
+}

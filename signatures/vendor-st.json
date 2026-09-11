@@ -1,0 +1,27 @@
+{
+  "pack": "vendor-st",
+  "description": "STMicroelectronics STM32 SDKs.",
+  "signatures": [
+    {
+      "name": "stm32-hal",
+      "supplier": "STMicroelectronics",
+      "type": "library",
+      "purl": "pkg:generic/stm32-hal",
+      "description": "STM32 HAL/LL drivers",
+      "patterns": [
+        {
+          "regex": "STM32[A-Z][0-9]xx? HAL",
+          "weight": 0.8
+        },
+        {
+          "regex": "HAL_(?:Init|GPIO|UART|RCC)_?[A-Za-z]*",
+          "weight": 0.5
+        },
+        {
+          "regex": "stm32[a-z][0-9]+xx",
+          "weight": 0.4
+        }
+      ]
+    }
+  ]
+}

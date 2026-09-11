@@ -4,7 +4,15 @@ __pycache__/
 build/
 dist/
 dist-portable/
-*.spec
+
+# fw2sbom-service.spec IS tracked: it is not the file PyInstaller generates by
+# default, it carries the signature packs in `datas`, and a frozen build
+# without them finds nothing in every firmware it is given.
 
 # Local Claude Code settings (machine/user-specific)
 .claude/settings.local.json
+
+# Test build output (regenerate: python tests/make_fixtures.py)
+tests/fixtures/
+# Third-party schemas fetched for validation (python tests/fetch_schema.py)
+tests/schema/

@@ -45,7 +45,7 @@ from datetime import datetime, timezone
 import evidence_report
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.4.1"
+TOOL_VERSION = "1.5.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -53,411 +53,162 @@ MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
 # --------------------------------------------------------------------------- #
 # Signature database
 # --------------------------------------------------------------------------- #
-# Each signature:
+# Signatures live in signatures/*.json rather than in this file, so that the
+# database can be updated, audited and extended without touching the analysis
+# code, and so a customer can add their own pack. Each pack is
+#   {"pack": str, "description": str, "signatures": [ ... ]}
+# and each signature is
 #   name / supplier / type / purl (versionless base) / description
 #   patterns: list of {regex, weight, vgroup (optional: capture group w/ version)}
 # Confidence = max(weight of matched patterns) + 0.05 per extra distinct pattern,
 # capped at 0.97 (never 1.0 - this is heuristic binary analysis).
-SIGNATURES = [
-    {
-        "name": "zephyr",
-        "supplier": "Zephyr Project",
-        "type": "operating-system",
-        "purl": "pkg:github/zephyrproject-rtos/zephyr",
-        "description": "Zephyr RTOS",
-        "patterns": [
-            {"regex": r"Booting Zephyr OS build (?:zephyr-)?v?([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.]+)?)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"Zephyr version ([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"Booting nRF Connect SDK v([0-9]+\.[0-9]+\.[0-9]+(?:-ncs[0-9]+)?)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"WEST_TOPDIR/zephyr/", "weight": 0.65},
-            {"regex": r"zephyr-v?([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.7, "vgroup": 1},
-            {"regex": r"Zephyr OS build v?([0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9]+)*)", "weight": 0.85, "vgroup": 1},
-            {"regex": r"Zephyr OS", "weight": 0.6},
-            {"regex": r"ZEPHYR_BASE|zephyr,\w+|zephyr/", "weight": 0.4},
-            {"regex": r"west build", "weight": 0.2},
-        ],
-    },
-    {
-        "name": "freertos",
-        "supplier": "Amazon Web Services",
-        "type": "operating-system",
-        "purl": "pkg:github/FreeRTOS/FreeRTOS-Kernel",
-        "description": "FreeRTOS kernel",
-        "patterns": [
-            {"regex": r"FreeRTOS[ vV]+([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"FreeRTOS", "weight": 0.6},
-            {"regex": r"vTaskStartScheduler|xTaskCreate|prvIdleTask", "weight": 0.5},
-        ],
-    },
-    {
-        "name": "mbedtls",
-        "supplier": "Arm / Trusted Firmware",
-        "type": "library",
-        "purl": "pkg:github/Mbed-TLS/mbedtls",
-        "description": "Mbed TLS cryptographic library",
-        "patterns": [
-            {"regex": r"[Mm]bed ?TLS[ /]v?([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"MBEDTLS_[A-Z0-9_]+", "weight": 0.5},
-            {"regex": r"mbedtls_[a-z0-9_]+", "weight": 0.5},
-        ],
-    },
-    {
-        "name": "wolfssl",
-        "supplier": "wolfSSL Inc.",
-        "type": "library",
-        "purl": "pkg:github/wolfSSL/wolfssl",
-        "description": "wolfSSL embedded TLS library",
-        "patterns": [
-            {"regex": r"wolfSSL[ v]+([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"wolfSSL|wolfcrypt", "weight": 0.5},
-        ],
-    },
-    {
-        "name": "lwip",
-        "supplier": "lwIP project",
-        "type": "library",
-        "purl": "pkg:github/lwip-tcpip/lwip",
-        "description": "lwIP TCP/IP stack",
-        "patterns": [
-            {"regex": r"lwIP[ v/]+([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"lwIP", "weight": 0.6},
-            {"regex": r"lwip_[a-z_]+|LWIP_[A-Z_]+", "weight": 0.4},
-        ],
-    },
-    {
-        "name": "newlib",
-        "supplier": "Red Hat / newlib project",
-        "type": "library",
-        "purl": "pkg:generic/newlib",
-        "description": "newlib C standard library",
-        "patterns": [
-            {"regex": r"newlib[- ]?v?([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.85, "vgroup": 1},
-            {"regex": r"newlib[-/]([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.8, "vgroup": 1},
-            {"regex": r"newlib-nano|newlib/libc/", "weight": 0.7},
-            {"regex": r"newlib", "weight": 0.5},
-            {"regex": r"_impure_ptr|__sinit|_reent", "weight": 0.3},
-        ],
-    },
-    {
-        "name": "picolibc",
-        "supplier": "picolibc project",
-        "type": "library",
-        "purl": "pkg:github/picolibc/picolibc",
-        "description": "picolibc C standard library",
-        "patterns": [
-            {"regex": r"picolibc[- ]?v?([0-9]+\.[0-9]+(?:\.[0-9]+)?)", "weight": 0.85, "vgroup": 1},
-            {"regex": r"picolibc", "weight": 0.6},
-        ],
-    },
-    {
-        "name": "gcc-arm-none-eabi",
-        "supplier": "GNU Project",
-        "type": "application",
-        "purl": "pkg:generic/gcc",
-        "description": "GCC toolchain (compiler identification strings)",
-        "patterns": [
-            {"regex": r"GCC:? \([^)]*\) ([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"arm-none-eabi-gcc", "weight": 0.6},
-            {"regex": r"arm-zephyr-eabi", "weight": 0.5},
-        ],
-    },
-    {
-        "name": "mcuboot",
-        "supplier": "MCUboot project",
-        "type": "application",
-        "purl": "pkg:github/mcu-tools/mcuboot",
-        "description": "MCUboot secure bootloader",
-        "patterns": [
-            {"regex": r"MCUboot[ v]+([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"MCUBOOT|mcuboot", "weight": 0.55},
-            {"regex": r"boot_go|img_mgmt", "weight": 0.3},
-        ],
-    },
-    {
-        "name": "littlefs",
-        "supplier": "littlefs project",
-        "type": "library",
-        "purl": "pkg:github/littlefs-project/littlefs",
-        "description": "littlefs embedded filesystem",
-        "patterns": [
-            {"regex": r"littlefs[ v/]+([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"littlefs", "weight": 0.6},
-            {"regex": r"lfs_(?:mount|format|file_open)", "weight": 0.45},
-        ],
-    },
-    {
-        "name": "fatfs",
-        "supplier": "ChaN",
-        "type": "library",
-        "purl": "pkg:generic/fatfs",
-        "description": "FatFs FAT filesystem module",
-        "patterns": [
-            {"regex": r"FatFs.{0,20}R([0-9]+\.[0-9]+[a-z]?)", "weight": 0.85, "vgroup": 1},
-            {"regex": r"FatFs", "weight": 0.6},
-            {"regex": r"f_mount|f_open|ff\.c", "weight": 0.3},
-        ],
-    },
-    {
-        "name": "cmsis",
-        "supplier": "Arm",
-        "type": "library",
-        "purl": "pkg:github/ARM-software/CMSIS_5",
-        "description": "Arm CMSIS (Cortex Microcontroller Software Interface Standard)",
-        "patterns": [
-            {"regex": r"CMSIS[- ]?v?([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.85, "vgroup": 1},
-            {"regex": r"CMSIS", "weight": 0.5},
-            {"regex": r"SysTick_Handler|NVIC_[A-Za-z]+|__NVIC", "weight": 0.35},
-        ],
-    },
-    {
-        "name": "tinycrypt",
-        "supplier": "Intel",
-        "type": "library",
-        "purl": "pkg:github/intel/tinycrypt",
-        "description": "TinyCrypt cryptographic library",
-        "patterns": [
-            {"regex": r"tinycrypt", "weight": 0.6},
-            {"regex": r"tc_(?:aes|sha256|hmac|ecc)_", "weight": 0.5},
-        ],
-    },
-    {
-        "name": "openthread",
-        "supplier": "Google / Thread Group",
-        "type": "library",
-        "purl": "pkg:github/openthread/openthread",
-        "description": "OpenThread mesh networking stack",
-        "patterns": [
-            {"regex": r"OPENTHREAD[/ ]+([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"openthread|OpenThread", "weight": 0.6},
-        ],
-    },
-    {
-        "name": "nimble",
-        "supplier": "Apache Software Foundation",
-        "type": "library",
-        "purl": "pkg:github/apache/mynewt-nimble",
-        "description": "Apache NimBLE Bluetooth LE stack",
-        "patterns": [
-            {"regex": r"NimBLE", "weight": 0.7},
-            {"regex": r"ble_hs_|ble_gap_|ble_gatt", "weight": 0.45},
-        ],
-    },
-    {
-        "name": "trusted-firmware-m",
-        "supplier": "Trusted Firmware",
-        "type": "firmware",
-        "purl": "pkg:generic/trusted-firmware-m",
-        "description": "Trusted Firmware-M (TF-M)",
-        "patterns": [
-            {"regex": r"TF-M[ v]+([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.9, "vgroup": 1},
-            {"regex": r"TF-M|tfm_|psa_call", "weight": 0.45},
-        ],
-    },
-    {
-        "name": "stm32-hal",
-        "supplier": "STMicroelectronics",
-        "type": "library",
-        "purl": "pkg:generic/stm32-hal",
-        "description": "STM32 HAL/LL drivers",
-        "patterns": [
-            {"regex": r"STM32[A-Z][0-9]xx? HAL", "weight": 0.8},
-            {"regex": r"HAL_(?:Init|GPIO|UART|RCC)_?[A-Za-z]*", "weight": 0.5},
-            {"regex": r"stm32[a-z][0-9]+xx", "weight": 0.4},
-        ],
-    },
-    {
-        "name": "nrfx",
-        "supplier": "Nordic Semiconductor",
-        "type": "library",
-        "purl": "pkg:github/NordicSemiconductor/nrfx",
-        "description": "Nordic nrfx peripheral drivers",
-        "patterns": [
-            {"regex": r"nrfx_[a-z0-9_]+", "weight": 0.6},
-            {"regex": r"NRF_[A-Z0-9]+_NS|nRF[0-9]{4,5}", "weight": 0.45},
-        ],
-    },
-    {
-        "name": "nrf-connect-sdk",
-        "supplier": "Nordic Semiconductor",
-        "type": "framework",
-        "purl": "pkg:github/nrfconnect/sdk-nrf",
-        "description": "nRF Connect SDK (NCS) - Nordic's Zephyr-based SDK; "
-                       "banner version is the Zephyr fork tag, not the NCS release",
-        "patterns": [
-            {"regex": r"Booting nRF Connect SDK", "weight": 0.9},
-            {"regex": r"v[0-9]+\.[0-9]+\.[0-9]+-ncs[0-9]+", "weight": 0.6},
-        ],
-    },
-    {
-        "name": "nordic-softdevice-controller",
-        "supplier": "Nordic Semiconductor",
-        "type": "library",
-        "purl": "pkg:generic/nordic-softdevice-controller",
-        "description": "Nordic SoftDevice Controller (BLE link layer, closed source)",
-        "patterns": [
-            {"regex": r"SoftDevice Controller", "weight": 0.85},
-            {"regex": r"dragoon/", "weight": 0.5},
-        ],
-    },
-    {
-        "name": "nordic-mpsl",
-        "supplier": "Nordic Semiconductor",
-        "type": "library",
-        "purl": "pkg:generic/nordic-mpsl",
-        "description": "Nordic Multiprotocol Service Layer (MPSL)",
-        "patterns": [
-            {"regex": r"MPSL ASSERT|MPSL Work|mpsl_[a-z_]+", "weight": 0.75},
-        ],
-    },
-    {
-        "name": "micropython",
-        "supplier": "MicroPython project",
-        "type": "application",
-        "purl": "pkg:github/micropython/micropython",
-        "description": "MicroPython interpreter",
-        "patterns": [
-            {"regex": r"MicroPython v([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"MicroPython", "weight": 0.6},
-        ],
-    },
-    {
-        "name": "busybox",
-        "supplier": "BusyBox",
-        "type": "application",
-        "purl": "pkg:generic/busybox",
-        "description": "BusyBox multi-call userspace utilities",
-        "patterns": [
-            {"regex": r"BusyBox v([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"BusyBox is a multi-call binary", "weight": 0.8},
-            {"regex": r"busybox", "weight": 0.45},
-        ],
-    },
-    {
-        "name": "openssl",
-        "supplier": "OpenSSL Project",
-        "type": "library",
-        "purl": "pkg:generic/openssl",
-        "description": "OpenSSL TLS/crypto library",
-        "patterns": [
-            {"regex": r"OpenSSL ([0-9]+\.[0-9]+\.[0-9]+[a-z]?)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"SSLv3 part of OpenSSL", "weight": 0.8},
-            {"regex": r"OPENSSL_", "weight": 0.5},
-        ],
-    },
-    {
-        "name": "zlib",
-        "supplier": "zlib",
-        "type": "library",
-        "purl": "pkg:generic/zlib",
-        "description": "zlib compression library",
-        "patterns": [
-            {"regex": r"inflate ([0-9]+\.[0-9]+\.[0-9]+) Copyright", "weight": 0.95, "vgroup": 1},
-            {"regex": r"deflate ([0-9]+\.[0-9]+\.[0-9]+) Copyright", "weight": 0.95, "vgroup": 1},
-            {"regex": r"invalid distance too far back", "weight": 0.7},
-        ],
-    },
-    {
-        "name": "u-boot",
-        "supplier": "Das U-Boot",
-        "type": "application",
-        "purl": "pkg:generic/u-boot",
-        "description": "Das U-Boot bootloader",
-        "patterns": [
-            {"regex": r"U-Boot (20[0-9]{2}\.[0-9]{2}(?:-[A-Za-z0-9.]+)?)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"Hit any key to stop autoboot", "weight": 0.8},
-            {"regex": r"bootcmd", "weight": 0.4},
-        ],
-    },
-    {
-        "name": "linux-kernel",
-        "supplier": "Linux",
-        "type": "operating-system",
-        "purl": "pkg:generic/linux",
-        "description": "Linux kernel",
-        "patterns": [
-            {"regex": r"Linux version ([0-9]+\.[0-9]+(?:\.[0-9]+)?[^ ]*)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"Kernel command line", "weight": 0.7},
-            {"regex": r"VFS: Mounted root", "weight": 0.7},
-        ],
-    },
-    {
-        "name": "dropbear",
-        "supplier": "Dropbear",
-        "type": "application",
-        "purl": "pkg:generic/dropbear",
-        "description": "Dropbear SSH server/client",
-        "patterns": [
-            {"regex": r"dropbear_([0-9]+\.[0-9]+)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"Dropbear SSH", "weight": 0.8},
-        ],
-    },
-    {
-        "name": "openssh",
-        "supplier": "OpenBSD",
-        "type": "application",
-        "purl": "pkg:generic/openssh",
-        "description": "OpenSSH",
-        "patterns": [
-            {"regex": r"OpenSSH_([0-9]+\.[0-9]+(?:p[0-9]+)?)", "weight": 0.95, "vgroup": 1},
-        ],
-    },
-    {
-        "name": "sqlite",
-        "supplier": "SQLite",
-        "type": "library",
-        "purl": "pkg:generic/sqlite",
-        "description": "SQLite embedded database",
-        "patterns": [
-            {"regex": r"SQLite version ([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"SQLite format 3", "weight": 0.75},
-        ],
-    },
-    {
-        "name": "libcurl",
-        "supplier": "curl",
-        "type": "library",
-        "purl": "pkg:generic/curl",
-        "description": "libcurl transfer library",
-        "patterns": [
-            {"regex": r"libcurl/([0-9]+\.[0-9]+\.[0-9]+)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"curl_easy_", "weight": 0.6},
-        ],
-    },
-    {
-        "name": "musl",
-        "supplier": "musl",
-        "type": "library",
-        "purl": "pkg:generic/musl",
-        "description": "musl C library",
-        "patterns": [
-            {"regex": r"musl libc \(([^)]+)\)", "weight": 0.85},
-            {"regex": r"/lib/ld-musl-", "weight": 0.8},
-        ],
-    },
-    {
-        "name": "glibc",
-        "supplier": "GNU",
-        "type": "library",
-        "purl": "pkg:generic/glibc",
-        "description": "GNU C Library",
-        "patterns": [
-            {"regex": r"GNU C Library.*version ([0-9]+\.[0-9]+)", "weight": 0.95, "vgroup": 1},
-            {"regex": r"GLIBC_2\.[0-9]+", "weight": 0.7},
-        ],
-    },
-    {
-        "name": "nrf5-sdk-ble-dfu",
-        "supplier": "Nordic Semiconductor",
-        "type": "library",
-        "purl": "pkg:generic/nrf5-sdk-ble-dfu-bootloader",
-        "description": "Nordic nRF5 SDK (legacy, non-Zephyr) BLE DFU bootloader/transport service",
-        "patterns": [
-            {"regex": r"ble_dfu_buttonless_bootloader_[a-z_]+", "weight": 0.75},
-            {"regex": r"ble_dfu_[a-z_]+", "weight": 0.5},
-            {"regex": r"nrf_dfu_[a-z_]+", "weight": 0.45},
-        ],
-    },
-]
+
+SIGNATURE_DIR_NAME = "signatures"
+SIGNATURE_ENV_VAR = "FW2SBOM_SIGNATURES"
+
+# Populated on first use by get_signatures(); None means "not loaded yet".
+SIGNATURES = None
+SIGNATURE_PACKS = []
+
+_VALID_TYPES = {"application", "library", "framework", "operating-system",
+                "device", "firmware", "file", "container", "data",
+                "device-driver", "platform", "machine-learning-model"}
+
+
+def _resource_dir():
+    """Directory holding bundled data files.
+
+    PyInstaller extracts --add-data payloads next to sys._MEIPASS; a normal
+    checkout keeps them beside this module.
+    """
+    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+
+
+def _validate_signature(sig, source):
+    """Raise ValueError unless `sig` is a usable signature definition."""
+    where = f"{source}: signature"
+    name = sig.get("name")
+    if not name or not isinstance(name, str):
+        raise ValueError(f"{where} has no 'name'")
+    where = f"{source}: signature '{name}'"
+
+    for key in ("type", "purl", "description"):
+        if not sig.get(key) or not isinstance(sig[key], str):
+            raise ValueError(f"{where} has no '{key}'")
+    if sig["type"] not in _VALID_TYPES:
+        raise ValueError(f"{where} has CycloneDX type '{sig['type']}', which is "
+                         f"not one of {sorted(_VALID_TYPES)}")
+    if not sig["purl"].startswith("pkg:"):
+        raise ValueError(f"{where} has purl '{sig['purl']}' (must start with 'pkg:')")
+    if "@" in sig["purl"]:
+        raise ValueError(f"{where} has a versioned purl '{sig['purl']}'; the "
+                         "database stores the versionless base and the version "
+                         "is appended per match")
+
+    patterns = sig.get("patterns")
+    if not patterns or not isinstance(patterns, list):
+        raise ValueError(f"{where} has no 'patterns'")
+    for i, pat in enumerate(patterns):
+        at = f"{where} pattern {i}"
+        if not isinstance(pat, dict) or not isinstance(pat.get("regex"), str):
+            raise ValueError(f"{at} has no 'regex'")
+        try:
+            compiled = re.compile(pat["regex"])
+        except re.error as e:
+            raise ValueError(f"{at} regex does not compile: {e}")
+        weight = pat.get("weight")
+        if not isinstance(weight, (int, float)) or isinstance(weight, bool):
+            raise ValueError(f"{at} has no numeric 'weight'")
+        if not 0.0 < weight <= 1.0:
+            raise ValueError(f"{at} weight {weight} is outside (0.0, 1.0]")
+        vgroup = pat.get("vgroup")
+        if vgroup is not None:
+            if not isinstance(vgroup, int) or isinstance(vgroup, bool):
+                raise ValueError(f"{at} 'vgroup' must be an integer")
+            if not 1 <= vgroup <= compiled.groups:
+                raise ValueError(f"{at} vgroup {vgroup} but the regex has "
+                                 f"{compiled.groups} capture group(s)")
+
+
+def _load_pack(path):
+    """Read and validate one signature pack. Returns (pack_name, signatures)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            doc = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ValueError(f"{path}: cannot read signature pack: {e}")
+    if not isinstance(doc, dict) or not isinstance(doc.get("signatures"), list):
+        raise ValueError(f"{path}: expected an object with a 'signatures' list")
+    pack = doc.get("pack") or os.path.splitext(os.path.basename(path))[0]
+    for sig in doc["signatures"]:
+        _validate_signature(sig, os.path.basename(path))
+        sig["pack"] = pack
+    return pack, doc["signatures"]
+
+
+def signature_search_path(extra_dirs=None):
+    """Directories to load packs from, lowest priority first.
+
+    Built-in packs ship beside the tool. FW2SBOM_SIGNATURES (os.pathsep
+    separated) and --signatures let a customer add or override packs without
+    editing the shipped ones.
+    """
+    dirs = [os.path.join(_resource_dir(), SIGNATURE_DIR_NAME)]
+    env = os.environ.get(SIGNATURE_ENV_VAR, "")
+    dirs += [d for d in env.split(os.pathsep) if d.strip()]
+    dirs += list(extra_dirs or [])
+    return dirs
+
+
+def load_signatures(extra_dirs=None, verbose=False):
+    """Load every signature pack on the search path into SIGNATURES.
+
+    A later directory may override a signature of the same name from an earlier
+    one (that is how a customer pack customises a built-in); a duplicate within
+    a single directory is an error, because it is always a mistake.
+    """
+    global SIGNATURES, SIGNATURE_PACKS
+    merged = collections.OrderedDict()
+    packs = []
+    for directory in signature_search_path(extra_dirs):
+        if not os.path.isdir(directory):
+            continue
+        seen_here = {}
+        for filename in sorted(os.listdir(directory)):
+            if not filename.endswith(".json"):
+                continue
+            path = os.path.join(directory, filename)
+            pack, sigs = _load_pack(path)
+            packs.append(pack)
+            for sig in sigs:
+                name = sig["name"]
+                if name in seen_here:
+                    raise ValueError(
+                        f"{directory}: signature '{name}' is defined twice "
+                        f"({seen_here[name]} and {filename})")
+                seen_here[name] = filename
+                if name in merged:
+                    log(f"signature '{name}' overridden by {path}", verbose)
+                merged[name] = sig
+            log(f"loaded {len(sigs)} signature(s) from {path}", verbose)
+
+    if not merged:
+        searched = os.pathsep.join(signature_search_path(extra_dirs))
+        raise ValueError(
+            "no signature packs found - the component database is missing, so "
+            "any SBOM produced now would be empty for the wrong reason. "
+            f"Searched: {searched}")
+
+    SIGNATURES = list(merged.values())
+    SIGNATURE_PACKS = sorted(set(packs))
+    return SIGNATURES
+
+
+def get_signatures():
+    """The loaded signature database, loading it on first use."""
+    if SIGNATURES is None:
+        load_signatures()
+    return SIGNATURES
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -519,10 +270,35 @@ def run_file_command(path, verbose=False):
     return None
 
 
+ASCII_RUN_TEMPLATE = rb"[\x20-\x7e]{%d,}"
+# A UTF-16LE run is the same printable bytes with a NUL after each one. Vendor
+# UI strings, Windows-built toolchain traces and much of UEFI keep version
+# information that way, and an ASCII-only scanner sees none of it: the NULs
+# break every run into single characters, far below any sane minimum length.
+UTF16LE_RUN_TEMPLATE = rb"(?:[\x20-\x7e]\x00){%d,}"
+
+
 def extract_strings(data, min_len=6):
-    """Extract printable ASCII strings with their byte offsets."""
-    pattern = re.compile(rb"[\x20-\x7e]{%d,}" % min_len)
-    return [(m.start(), m.group().decode("ascii")) for m in pattern.finditer(data)]
+    """Extract printable strings (ASCII and UTF-16LE) with their byte offsets.
+
+    Returns [(offset, text)] sorted by offset. The two encodings cannot claim
+    the same bytes: an ASCII run stops at the first NUL, which is exactly what
+    separates the characters of a UTF-16LE run.
+    """
+    found = [(m.start(), m.group().decode("ascii"))
+             for m in re.finditer(ASCII_RUN_TEMPLATE % min_len, data)]
+    for m in re.finditer(UTF16LE_RUN_TEMPLATE % min_len, data):
+        start, text = m.start(), m.group().decode("utf-16-le")
+        # An ASCII string's NUL terminator makes its last character look like
+        # the first UTF-16LE unit, so a wide string laid out right after a
+        # narrow one is matched one character early. Evidence in this tool
+        # quotes the matched string verbatim into an audit document, so drop
+        # the borrowed character rather than report text that is not there.
+        if start and 0x20 <= data[start - 1] <= 0x7E and len(text) > min_len:
+            start, text = start + 2, text[1:]
+        found.append((start, text))
+    found.sort(key=lambda pair: pair[0])
+    return found
 
 
 def analyze_cortex_m(data):
@@ -1206,6 +982,43 @@ def analyze_opacity(payload, architecture=None):
     }
 
 
+def reconcile_opacity(opacity, hits, standards, verbose=False):
+    """Settle a contradiction between the opacity verdict and what was found.
+
+    analyze_opacity() runs before signature matching, because matching needs
+    the strings and the strings come out of the payload either way. So it can
+    call a payload opaque and then the scanner reads component banners straight
+    out of it - which is what happens when framing bytes are interleaved into
+    otherwise readable data, or when a plaintext region sits in a mostly
+    high-entropy image. Reporting "static component identification is not
+    possible" directly above a list of identified components is simply wrong.
+
+    Evidence wins over the statistic: an opaque verdict cannot stand once
+    components have been read out of the payload. The measurement stays in the
+    record, re-labelled as mixed, because high-entropy regions may still hide
+    components that were not enumerated. Per-region verdicts are the real fix;
+    this keeps the report honest until then.
+    """
+    if not opacity or not opacity["opaque"]:
+        return opacity
+    identified = len(hits) + len(standards or [])
+    if not identified:
+        return opacity
+
+    settled = dict(opacity)
+    settled["opaque"] = False
+    settled["original_verdict"] = opacity["verdict"]
+    settled["verdict"] = "mixed"
+    settled["reasons"] = list(opacity["reasons"]) + [
+        f"{identified} component(s) were read out of this payload, so it is not "
+        f"opaque; the '{opacity['verdict']}' measurement above describes the "
+        "image as a whole. High-entropy regions remain and may hide components "
+        "that were not enumerated."]
+    log(f"opacity verdict '{opacity['verdict']}' downgraded to 'mixed': "
+        f"{identified} component(s) were identified in the payload", verbose)
+    return settled
+
+
 # --------------------------------------------------------------------------- #
 # Signature matching
 # --------------------------------------------------------------------------- #
@@ -1213,7 +1026,7 @@ def analyze_opacity(payload, architecture=None):
 def match_signatures(strings, verbose=False):
     """Match the signature DB against extracted strings. Returns list of hits."""
     hits = []
-    for sig in SIGNATURES:
+    for sig in get_signatures():
         matched_patterns = []  # (pattern_dict, offset, matched_text, version_or_None)
         for pat in sig["patterns"]:
             rx = re.compile(pat["regex"])
@@ -1346,6 +1159,10 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
     if opacity:
         fw_props += [
             {"name": "fw2sbom:payload_verdict", "value": opacity["verdict"]},
+        ] + ([
+            {"name": "fw2sbom:payload_verdict_before_reconciliation",
+             "value": opacity["original_verdict"]},
+        ] if opacity.get("original_verdict") else []) + [
             {"name": "fw2sbom:payload_entropy_bits_per_byte",
              "value": str(opacity["entropy"])},
             {"name": "fw2sbom:payload_longest_identical_run",
@@ -1535,11 +1352,16 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
                 {"name": "fw2sbom:sbom_type", "value": "binary-derived"},
                 {"name": "fw2sbom:analysis_methods",
                  "value": "file(1) magic, packetized-container de-framing, "
-                          "printable-string extraction, signature/regex matching, "
+                          "printable-string extraction (ASCII and UTF-16LE), "
+                          "signature/regex matching, "
                           "instruction-set identification (Cortex-M / MCS-51), "
                           "embedded standard-data parsing (VESA E-EDID, DDC/CI "
                           "MCCS), entropy/opacity analysis"},
                 {"name": "fw2sbom:offset_reference", "value": offset_space},
+                {"name": "fw2sbom:signature_database_size",
+                 "value": str(len(get_signatures()))},
+                {"name": "fw2sbom:signature_packs",
+                 "value": ", ".join(SIGNATURE_PACKS)},
                 {"name": "fw2sbom:strings_extracted", "value": str(n_strings)},
                 {"name": "fw2sbom:min_string_length", "value": str(min_str_len)},
                 {"name": "fw2sbom:disclaimer",
@@ -1572,6 +1394,7 @@ def build_evidence_context(filename, data, payload, arm_info, container,
     produced by exactly the same analysis.
     """
     matched = {h["sig"]["name"] for h in hits}
+    signatures = get_signatures()
     magics = evidence_report.scan_magics(payload)
     banks = evidence_report.analyze_banks(payload)
     return {
@@ -1587,8 +1410,8 @@ def build_evidence_context(filename, data, payload, arm_info, container,
         "opacity": opacity,
         "hits": hits,
         "standards": standards,
-        "all_signatures": SIGNATURES,
-        "not_found": [s for s in SIGNATURES if s["name"] not in matched],
+        "all_signatures": signatures,
+        "not_found": [s for s in signatures if s["name"] not in matched],
         "magics": magics,
         "banks": banks,
         "bank_size": banks[0]["size"] if banks else evidence_report.BANK_SIZE,
@@ -1607,7 +1430,7 @@ def build_evidence_context(filename, data, payload, arm_info, container,
         "firmware_version": None,
         "n_confirmed": len(hits),
         "n_standards": len(standards),
-        "n_not_found": len(SIGNATURES) - len(matched),
+        "n_not_found": len(signatures) - len(matched),
         "n_magic_validated": sum(1 for m in magics if m["validated_hits"]),
         "n_magic_rejected": sum(1 for m in magics
                                 if m["raw_hits"] and not m["validated_hits"]),
@@ -1638,6 +1461,10 @@ def main(argv=None):
                     help="minimum length for extracted strings (default: 6)")
     ap.add_argument("--dump-strings", metavar="FILE",
                     help="also write all extracted strings (offset<TAB>string) to FILE")
+    ap.add_argument("--signatures", metavar="DIR", action="append", default=[],
+                    help="load extra signature packs from DIR (repeatable; also "
+                         "honours the FW2SBOM_SIGNATURES environment variable). "
+                         "A pack may override a built-in signature of the same name.")
     ap.add_argument("--no-deframe", action="store_true",
                     help="do not detect/strip packetized container framing")
     ap.add_argument("--dump-payload", metavar="FILE",
@@ -1652,6 +1479,13 @@ def main(argv=None):
 
     if args.min_str_len < 3:
         die("--min-str-len must be >= 3 (shorter values produce mostly noise)")
+
+    try:
+        signatures = load_signatures(args.signatures, args.verbose)
+    except ValueError as e:
+        die(str(e))
+    log(f"signature database: {len(signatures)} signature(s) "
+        f"from pack(s) {', '.join(SIGNATURE_PACKS)}", args.verbose)
 
     data = read_binary(args.input)
     log(f"read {len(data)} bytes from {args.input}", args.verbose)
@@ -1700,6 +1534,7 @@ def main(argv=None):
 
     hits = match_signatures(strings, args.verbose)
     infer_versions(hits, args.verbose)
+    opacity = reconcile_opacity(opacity, hits, standards, args.verbose)
     bom = build_sbom(args.input, data, file_magic, arm_info, hits,
                      args.min_str_len, len(strings),
                      container=container, opacity=opacity, payload=payload,

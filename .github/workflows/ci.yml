@@ -1,0 +1,96 @@
+name: CI
+
+# fw2sbom's analysis is a stack of heuristics whose failures are silent: a
+# constant that stops matching produces a smaller SBOM, not an error. Running
+# the fixture suite on every push is what turns that into a visible failure.
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux is where analysts run the CLI (Kali); Windows is what customers
+        # get in the portable package. Oldest and newest supported Python, so a
+        # version-specific regression shows up on one of them.
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.9", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Show environment
+        run: python -c "import sys; print(sys.version)"
+
+      # fw2sbom itself has no dependencies - that is the point. jsonschema is
+      # only for validating our output against the published CycloneDX schema.
+      - name: Install test-only dependencies
+        run: python -m pip install --disable-pip-version-check --quiet jsonschema
+
+      - name: Fetch the CycloneDX schemas
+        run: python tests/fetch_schema.py
+
+      - name: Run the test suite
+        run: python -m unittest discover -s tests -v
+
+      - name: Analyse every fixture through the CLI
+        shell: bash
+        run: |
+          python tests/make_fixtures.py "$RUNNER_TEMP/fixtures"
+          mkdir -p "$RUNNER_TEMP/out"
+          for image in "$RUNNER_TEMP"/fixtures/*.bin; do
+            echo "--- $(basename "$image")"
+            python fw2sbom.py "$image" -d "$RUNNER_TEMP/out" --pretty -v
+          done
+          ls -l "$RUNNER_TEMP/out"
+
+      # An SBOM tool that cannot be started is worse than one that finds
+      # nothing, and a missing signature pack is the way that happens.
+      - name: Check the signature database loads
+        run: |
+          python fw2sbom.py --version
+          python -c "import fw2sbom; s = fw2sbom.load_signatures(); print(len(s), 'signatures from', fw2sbom.SIGNATURE_PACKS)"
+
+  portable-package:
+    name: Portable package (Windows)
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the portable package
+        shell: pwsh
+        run: ./scripts/build-portable.ps1
+
+      # The release record claims the package hash can be re-derived from a
+      # clean checkout. Building it twice here is what makes that a fact.
+      - name: Verify the package is reproducible
+        shell: pwsh
+        run: |
+          $first = (Get-FileHash -Algorithm SHA256 dist-portable/fw2sbom-portable.zip).Hash
+          ./scripts/build-portable.ps1
+          $second = (Get-FileHash -Algorithm SHA256 dist-portable/fw2sbom-portable.zip).Hash
+          if ($first -ne $second) {
+            throw "package is not reproducible: $first vs $second"
+          }
+          Write-Host "reproducible: $first"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fw2sbom-portable
+          path: dist-portable/fw2sbom-portable.zip
+          if-no-files-found: error

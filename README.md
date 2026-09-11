@@ -3,7 +3,7 @@
 Evidence-based **CycloneDX 1.6** SBOM generator for embedded firmware images
 (`.bin`):ARM Cortex-M / Zephyr-style 映像、MCS-51(8051)映像(顯示控制器 /
 monitor scaler 韌體),以及廠商 **packetized / ISP-dump** 格式(自動去框)。
-Designed to run out-of-the-box on Kali Linux (Python 3.8+, stdlib only — no pip
+Designed to run out-of-the-box on Kali Linux (Python 3.9+, stdlib only — no pip
 dependencies).
 
 ## 分析流程 (Pipeline)
@@ -17,18 +17,21 @@ dependencies).
    - **MCS-51 (8051)**:0x0000 與 0x03+8k 的 LJMP 中斷向量表,加上核心 opcode
      佔比(LCALL / LJMP / MOV DPTR / MOVX / RET;均勻隨機只會佔 2.3%)
    - 兩者互斥判定,Cortex-M 先測(其向量表約束較強)
-2. **Strings 萃取** — 可列印 ASCII 字串(含檔案 offset)
+2. **Strings 萃取** — 可列印 ASCII 與 UTF-16LE 字串(含檔案 offset)
 3. **Embedded standard data** — 結構化偵測(解析並驗證結構,非字串比對):
    VESA E-EDID 區塊(128 bytes、magic + checksum、PnP ID、EDID 版本、monitor
    name descriptor)、DDC/CI MCCS capability string(含 `mccs_ver(x.y)` 版本)
 4. **Opacity 判定** — 熵值 / blank-flash run / byte 分佈檢定,區分「可分析的明文
    映像」與「加密或壓縮映像」;判定為 opaque 時,SBOM 會如實記錄「無法列舉」而
    不是含糊地回報「沒有元件」
-5. **Signature matching** — 內建常見嵌入式元件特徵庫:
+5. **Signature matching** — 34 個常見嵌入式元件特徵,放在 `signatures/*.json`
+   (見〈擴充 signature〉):
    Zephyr、FreeRTOS、mbed TLS、wolfSSL、lwIP、newlib、picolibc、GCC toolchain、
    MCUboot、littlefs、FatFs、CMSIS、TinyCrypt、OpenThread、NimBLE、TF-M、
    STM32 HAL、Nordic nrfx、nRF Connect SDK、Nordic SoftDevice Controller、MPSL、
-   Nordic nRF5 SDK(舊版)BLE DFU bootloader、MicroPython
+   Nordic nRF5 SDK(舊版)BLE DFU bootloader、MicroPython,以及 Linux 側的
+   BusyBox、OpenSSL、zlib、U-Boot、Linux kernel、Dropbear、OpenSSH、SQLite、
+   libcurl、musl、glibc
 6. **兩份交付物輸出** — CycloneDX 1.6 JSON + Excel 證據報告(見下方〈交付物〉)。
    每個 component 帶有:
    - `evidence.identity`(`binary-analysis` technique、confidence 0–0.97、
@@ -299,16 +302,29 @@ level),並提供**兩個下載連結**:CycloneDX JSON 與 Excel 證據報告,與
 
 ```bash
 pip install pyinstaller
-pyinstaller --onefile --console --name fw2sbom-service \
-  --add-data "onecra_logo.png;." --add-data "onecra_icon.png;." \
-  service.py
+pyinstaller fw2sbom-service.spec
 # 產出: dist/fw2sbom-service.exe
 ```
 
-`--add-data` 是必要的:頁面上的 Onecra logo 與瀏覽器分頁 favicon 是執行時從
-`onecra_logo.png` / `onecra_icon.png` 讀取後轉成 base64 內嵌到 HTML 裡,打包時
-要把這兩個圖檔一起帶進 exe(`service.py` 的 `resource_path()` 已處理好一般執行
-與 PyInstaller 凍結後兩種情況下的路徑)。
+倉庫裡的 `fw2sbom-service.spec` **不是** PyInstaller 預設產生的那份,請用它而不要
+自己下 `pyinstaller --onefile service.py` —— 它的 `datas` 帶了三樣必須一起進 exe
+的東西:
+
+| 檔案 | 少了會怎樣 |
+|---|---|
+| `signatures/` | exe 正常啟動,然後對每一份韌體都回報「找不到元件」 |
+| `onecra_logo.png` | 頁首品牌圖不見 |
+| `onecra_icon.png` | 瀏覽器分頁 favicon 不見 |
+
+兩個 PNG 是執行時讀取後轉 base64 內嵌進 HTML 的;signature 包則由
+`fw2sbom._resource_dir()` 從 `sys._MEIPASS` 讀回來。兩者都已處理好「一般執行」與
+「PyInstaller 凍結後」兩種路徑。
+
+簽章包缺席是最糟的失敗模式,因為它看起來像分析成功。要驗證打包結果:
+
+```bash
+dist/fw2sbom-service.exe --version    # 啟動時會印出載入了幾個簽章
+```
 
 - `--console` 保留終端機視窗,客戶可以看到「listening on http://127.0.0.1:8765/」
   這類訊息,關閉視窗(或 Ctrl+C)就會停止服務 —— 對資安工具而言,這種可見性
@@ -374,12 +390,78 @@ zip 是用 `scripts/make_deterministic_zip.py` 寫的(entry 排序、timestamp�
 
 ## 擴充 signature
 
-編輯 `fw2sbom.py` 的 `SIGNATURES` 清單即可;每個 pattern 給 `regex`、`weight`
-(0–1)、選填 `vgroup`(版本號 capture group)。
+簽章庫放在 `signatures/*.json`,依生態系分包(`mcu-rtos`、`mcu-lib`、
+`vendor-nordic`、`vendor-st`、`linux`),與分析程式碼分離 —— 更新簽章不用動
+`fw2sbom.py`,客戶也可以自己加。每個包長這樣:
+
+```json
+{
+  "pack": "linux",
+  "description": "Userland and kernel components of Linux-based firmware",
+  "signatures": [
+    {
+      "name": "busybox",
+      "supplier": "BusyBox",
+      "type": "application",
+      "purl": "pkg:generic/busybox",
+      "description": "BusyBox multi-call userspace utilities",
+      "patterns": [
+        { "regex": "BusyBox v([0-9]+\\.[0-9]+\\.[0-9]+)", "weight": 0.95, "vgroup": 1 },
+        { "regex": "BusyBox is a multi-call binary", "weight": 0.8 }
+      ]
+    }
+  ]
+}
+```
+
+- `weight` 介於 0 到 1;`vgroup` 是版本號的 capture group 編號(選填,但**沒有
+  版本號的元件無法對應 CVE**,新增簽章時盡量補一個帶 `vgroup` 的 pattern)
+- `purl` 存不帶版本的基底,版本在命中時才接上去
+- 載入時會驗證:regex 能不能編譯、`weight` 範圍、`vgroup` 是否超出 group 數、
+  `type` 是不是合法的 CycloneDX 型別。有問題會直接報錯,不會默默略過
+
+加自己的包而不動到內建的:
+
+```bash
+./fw2sbom.py firmware.bin --signatures /path/to/my-packs/
+FW2SBOM_SIGNATURES=/path/to/my-packs ./fw2sbom.py firmware.bin
+```
+
+同名簽章由後載入的包覆蓋(這就是客製化內建簽章的方法);同一個目錄裡重複定義
+同一個名字則是錯誤。**完全找不到任何簽章包時工具會直接報錯結束**,而不是產生
+一份空的 SBOM —— 「資料庫沒送到」不可以長得像「這份韌體沒有元件」。
+
+## 測試
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+測試用的韌體映像是跑的時候即時合成的(`tests/make_fixtures.py`,固定 seed,
+每次產出 byte-identical),不進倉庫。涵蓋:架構判定、去框(含框架在後的已知
+限制)、opacity 判定、簽章比對與版本擷取、EDID/MCCS 結構解析、SBOM 結構與
+bom-ref 一致性、Excel 報告、service 的記憶體存放區。
+
+另外有一組**針對已知缺口**的測試(`KnownGapTest`):它們斷言的是「今天做不到」
+的行為,例如壓縮過的 Linux router 映像目前找不到任何元件。這些測試**應該在對應
+的 roadmap 項目完成時失敗** —— 那次失敗就是功能完成的訊號,不是 regression。
+
+要把輸出對官方 CycloneDX 1.6 schema 驗證(CI 會做):
+
+```bash
+pip install jsonschema
+python tests/fetch_schema.py
+python -m unittest discover -s tests
+```
+
+schema 沒抓下來或沒裝 `jsonschema` 時,該項測試會 skip 而不是假裝通過。
 
 ## 限制
 
-- 僅萃取 ASCII 字串;不做反組譯、不做 code-similarity(FLIRT/BinDiff 類)比對
+- 萃取 ASCII 與 UTF-16LE 字串;不做反組譯、不做 code-similarity(FLIRT/BinDiff
+  類)比對
+- **不會走訪壓縮容器**:Linux 類韌體(uImage/FIT + gzip kernel + squashfs rootfs)
+  的元件全在壓縮區段內,目前一個都找不到。壓縮 magic 只在檔案開頭檢查
 - 指令集判定僅涵蓋 ARM Cortex-M 與 MCS-51;其他架構(RISC-V、Xtensa、8051 以外
   的 8-bit 核心)會回報「未識別」,分析仍會繼續但少了架構這條證據
 - 8051 韌體通常由 Keil C51 等專有工具鏈編譯、內容多為廠商自有程式碼,不一定含
@@ -399,11 +481,24 @@ fw2sbom/
 ├── service.py              # 拖拉式本機網頁服務(localhost drag-and-drop UI)
 ├── onecra_logo.png         # 頁首品牌 logo(service.py 內嵌用)
 ├── onecra_icon.png         # 瀏覽器分頁 favicon(service.py 內嵌用)
+├── signatures/             # 簽章庫(依生態系分包的 JSON)
+│   ├── mcu-rtos.json
+│   ├── mcu-lib.json
+│   ├── vendor-nordic.json
+│   ├── vendor-st.json
+│   └── linux.json
+├── tests/
+│   ├── make_fixtures.py          # 合成測試韌體產生器(固定 seed,可重現)
+│   ├── test_fw2sbom.py           # regression 測試(stdlib unittest)
+│   └── fetch_schema.py           # 抓官方 CycloneDX schema 供驗證用
 ├── scripts/
 │   ├── build-portable.ps1        # 打包免簽章 portable 版(驗 hash + smoke test)
 │   ├── make_deterministic_zip.py # 可重現的 zip writer(固定排序/timestamp)
 │   ├── Start-fw2sbom.bat         # portable 版的啟動器(會被複製進包裡)
 │   └── python-embed.sha256       # 釘住的官方 CPython embeddable hash
+├── .github/workflows/ci.yml      # Linux + Windows 測試、schema 驗證、可重現打包
+├── fw2sbom-service.spec    # PyInstaller 設定(datas 帶 signatures/ 與 PNG)
+├── pyproject.toml
 ├── RELEASE.md              # 每個交付 build 的 hash / commit / CPython 版本紀錄
 ├── README.md
 └── requirements.txt

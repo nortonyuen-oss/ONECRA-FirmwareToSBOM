@@ -1,0 +1,42 @@
+# fw2sbom packaging metadata.
+#
+# The tool deliberately has no runtime dependencies: it is delivered to
+# customers as a folder with an embedded interpreter, and every pip package
+# would be one more thing to ship, pin and explain to an auditor. This file
+# exists so the repository can be installed into a virtualenv for development
+# and so the CLI has a proper entry point - not to put fw2sbom on PyPI.
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fw2sbom"
+version = "1.5.0"
+description = "Evidence-based CycloneDX SBOM generator for embedded firmware images"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+keywords = ["sbom", "cyclonedx", "firmware", "cra", "binary-analysis"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Information Technology",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Security",
+    "Topic :: Software Development :: Build Tools",
+]
+
+[project.optional-dependencies]
+# Only for the test suite: validating our own output against the published
+# CycloneDX schema. Nothing in fw2sbom imports it.
+test = ["jsonschema>=4.0"]
+
+[project.scripts]
+fw2sbom = "fw2sbom:main"
+
+[tool.setuptools]
+py-modules = ["fw2sbom", "evidence_report", "service"]
+
+[tool.setuptools.package-data]
+"*" = ["signatures/*.json"]

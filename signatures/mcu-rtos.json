@@ -1,0 +1,96 @@
+{
+  "pack": "mcu-rtos",
+  "description": "RTOS and language runtimes found in microcontroller firmware.",
+  "signatures": [
+    {
+      "name": "zephyr",
+      "supplier": "Zephyr Project",
+      "type": "operating-system",
+      "purl": "pkg:github/zephyrproject-rtos/zephyr",
+      "description": "Zephyr RTOS",
+      "patterns": [
+        {
+          "regex": "Booting Zephyr OS build (?:zephyr-)?v?([0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.]+)?)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "Zephyr version ([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "Booting nRF Connect SDK v([0-9]+\\.[0-9]+\\.[0-9]+(?:-ncs[0-9]+)?)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "WEST_TOPDIR/zephyr/",
+          "weight": 0.65
+        },
+        {
+          "regex": "zephyr-v?([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.7,
+          "vgroup": 1
+        },
+        {
+          "regex": "Zephyr OS build v?([0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9]+)*)",
+          "weight": 0.85,
+          "vgroup": 1
+        },
+        {
+          "regex": "Zephyr OS",
+          "weight": 0.6
+        },
+        {
+          "regex": "ZEPHYR_BASE|zephyr,\\w+|zephyr/",
+          "weight": 0.4
+        },
+        {
+          "regex": "west build",
+          "weight": 0.2
+        }
+      ]
+    },
+    {
+      "name": "freertos",
+      "supplier": "Amazon Web Services",
+      "type": "operating-system",
+      "purl": "pkg:github/FreeRTOS/FreeRTOS-Kernel",
+      "description": "FreeRTOS kernel",
+      "patterns": [
+        {
+          "regex": "FreeRTOS[ vV]+([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.9,
+          "vgroup": 1
+        },
+        {
+          "regex": "FreeRTOS",
+          "weight": 0.6
+        },
+        {
+          "regex": "vTaskStartScheduler|xTaskCreate|prvIdleTask",
+          "weight": 0.5
+        }
+      ]
+    },
+    {
+      "name": "micropython",
+      "supplier": "MicroPython project",
+      "type": "application",
+      "purl": "pkg:github/micropython/micropython",
+      "description": "MicroPython interpreter",
+      "patterns": [
+        {
+          "regex": "MicroPython v([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "MicroPython",
+          "weight": 0.6
+        }
+      ]
+    }
+  ]
+}

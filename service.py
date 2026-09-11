@@ -14,6 +14,9 @@ this is meant for local, single-user use.
 """
 
 import base64
+import time
+import threading
+import collections
 import json
 import os
 import socket
@@ -31,9 +34,42 @@ import fw2sbom as core
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FW2SBOM_PORT", "8765"))
 
-# Generated SBOMs kept in memory (id -> {json, filename}) so the browser can
-# fetch them for download right after analysis. Cleared on restart.
-_SBOM_STORE = {}
+# Generated SBOMs kept in memory (id -> {json, xlsx, filenames}) so the browser
+# can fetch them for download right after analysis. Cleared on restart.
+#
+# A deliverable pair for a large image is a few MB, and the browser collects it
+# seconds after the upload; without a bound, a service left running all week
+# would hold every analysis anyone ever ran. Entries expire by age and the
+# oldest are dropped once the store is full.
+SBOM_STORE_MAX_ENTRIES = 32
+SBOM_STORE_TTL_SECONDS = 3600
+_SBOM_STORE = collections.OrderedDict()
+_SBOM_STORE_LOCK = threading.Lock()
+
+
+def _store_put(sbom_id, entry):
+    """Insert one result, expiring old entries and capping the total."""
+    now = time.time()
+    entry["stored_at"] = now
+    with _SBOM_STORE_LOCK:
+        for old_id in [k for k, v in _SBOM_STORE.items()
+                       if now - v["stored_at"] > SBOM_STORE_TTL_SECONDS]:
+            del _SBOM_STORE[old_id]
+        _SBOM_STORE[sbom_id] = entry
+        while len(_SBOM_STORE) > SBOM_STORE_MAX_ENTRIES:
+            _SBOM_STORE.popitem(last=False)
+
+
+def _store_get(sbom_id):
+    """One result, or None if it is unknown or has expired."""
+    with _SBOM_STORE_LOCK:
+        entry = _SBOM_STORE.get(sbom_id)
+        if entry is None:
+            return None
+        if time.time() - entry["stored_at"] > SBOM_STORE_TTL_SECONDS:
+            del _SBOM_STORE[sbom_id]
+            return None
+        return entry
 
 
 def resource_path(name):
@@ -368,6 +404,7 @@ def analyze_bytes(filename, data):
     strings = core.extract_strings(payload, 6)
     hits = core.match_signatures(strings, False)
     core.infer_versions(hits, False)
+    opacity = core.reconcile_opacity(opacity, hits, standards)
     name = filename or "firmware.bin"
     stem = os.path.splitext(os.path.basename(name))[0]
     bom = core.build_sbom(name, data, None, arm_info, hits, 6,
@@ -440,7 +477,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404, "not found")
 
     def _send_attachment(self, sbom_id, key, content_type, write_body):
-        entry = _SBOM_STORE.get(sbom_id)
+        entry = _store_get(sbom_id)
         if not entry or key not in entry:
             self.send_error(404, "unknown or expired SBOM id")
             return
@@ -503,11 +540,11 @@ class Handler(BaseHTTPRequestHandler):
 
         sbom_id = uuid.uuid4().hex
         out_filename = result["sbom_filename"]
-        _SBOM_STORE[sbom_id] = {
+        _store_put(sbom_id, {
             "json": result["sbom_json"], "json_name": out_filename,
             "xlsx": result["evidence_xlsx"],
             "xlsx_name": result["evidence_filename"],
-        }
+        })
 
         self._send_json({
             "components": result["components"],
@@ -569,6 +606,17 @@ class Server(ThreadingHTTPServer):
 
 
 def main():
+    # Load the component database before binding the port. A service that
+    # starts happily and then reports "0 components" for every upload because
+    # its signatures did not ship is the worst possible failure for this tool.
+    try:
+        signatures = core.load_signatures()
+    except ValueError as e:
+        print(f"[fw2sbom-service] {e}", file=sys.stderr)
+        return 1
+    print(f"[fw2sbom-service] {len(signatures)} signatures loaded from "
+          f"pack(s) {', '.join(core.SIGNATURE_PACKS)}")
+
     url = f"http://{HOST}:{PORT}/"
     try:
         server = Server((HOST, PORT), Handler)

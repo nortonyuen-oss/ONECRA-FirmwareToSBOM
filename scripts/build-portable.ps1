@@ -71,6 +71,11 @@ $PayloadFromRoot = @(
     'onecra_icon.png'
 )
 
+# The component database. Without it the tool refuses to start, which is the
+# correct behaviour but a terrible thing to ship, so the build checks that the
+# packs actually arrived.
+$PayloadDirs = @('signatures')
+
 $PackageId = "$PythonVersion-$Architecture"
 $EmbedName = "python-$PythonVersion-embed-$Architecture.zip"
 $EmbedUrl  = "https://www.python.org/ftp/python/$PythonVersion/$EmbedName"
@@ -118,6 +123,12 @@ foreach ($name in $PayloadFromRoot) {
     $path = Join-Path $RepoRoot $name
     if (-not (Test-Path -LiteralPath $path)) {
         throw "missing payload file: $path"
+    }
+}
+foreach ($name in $PayloadDirs) {
+    $path = Join-Path $RepoRoot $name
+    if (-not (Test-Path -LiteralPath $path -PathType Container)) {
+        throw "missing payload directory: $path"
     }
 }
 foreach ($path in @($ZipWriter, $BatSource)) {
@@ -198,6 +209,10 @@ Write-Step 'copying fw2sbom files'
 foreach ($name in $PayloadFromRoot) {
     Copy-Item -LiteralPath (Join-Path $RepoRoot $name) -Destination $StageDir -Force
 }
+foreach ($name in $PayloadDirs) {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot $name) -Destination $StageDir `
+        -Recurse -Force
+}
 Copy-Item -LiteralPath $BatSource -Destination $StageDir -Force
 
 $stagedPython = Join-Path $StageDir 'python.exe'
@@ -233,6 +248,20 @@ if ($SkipSmokeTest) {
         throw "staged interpreter cannot import service.py (exit $LASTEXITCODE)"
     }
     Write-Step '  service.py imports cleanly'
+
+    # A package whose component database did not arrive starts up and then
+    # reports "no components" for every firmware it is given. Prove the packs
+    # load from inside the staged tree, where the paths are what a customer
+    # will actually have.
+    $loaded = & $stagedPython '-B' '-c' `
+        'import fw2sbom; print(len(fw2sbom.load_signatures()))'
+    if ($LASTEXITCODE -ne 0) {
+        throw "staged package cannot load its signature database (exit $LASTEXITCODE)"
+    }
+    if ([int]$loaded -lt 1) {
+        throw "staged package loaded $loaded signatures"
+    }
+    Write-Step "  $loaded signatures load from the staged package"
 }
 
 # Belt and braces: -B covers what this script runs, but anything that touched
@@ -270,9 +299,14 @@ Write-Host "  fw2sbom   $ToolVersion"
 Write-Host "  cpython   $PythonVersion ($Architecture)"
 Write-Host ''
 Write-Host 'Payload file hashes (the part that is ours):'
-foreach ($name in $PayloadFromRoot) {
+$ourFiles = @($PayloadFromRoot) + @('Start-fw2sbom.bat')
+foreach ($name in $PayloadDirs) {
+    $ourFiles += Get-ChildItem -LiteralPath (Join-Path $StageDir $name) -Recurse -File |
+        ForEach-Object { "$name/" + $_.Name }
+}
+foreach ($name in $ourFiles) {
     $h = Get-Sha256 (Join-Path $StageDir $name)
-    Write-Host ("  {0,-20} {1}" -f $name, $h)
+    Write-Host ("  {0,-32} {1}" -f $name, $h)
 }
 Write-Host ''
 Write-Host 'Record these in RELEASE.md along with the commit they were built from.'

@@ -5,4 +5,5 @@
 *.py   text eol=lf
 *.bat  text eol=lf
 *.ps1  text eol=lf
+*.json text eol=lf
 *.png  binary

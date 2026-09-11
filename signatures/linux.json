@@ -1,0 +1,220 @@
+{
+  "pack": "linux",
+  "description": "Userland and kernel components of Linux-based firmware (routers, gateways, NVRs, set-top boxes).",
+  "signatures": [
+    {
+      "name": "busybox",
+      "supplier": "BusyBox",
+      "type": "application",
+      "purl": "pkg:generic/busybox",
+      "description": "BusyBox multi-call userspace utilities",
+      "patterns": [
+        {
+          "regex": "BusyBox v([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "BusyBox is a multi-call binary",
+          "weight": 0.8
+        },
+        {
+          "regex": "busybox",
+          "weight": 0.45
+        }
+      ]
+    },
+    {
+      "name": "openssl",
+      "supplier": "OpenSSL Project",
+      "type": "library",
+      "purl": "pkg:generic/openssl",
+      "description": "OpenSSL TLS/crypto library",
+      "patterns": [
+        {
+          "regex": "OpenSSL ([0-9]+\\.[0-9]+\\.[0-9]+[a-z]?)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "SSLv3 part of OpenSSL",
+          "weight": 0.8
+        },
+        {
+          "regex": "OPENSSL_",
+          "weight": 0.5
+        }
+      ]
+    },
+    {
+      "name": "zlib",
+      "supplier": "zlib",
+      "type": "library",
+      "purl": "pkg:generic/zlib",
+      "description": "zlib compression library",
+      "patterns": [
+        {
+          "regex": "inflate ([0-9]+\\.[0-9]+\\.[0-9]+) Copyright",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "deflate ([0-9]+\\.[0-9]+\\.[0-9]+) Copyright",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "invalid distance too far back",
+          "weight": 0.7
+        }
+      ]
+    },
+    {
+      "name": "u-boot",
+      "supplier": "Das U-Boot",
+      "type": "application",
+      "purl": "pkg:generic/u-boot",
+      "description": "Das U-Boot bootloader",
+      "patterns": [
+        {
+          "regex": "U-Boot (20[0-9]{2}\\.[0-9]{2}(?:-[A-Za-z0-9.]+)?)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "Hit any key to stop autoboot",
+          "weight": 0.8
+        },
+        {
+          "regex": "bootcmd",
+          "weight": 0.4
+        }
+      ]
+    },
+    {
+      "name": "linux-kernel",
+      "supplier": "Linux",
+      "type": "operating-system",
+      "purl": "pkg:generic/linux",
+      "description": "Linux kernel",
+      "patterns": [
+        {
+          "regex": "Linux version ([0-9]+\\.[0-9]+(?:\\.[0-9]+)?[^ ]*)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "Kernel command line",
+          "weight": 0.7
+        },
+        {
+          "regex": "VFS: Mounted root",
+          "weight": 0.7
+        }
+      ]
+    },
+    {
+      "name": "dropbear",
+      "supplier": "Dropbear",
+      "type": "application",
+      "purl": "pkg:generic/dropbear",
+      "description": "Dropbear SSH server/client",
+      "patterns": [
+        {
+          "regex": "dropbear_([0-9]+\\.[0-9]+)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "Dropbear SSH",
+          "weight": 0.8
+        }
+      ]
+    },
+    {
+      "name": "openssh",
+      "supplier": "OpenBSD",
+      "type": "application",
+      "purl": "pkg:generic/openssh",
+      "description": "OpenSSH",
+      "patterns": [
+        {
+          "regex": "OpenSSH_([0-9]+\\.[0-9]+(?:p[0-9]+)?)",
+          "weight": 0.95,
+          "vgroup": 1
+        }
+      ]
+    },
+    {
+      "name": "sqlite",
+      "supplier": "SQLite",
+      "type": "library",
+      "purl": "pkg:generic/sqlite",
+      "description": "SQLite embedded database",
+      "patterns": [
+        {
+          "regex": "SQLite version ([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "SQLite format 3",
+          "weight": 0.75
+        }
+      ]
+    },
+    {
+      "name": "libcurl",
+      "supplier": "curl",
+      "type": "library",
+      "purl": "pkg:generic/curl",
+      "description": "libcurl transfer library",
+      "patterns": [
+        {
+          "regex": "libcurl/([0-9]+\\.[0-9]+\\.[0-9]+)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "curl_easy_",
+          "weight": 0.6
+        }
+      ]
+    },
+    {
+      "name": "musl",
+      "supplier": "musl",
+      "type": "library",
+      "purl": "pkg:generic/musl",
+      "description": "musl C library",
+      "patterns": [
+        {
+          "regex": "musl libc \\(([^)]+)\\)",
+          "weight": 0.85
+        },
+        {
+          "regex": "/lib/ld-musl-",
+          "weight": 0.8
+        }
+      ]
+    },
+    {
+      "name": "glibc",
+      "supplier": "GNU",
+      "type": "library",
+      "purl": "pkg:generic/glibc",
+      "description": "GNU C Library",
+      "patterns": [
+        {
+          "regex": "GNU C Library.*version ([0-9]+\\.[0-9]+)",
+          "weight": 0.95,
+          "vgroup": 1
+        },
+        {
+          "regex": "GLIBC_2\\.[0-9]+",
+          "weight": 0.7
+        }
+      ]
+    }
+  ]
+}

@@ -31,6 +31,90 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.5.0
+
+| | |
+|---|---|
+| Tag | `v1.5.0` |
+| Build 日期 | 2026-09-11 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 0**:測試安全網、簽章外部化、repo 治理。分析行為對既有映像不變,
+除咗兩項修正(見下)。
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,191,000 bytes |
+| SHA-256 | `f5a99f49a4f632e4994e490091e24accdb1048bea62855fbfb2b1387a628fe5e` |
+| 內容 | 46 個檔案(多咗 5 個 signature 包),全部喺 `fw2sbom-portable/` 之下 |
+| Reproducible | 是 —— `.\scripts\build-portable.ps1`,CI 每次 build 兩次對 hash |
+
+### PyInstaller 單檔 exe
+
+**呢個版本冇 build。** 用 `pyinstaller fw2sbom-service.spec`(唔好用裸嘅
+`--onefile`,spec 嘅 `datas` 帶住 `signatures/`,冇咗就會對每份韌體都報「找不到
+元件」)。
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `4b95dd78c2a071a189c0a64bac88fb4a3a328123e964f23eb018f5f154c534a7` |
+| `service.py` | `9fd27fd07d6dad087a1443db2dc4f2d6e39c611f803069e81ba78dac1b1a03d6` |
+| `evidence_report.py` | `5d22a065d38f2213ac9f7a4c310f135ca75bfa914e413b1f0ba14e43a65bbdcc` |
+| `onecra_logo.png` | `a870f4d03b9bdbcc4c6bbc0077c09872bfe49a627400338a46d42a72b4a0c589` |
+| `onecra_icon.png` | `21b5280d2f905b5c7ccbcd1b8f284371f24e374e212f71a2838813f98b7596a1` |
+| `Start-fw2sbom.bat` | `1c52c4f0c7d2cae205dc199475c8a666e20e180a7301b7354499c1106a7adee5` |
+| `signatures/linux.json` | `ab663eee96607955e31d6750e8e0d7df3d2f9d089cf2082a9fd5d4857868b315` |
+| `signatures/mcu-lib.json` | `d489590644a6da6b132f67bc39c55eecd82c3d479122e64a451e60cbd3daeb54` |
+| `signatures/mcu-rtos.json` | `b87ccae1c638bd469f2c6d6766c54fc800ec7cee669fa1eba93235f8446271e3` |
+| `signatures/vendor-nordic.json` | `8da7fdc631d7e71bb4c51edb007b5ce511d99810dde95a657e87ceade9def63e` |
+| `signatures/vendor-st.json` | `6c7a683dc98afba1553cd28ba66add045bf62458b2ca714d9089da1c2240f4de` |
+
+### 新增
+
+- **測試套件**(`tests/`):55 個 regression test,對 9 份即時合成嘅韌體映像。
+  Fixture 由 `tests/make_fixtures.py` 以固定 seed 產生,byte-identical 可重現,
+  唔入倉庫。
+- **CycloneDX 1.6 schema 驗證**:9 份 fixture SBOM 全部通過官方 schema。
+  呢個輸出**之前從未驗證過**。
+- **CI**(`.github/workflows/ci.yml`):Ubuntu + Windows × Python 3.9 / 3.13,
+  跑測試 + schema 驗證 + CLI 全 fixture 分析;另一個 job build portable 版兩次
+  並比對 hash,令「可重現」由聲稱變成每次 push 都驗證嘅事實。
+- **簽章外部化**:34 個簽章由 `fw2sbom.py` 搬去 `signatures/*.json`,依生態系
+  分 5 包。載入時驗證 regex / weight / vgroup / CycloneDX type。客戶可用
+  `--signatures DIR` 或 `FW2SBOM_SIGNATURES` 加自己嘅包,同名覆蓋內建。
+  **完全搵唔到簽章包會直接 exit 1**,唔會產出一份空 SBOM。
+- **UTF-16LE 字串萃取**:之前只讀 ASCII,UTF-16 嘅版本 banner 完全睇唔到。
+- SBOM metadata 新增 `fw2sbom:signature_database_size` 同
+  `fw2sbom:signature_packs` —— 「掃過 34 樣嘢搵到 2 樣」要可稽核,個 34 就要
+  喺檔案入面。
+- `pyproject.toml`(開發用安裝 + CLI entry point,依然零 runtime 依賴)。
+
+### 修正
+
+- **Opacity 判定同簽章比對自相矛盾**。`analyze_opacity()` 喺簽章比對之前跑,
+  所以可以一邊講「payload is OPAQUE - static component identification is not
+  possible」,一邊列出 8 個帶精確版本嘅元件。由 fixture `packet_back.bin` 揭發。
+  而家證據贏過統計:一旦有元件由 payload 讀出嚟,verdict 降為 `mixed`,原本嘅
+  判定記入 `fw2sbom:payload_verdict_before_reconciliation`。真正冇嘢可讀嘅
+  加密映像不受影響,仍然係 `opaque`。分區段判定係 Phase 2 嘅正解。
+- **UTF-16 字串會偷前一個 ASCII 字串嘅最後一個字元**(NUL 結尾令佢睇落似
+  UTF-16 單元)。證據會逐字引用命中字串入稽核文件,所以呢個唔可以留。
+- `service.py` 嘅 `_SBOM_STORE` 之前冇上限,長期執行會累積每一次分析嘅結果。
+  改成 32 個 entry + 1 小時 TTL,有鎖。
+
+### 已知缺口(有測試盯住)
+
+`KnownGapTest` 斷言嘅係「今日做唔到」嘅行為 —— 壓縮過嘅 Linux router 映像目前
+搵唔到任何元件。**呢啲測試喺 Phase 2 完成時應該會失敗**,嗰次失敗就係功能完成
+嘅訊號,唔係 regression。
+
+---
+
 ## v1.4.1
 
 | | |
