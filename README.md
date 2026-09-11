@@ -76,15 +76,15 @@ chmod +x fw2sbom.py
 ## 範例:分析 zephyr.bin
 
 ```bash
+# repo 裡已經附了現成的 samples/zephyr.bin(合成樣本,32 KiB);
+# 想重新產生一份全新的,用附的產生器即可:
+python3 samples/make_test_bin.py
+
 # 基本用法
-./fw2sbom.py zephyr.bin
+./fw2sbom.py samples/zephyr.bin
 
 # 完整範例:指定輸出、縮排、verbose、同時 dump strings
-./fw2sbom.py zephyr.bin -o zephyr.sbom.json --pretty -v --dump-strings zephyr.strings.txt
-
-# 先用附的產生器做一個測試用 zephyr.bin(合成樣本)
-python3 samples/make_test_bin.py
-./fw2sbom.py samples/zephyr.bin -o samples/zephyr.sbom.json --pretty -v
+./fw2sbom.py samples/zephyr.bin -o samples/zephyr.sbom.json --pretty -v --dump-strings samples/zephyr.strings.txt
 ```
 
 範例輸出(stderr 摘要):

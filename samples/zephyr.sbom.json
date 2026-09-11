@@ -2,10 +2,10 @@
   "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
   "bomFormat": "CycloneDX",
   "specVersion": "1.6",
-  "serialNumber": "urn:uuid:4952abfc-144c-4be8-8c48-a372023a8e4c",
+  "serialNumber": "urn:uuid:981a6ad0-3a5e-45b7-a13a-898c072b90f1",
   "version": 1,
   "metadata": {
-    "timestamp": "2026-09-08T01:51:23Z",
+    "timestamp": "2026-09-11T02:05:44Z",
     "lifecycles": [
       {
         "phase": "post-build"
@@ -16,27 +16,32 @@
         {
           "type": "application",
           "name": "fw2sbom",
-          "version": "1.2.0",
+          "version": "1.4.0",
           "description": "Binary fingerprint + string signature SBOM extractor"
         }
       ]
     },
     "component": {
       "type": "firmware",
-      "bom-ref": "firmware-root",
+      "bom-ref": "firmware:91bb0fc5a6969e88036ea09e",
       "name": "zephyr.bin",
+      "version": "UNKNOWN",
       "hashes": [
         {
+          "alg": "SHA-512",
+          "content": "a58c503b0e658c99d4e61d7be7e67dd962bfe63b8126019acdb516cefa39a03c31e89378c3d017faf20399735fd354538e50a1c7f508c2358f9f206401ee10be"
+        },
+        {
           "alg": "SHA-256",
-          "content": "bb6f0b67a5eaf7c5b621a7cfe4fb464e8da403ac1b7623c19ab06cb141ef617e"
+          "content": "91bb0fc5a6969e88036ea09ef809c5a3ce7ad551055f0be77740a1ac3a944a0c"
         },
         {
           "alg": "SHA-1",
-          "content": "af64f8b8cc7dae2764cec54c36dab9deeb39ad55"
+          "content": "f7a197f6eb2024f58b8ad4cee13f47939afaa34e"
         },
         {
           "alg": "MD5",
-          "content": "15b600e387c3b29096ffd42588bc909a"
+          "content": "7e2c33af29860b87529c654e43f562ff"
         }
       ],
       "properties": [
@@ -45,20 +50,28 @@
           "value": "32768"
         },
         {
+          "name": "fw2sbom:architecture",
+          "value": "ARM Cortex-M (Thumb)"
+        },
+        {
           "name": "fw2sbom:cortex_m_vector_table",
           "value": "detected"
         },
         {
-          "name": "fw2sbom:vector_table_detail",
-          "value": "initial SP 0x20010000 points into typical SRAM"
+          "name": "fw2sbom:mcs51_vector_table",
+          "value": "not-detected"
         },
         {
           "name": "fw2sbom:vector_table_detail",
-          "value": "reset vector 0x000004c1 has Thumb bit set"
+          "value": "cortex-m: initial SP 0x20010000 points into typical SRAM"
         },
         {
           "name": "fw2sbom:vector_table_detail",
-          "value": "14/14 plausible exception vectors in slots 2-15"
+          "value": "cortex-m: reset vector 0x000004c1 has Thumb bit set"
+        },
+        {
+          "name": "fw2sbom:vector_table_detail",
+          "value": "cortex-m: 14/14 plausible exception vectors in slots 2-15"
         },
         {
           "name": "fw2sbom:file_magic",
@@ -70,19 +83,19 @@
         },
         {
           "name": "fw2sbom:payload_entropy_bits_per_byte",
-          "value": "1.5112"
+          "value": "1.5103"
         },
         {
           "name": "fw2sbom:payload_longest_identical_run",
-          "value": "24042"
+          "value": "24043"
         },
         {
           "name": "fw2sbom:payload_chi_square",
-          "value": "4615790.5"
+          "value": "4616198.5"
         },
         {
           "name": "fw2sbom:payload_printable_ratio",
-          "value": "0.0129"
+          "value": "0.0127"
         },
         {
           "name": "fw2sbom:payload_duplicate_16b_blocks",
@@ -97,7 +110,7 @@
       },
       {
         "name": "fw2sbom:analysis_methods",
-        "value": "file(1) magic, packetized-container de-framing, printable-string extraction, signature/regex matching, Cortex-M vector-table heuristics, entropy/opacity analysis"
+        "value": "file(1) magic, packetized-container de-framing, printable-string extraction, signature/regex matching, instruction-set identification (Cortex-M / MCS-51), embedded standard-data parsing (VESA E-EDID, DDC/CI MCCS), entropy/opacity analysis"
       },
       {
         "name": "fw2sbom:offset_reference",
@@ -162,7 +175,7 @@
               {
                 "technique": "binary-analysis",
                 "confidence": 0.2,
-                "value": "regex 'west build' matched 'west build' at offset 0x21e2 of the file"
+                "value": "regex 'west build' matched 'west build' at offset 0x21e3 of the file"
               }
             ]
           },
@@ -228,12 +241,12 @@
               {
                 "technique": "binary-analysis",
                 "confidence": 0.5,
-                "value": "regex 'MBEDTLS_[A-Z0-9_]+' matched 'MBEDTLS_ERR_SSL_ALLOC_FAILED' at offset 0x20e4 of the file"
+                "value": "regex 'MBEDTLS_[A-Z0-9_]+' matched 'MBEDTLS_ERR_SSL_ALLOC_FAILED' at offset 0x20e5 of the file"
               },
               {
                 "technique": "binary-analysis",
                 "confidence": 0.5,
-                "value": "regex 'mbedtls_[a-z0-9_]+' matched 'mbedtls_ssl_handshake' at offset 0x20cb of the file"
+                "value": "regex 'mbedtls_[a-z0-9_]+' matched 'mbedtls_ssl_handshake' at offset 0x20cc of the file"
               }
             ]
           },
@@ -304,7 +317,7 @@
               {
                 "technique": "binary-analysis",
                 "confidence": 0.4,
-                "value": "regex 'lwip_[a-z_]+|LWIP_[A-Z_]+' matched 'lwip_socket' at offset 0x2113 of the file"
+                "value": "regex 'lwip_[a-z_]+|LWIP_[A-Z_]+' matched 'lwip_socket' at offset 0x2111 of the file"
               }
             ]
           },
@@ -573,17 +586,17 @@
               {
                 "technique": "binary-analysis",
                 "confidence": 0.85,
-                "value": "regex 'CMSIS[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'CMSIS-5.9.0' at offset 0x2196 of the file"
+                "value": "regex 'CMSIS[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'CMSIS-5.9.0' at offset 0x2197 of the file"
               },
               {
                 "technique": "binary-analysis",
                 "confidence": 0.5,
-                "value": "regex 'CMSIS' matched 'CMSIS' at offset 0x2196 of the file"
+                "value": "regex 'CMSIS' matched 'CMSIS' at offset 0x2197 of the file"
               },
               {
                 "technique": "binary-analysis",
                 "confidence": 0.35,
-                "value": "regex 'SysTick_Handler|NVIC_[A-Za-z]+|__NVIC' matched 'SysTick_Handler' at offset 0x21a6 of the file"
+                "value": "regex 'SysTick_Handler|NVIC_[A-Za-z]+|__NVIC' matched 'SysTick_Handler' at offset 0x21a5 of the file"
               }
             ]
           },
@@ -594,7 +607,7 @@
               {
                 "technique": "binary-analysis",
                 "confidence": 0.85,
-                "value": "regex 'CMSIS[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'CMSIS-5.9.0' at offset 0x2196 of the file"
+                "value": "regex 'CMSIS[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'CMSIS-5.9.0' at offset 0x2197 of the file"
               }
             ]
           }
@@ -602,7 +615,7 @@
         "occurrences": [
           {
             "location": "zephyr.bin",
-            "additionalContext": "first match at offset 0x2196 of the file"
+            "additionalContext": "first match at offset 0x2197 of the file"
           }
         ]
       },
@@ -632,7 +645,7 @@
   ],
   "dependencies": [
     {
-      "ref": "firmware-root",
+      "ref": "firmware:91bb0fc5a6969e88036ea09e",
       "dependsOn": [
         "component-1-zephyr",
         "component-2-mbedtls",
