@@ -208,11 +208,14 @@ if (-not (Test-Path -LiteralPath $stagedPython)) {
 # --------------------------------------------------------------------------- #
 # 4. Smoke-test the staged package with its own interpreter
 # --------------------------------------------------------------------------- #
+# -B throughout: a .pyc records the source mtime it was built from, so letting
+# the smoke test write __pycache__ into the staging directory would both ship
+# the customer our build cache and make the package hash unreproducible.
 if ($SkipSmokeTest) {
     Write-Step 'smoke test skipped'
 } else {
     Write-Step 'smoke test: staged interpreter runs staged fw2sbom'
-    $reported = & $stagedPython (Join-Path $StageDir 'fw2sbom.py') '--version' 2>&1
+    $reported = & $stagedPython '-B' (Join-Path $StageDir 'fw2sbom.py') '--version' 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "staged fw2sbom.py --version failed (exit $LASTEXITCODE): $reported"
     }
@@ -225,11 +228,19 @@ if ($SkipSmokeTest) {
     # service.py is the actual entry point; importing it catches a missing
     # .pyd or a stdlib module the embeddable build leaves out, which
     # fw2sbom.py alone would not.
-    & $stagedPython '-c' 'import service' | Out-Null
+    & $stagedPython '-B' '-c' 'import service' | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "staged interpreter cannot import service.py (exit $LASTEXITCODE)"
     }
     Write-Step '  service.py imports cleanly'
+}
+
+# Belt and braces: -B covers what this script runs, but anything that touched
+# the staging directory beforehand may have left a cache behind.
+$caches = @(Get-ChildItem -LiteralPath $StageDir -Recurse -Force -Directory -Filter '__pycache__' -ErrorAction SilentlyContinue)
+foreach ($cache in $caches) {
+    Write-Step "removing stray $($cache.FullName)"
+    Remove-Item -LiteralPath $cache.FullName -Recurse -Force
 }
 
 # --------------------------------------------------------------------------- #

@@ -9,6 +9,6 @@
 #
 # Format: <version>-<arch>  <sha256>
 #
-# No entries yet -- the v1.4.0 package was built from an interpreter that was
+# No entries yet -- the v1.4.1 package was built from an interpreter that was
 # already unpacked on the build machine, so its original archive was not
 # available to hash. The next `build-portable.ps1 -PinHash` run fills this in.

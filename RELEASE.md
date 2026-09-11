@@ -31,13 +31,16 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
-## v1.4.0
+## v1.4.1
 
 | | |
 |---|---|
-| Tag | `v1.4.0`(`git rev-list -n 1 v1.4.0` 攞 commit) |
+| Tag | `v1.4.1` |
 | Build 日期 | 2026-09-11 |
 | CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+`TOOL_VERSION` 由 1.4.0 升到 1.4.1。功能同 1.4.0 一樣,呢個 bump 係為咗令
+**工具版本、git tag、交付出去嘅 zip 三者對得返**(原因見下面〈關於 v1.4.0 tag〉)。
 
 ### Portable 版(免簽章,推薦交付)
 
@@ -45,23 +48,20 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 |---|---|
 | 檔案 | `dist-portable/fw2sbom-portable.zip` |
 | 大小 | 11,185,077 bytes |
-| SHA-256 | `785738f629ef18ab77c178bc95a5eac544e78055231cb8b07e0c54a65ae8ee42` |
+| SHA-256 | `32e43f46ae1e2857d207062b6d76482e3bc69c6ab198dceab9cc763145cbbe34` |
 | 內容 | 41 個檔案,全部喺 `fw2sbom-portable/` 之下 |
 | Reproducible | 是 —— `.\scripts\build-portable.ps1` |
 
 解壓後雙擊 `Start-fw2sbom.bat`。唔會撞 SmartScreen「未知發行者」,因為包入面
 冇任何由我哋自己 compile / link 出嚟嘅 binary。
 
-### PyInstaller 單檔 exe(會撞 SmartScreen)
+### PyInstaller 單檔 exe
 
-| | |
-|---|---|
-| 檔案 | `dist/fw2sbom-service.exe` |
-| 大小 | 9,715,379 bytes |
-| SHA-256 | `ec82dbcd934e5bec4c6823f44fb328a2d436bbfddf83a4c8b1922ac194f26d1f` |
-| Reproducible | 否 —— rebuild 會出唔同 hash |
+**呢個版本冇 build。** `dist/fw2sbom-service.exe` 如果仲喺度,係 1.4.0 嗰個,
+唔好當 1.4.1 交出去。要嘅話照 [README](README.md#打包成單一執行檔給客戶用) 嘅
+PyInstaller 指令重新 build,再喺度補返一行。
 
-未簽章。客戶電腦嘅 SmartScreen / 防毒有機會直接攔截。要真正解決要買 EV code
+exe 未簽章,客戶電腦嘅 SmartScreen / 防毒有機會直接攔截。要真正解決要買 EV code
 signing 憑證;喺嗰之前,**優先交付上面嘅 portable 版**。
 
 ### 包入面屬於我哋嘅檔案
@@ -71,16 +71,16 @@ zip 入面大部分 bytes 係 python.org 嘅 embeddable CPython。以下先係 f
 
 | 檔案 | SHA-256 |
 |---|---|
-| `fw2sbom.py` | `c37ba70f00f7040a66375ad893833a0df0eafa3f4ff0f2019fcf55c6023808ab` |
+| `fw2sbom.py` | `8f9253a068309fa834a7b741c9afd5a042649c52962d9dbc69d9edc121fa5f40` |
 | `service.py` | `7108a164bb5350e264587de49d8f87ed52695ccceabb21a8c35661c5fb919f01` |
 | `evidence_report.py` | `5d22a065d38f2213ac9f7a4c310f135ca75bfa914e413b1f0ba14e43a65bbdcc` |
 | `onecra_logo.png` | `a870f4d03b9bdbcc4c6bbc0077c09872bfe49a627400338a46d42a72b4a0c589` |
 | `onecra_icon.png` | `21b5280d2f905b5c7ccbcd1b8f284371f24e374e212f71a2838813f98b7596a1` |
 | `Start-fw2sbom.bat` | `1c52c4f0c7d2cae205dc199475c8a666e20e180a7301b7354499c1106a7adee5` |
 
-### 這個版本有咩
+### 呢個版本有咩
 
-首個有紀錄嘅 release。相對之前嘅內部 build:
+首個有紀錄嘅 release:
 
 - CycloneDX 1.6 SBOM + 7 張工作表嘅 Excel 證據報告,兩份交付物
 - 通用 packetized / ISP-dump 容器偵測與去框(唔依賴廠商 magic)
@@ -89,6 +89,21 @@ zip 入面大部分 bytes 係 python.org 嘅 embeddable CPython。以下先係 f
 - 內嵌標準資料:VESA E-EDID、DDC/CI MCCS
 - 33 個軟體元件簽章
 - 本機拖拉式 web UI(`service.py`),header 顯示工具版本
+- 可重現嘅 portable 打包流程(`scripts/build-portable.ps1`)
+
+---
+
+## 關於 v1.4.0 tag
+
+`v1.4.0` tag(已 push 上 origin)指向 initial commit `11f464c`,**早過**
+`bd44dc6`「web UI header 顯示版本號」。即係話嗰個 tag 嘅 `service.py`
+(`0fd1f0d6…`)同我哋實際打包交付嘅(`7108a164…`)唔同。
+
+tag 已經發佈,move 佢會令任何已經 fetch 過嘅人見到 tag 內容變咗,所以冇郁佢。
+1.4.1 就係用嚟消除呢個落差 —— 由呢個版本開始,tag、`TOOL_VERSION` 同 zip 三者
+永遠一致。
+
+v1.4.0 從來冇正式記錄過交付 hash,所以冇嘢要喺度補。
 
 ---
 
@@ -102,6 +117,7 @@ zip 入面大部分 bytes 係 python.org 嘅 embeddable CPython。以下先係 f
 # 3. 把腳本最後印出來的 hash 貼上本檔新增一節
 # 4. 打 tag
 git tag -a v1.5.0 -m "fw2sbom v1.5.0"
+git push origin master --follow-tags
 ```
 
 第一次喺新機器 build,或者換 CPython 版本嗰陣,`scripts/python-embed.sha256`
