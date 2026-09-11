@@ -6,6 +6,9 @@
 *.bat  text eol=lf
 *.ps1  text eol=lf
 *.json text eol=lf
+# LICENSE has no extension, and it ships inside the package as
+# LICENSE-fw2sbom.txt - so its line endings are part of the package hash.
+LICENSE text eol=lf
 *.html text eol=lf
 *.md   text eol=lf
 *.png  binary

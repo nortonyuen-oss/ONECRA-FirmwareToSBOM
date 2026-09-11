@@ -79,6 +79,17 @@ $PayloadFromRoot = @(
 # packs actually arrived.
 $PayloadDirs = @('signatures')
 
+# Licences, renamed on the way in. The embeddable CPython already puts its own
+# PSF licence at LICENSE.txt, and ours must not land on top of it - overwriting
+# the licence of software we redistribute is exactly the mistake this project
+# exists to catch in other people's firmware. Shipping only Python's licence
+# next to our source was the other half of the problem: a customer unzipping
+# the package had no way to tell which terms covered what.
+$PayloadRenamed = @{
+    'LICENSE'                = 'LICENSE-fw2sbom.txt'
+    'THIRD-PARTY-NOTICES.md' = 'THIRD-PARTY-NOTICES.txt'
+}
+
 $PackageId = "$PythonVersion-$Architecture"
 $EmbedName = "python-$PythonVersion-embed-$Architecture.zip"
 $EmbedUrl  = "https://www.python.org/ftp/python/$PythonVersion/$EmbedName"
@@ -132,6 +143,12 @@ foreach ($name in $PayloadDirs) {
     $path = Join-Path $RepoRoot $name
     if (-not (Test-Path -LiteralPath $path -PathType Container)) {
         throw "missing payload directory: $path"
+    }
+}
+foreach ($name in $PayloadRenamed.Keys) {
+    $path = Join-Path $RepoRoot $name
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "missing payload file: $path"
     }
 }
 foreach ($path in @($ZipWriter, $BatSource)) {
@@ -216,6 +233,10 @@ foreach ($name in $PayloadDirs) {
     Copy-Item -LiteralPath (Join-Path $RepoRoot $name) -Destination $StageDir `
         -Recurse -Force
 }
+foreach ($entry in $PayloadRenamed.GetEnumerator()) {
+    Copy-Item -LiteralPath (Join-Path $RepoRoot $entry.Key) `
+        -Destination (Join-Path $StageDir $entry.Value) -Force
+}
 Copy-Item -LiteralPath $BatSource -Destination $StageDir -Force
 
 $stagedPython = Join-Path $StageDir 'python.exe'
@@ -273,6 +294,14 @@ if ($SkipSmokeTest) {
         throw "staged package loaded $loaded signatures"
     }
     Write-Step "  $loaded signatures load from the staged package"
+
+    # Redistributing CPython obliges us to keep its licence with it.
+    $pythonLicence = Join-Path $StageDir 'LICENSE.txt'
+    if (-not (Test-Path -LiteralPath $pythonLicence)) {
+        throw "CPython's LICENSE.txt is missing from the package; we may not " +
+              "redistribute the interpreter without it"
+    }
+    Write-Step '  CPython LICENSE.txt present alongside LICENSE-fw2sbom.txt'
 }
 
 # Belt and braces: -B covers what this script runs, but anything that touched
@@ -310,7 +339,7 @@ Write-Host "  fw2sbom   $ToolVersion"
 Write-Host "  cpython   $PythonVersion ($Architecture)"
 Write-Host ''
 Write-Host 'Payload file hashes (the part that is ours):'
-$ourFiles = @($PayloadFromRoot) + @('Start-fw2sbom.bat')
+$ourFiles = @($PayloadFromRoot) + @('Start-fw2sbom.bat') + @($PayloadRenamed.Values)
 foreach ($name in $PayloadDirs) {
     $ourFiles += Get-ChildItem -LiteralPath (Join-Path $StageDir $name) -Recurse -File |
         ForEach-Object { "$name/" + $_.Name }

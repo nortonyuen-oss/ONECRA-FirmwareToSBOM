@@ -590,6 +590,22 @@ schema 沒抓下來或沒裝 `jsonschema` 時,該項測試會 skip 而不是假�
   第一個 payload chunk:第一組框架之前的那段資料無法與檔頭區分
 - 對 ELF/HEX 輸入會警告(請先 `arm-none-eabi-objcopy -O binary app.elf app.bin`)
 
+## 授權
+
+**專有軟體,保留一切權利。**詳見 [LICENSE](LICENSE)。
+
+這個倉庫公開,只是因為 GitHub Pages 需要公開倉庫才能提供下載頁 —— 不代表開源。
+
+不過授權明確允許兩件事:
+
+- **fw2sbom 產生的 SBOM 與證據報告屬於你**,可自由使用、發佈、交給監管方或客戶。
+- **原始碼可以閱讀,用於評估、安全審查與稽核。**一個產出供應鏈文件的工具,應該
+  容許依賴那些文件的人檢查它。
+
+隨套件散布的第三方元件見 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)。
+簡短版:runtime 依賴為零;portable 套件內含 python.org 官方發佈、未經修改的
+CPython 3.12.7(PSF 授權,授權檔原樣保留在套件中)。
+
 ## 專案結構
 
 ```
@@ -622,6 +638,10 @@ fw2sbom/
 ├── fw2sbom-service.spec    # PyInstaller 設定(datas 帶 signatures/ 與 PNG)
 ├── pyproject.toml
 ├── RELEASE.md              # 每個交付 build 的 hash / commit / CPython 版本紀錄
+├── STATUS.md               # 單頁專案狀態快照
+├── LICENSE                 # 專有授權
+├── THIRD-PARTY-NOTICES.md  # 我們散布了什麼不是自己寫的
+├── docs/                   # 下載頁(GitHub Pages 來源)
 ├── README.md
 └── requirements.txt
 ```

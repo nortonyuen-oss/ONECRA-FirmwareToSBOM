@@ -1,0 +1,76 @@
+fw2sbom — Firmware SBOM Generator
+Copyright (c) 2026 Onecra. All rights reserved.
+
+
+PROPRIETARY SOFTWARE
+
+This repository is public solely so that GitHub Pages can serve the download
+page at https://nortonyuen-oss.github.io/ONECRA-FirmwareToSBOM/. Publication
+here does not place this software under an open-source licence, and no such
+licence is granted by implication, estoppel or otherwise.
+
+
+PERMITTED USE
+
+Subject to these terms, you may:
+
+  1. Download, install and run the fw2sbom distribution for the purpose of
+     analysing firmware images you are authorised to analyse.
+
+  2. Use, keep, publish and redistribute the SBOMs, evidence reports and other
+     output that fw2sbom produces from your own firmware images. Output is
+     yours; Onecra claims no rights in it.
+
+  3. Read this source code for evaluation, security review and audit. A tool
+     that produces supply-chain documents should be open to inspection by the
+     people who rely on those documents.
+
+
+RESTRICTIONS
+
+Except as permitted above, and without prior written permission from Onecra,
+you may not:
+
+  1. Redistribute, publish, sell, rent, lease, sublicense or otherwise make
+     this software available to any third party.
+
+  2. Create derivative works from it, or incorporate any part of it into
+     another product or service.
+
+  3. Remove or alter any copyright, trademark or attribution notice.
+
+"Onecra" and the Onecra logo are trademarks of Onecra. Nothing here grants any
+right to use them.
+
+
+THIRD-PARTY COMPONENTS
+
+The distributed package includes an unmodified copy of CPython, published by
+the Python Software Foundation under the PSF License Agreement, which is
+retained in the package as LICENSE.txt. See THIRD-PARTY-NOTICES.md for the
+full list and the terms that apply to it. Those components remain under their
+own licences; this notice does not restrict rights you have under them.
+
+fw2sbom's own source depends on nothing outside the Python standard library.
+
+
+NO WARRANTY
+
+THIS SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL ONECRA
+BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF
+CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THIS
+SOFTWARE OR ITS USE.
+
+Specifically, and without limiting the above: fw2sbom produces *binary-derived*
+SBOMs. Component and version identification is heuristic, may be incomplete or
+inaccurate, and the absence of a component from an SBOM is not evidence that
+the component is absent from the firmware. The output is an aid to compliance
+work, not a substitute for it, and must not be relied upon as the sole basis
+for any regulatory declaration.
+
+
+CONTACT
+
+Licensing enquiries: Onecra.

@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-11** · 版本 **v1.7.0** · commit `7325849`
+快照日期:**2026-09-11** · 版本 **v1.7.1** · commit `8e5ebd6`
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -44,6 +44,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | `v1.4.1` | 可重現的 portable 打包流程;工具版本 = tag = zip 三者對齊 |
 | `v1.5.0` | **Phase 0**:測試安全網(fixture 產生器 + regression 測試)、CI、CycloneDX schema 驗證、簽章外部化成 JSON、UTF-16LE 字串 |
 | `v1.6.0` | **Phase 1**:SPDX 2.3 輸出、`--firmware-version`、`version_note` 版本策略 |
+| `v1.7.1` | 專有授權與第三方歸屬,隨套件交付 |
 | `v1.7.0` | **Phase 2 第一階段**:容器走訪、解壓、SquashFS 4.0 reader、opkg / dpkg / apk 套件資料庫、發行版識別、真實韌體 corpus 測試 |
 
 ### 工程現況
@@ -97,7 +98,7 @@ Phase 2 剩餘(擴闊 router / CCTV 覆蓋):
 
 | 項目 | 說明 |
 |---|---|
-| Repo 維持 public | **原本決定轉 private,已推翻** —— 免費帳戶的 GitHub Pages 只支援公開倉庫,而下載頁要由 Pages 提供。git history 已查核:無客戶資料。倉庫目前**沒有 LICENSE**,法律上等於保留所有權利但原始碼公開;若要正式對外,值得補一份 |
+| Repo 維持 public | **原本決定轉 private,已推翻** —— 免費帳戶的 GitHub Pages 只支援公開倉庫,而下載頁要由 Pages 提供。git history 已查核:無客戶資料。授權已補上(v1.7.1,專有) |
 | 開啟 GitHub Pages | Settings → Pages → Deploy from a branch → `master` / `/docs`。做一次即可 |
 | 重建 PyInstaller exe | `dist/fw2sbom-service.exe` 仍是 1.4.0。重建**必須**用 `pyinstaller fw2sbom-service.spec`,裸 `--onefile` 不會帶 `signatures/` |
 | CPython hash pin | `scripts/python-embed.sha256` 仍為空。下次有網時跑 `build-portable.ps1 -PinHash` 並對照 python.org |

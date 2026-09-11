@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fw2sbom"
-version = "1.7.0"
+version = "1.7.1"
 description = "Evidence-based CycloneDX SBOM generator for embedded firmware images"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -45,7 +45,7 @@ GitHub 倉庫 → **Settings** → **Pages** → Source 選 **Deploy from a bran
 
    ```bash
    cp dist-portable/fw2sbom-portable.zip docs/downloads/fw2sbom-portable-1.8.0.zip
-   git rm docs/downloads/fw2sbom-portable-1.7.0.zip
+   git rm docs/downloads/fw2sbom-portable-1.7.1.zip
    ```
 
 2. 改 `index.html` 這四處:
@@ -55,7 +55,8 @@ GitHub 倉庫 → **Settings** → **Pages** → Source 選 **Deploy from a bran
    | `<header>` 的 `.ver` | 版本號與日期 |
    | `.dl-btn` 的 `href` 與 `.sub` | 檔名與大小 |
    | `.dl` 的 `<dl>` | 版本、CPython 版本、檔案數 |
-   | `.hash`、`<pre>`、`<footer>` | **SHA-256(三處都要改)** |
+   | `.hash` 與 `<footer>` | **SHA-256(兩處:完整與縮寫)** |
+   | `<pre>` 的指令範例 | 檔名 |
 
    數字全部抄自 [RELEASE.md](../RELEASE.md) 對應版本那一節 —— 那是唯一的真實來源。
 

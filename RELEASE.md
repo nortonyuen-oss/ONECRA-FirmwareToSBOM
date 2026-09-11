@@ -31,6 +31,72 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.7.1
+
+| | |
+|---|---|
+| Tag | `v1.7.1` |
+| Build 日期 | 2026-09-11 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+授權釐清。**分析行為完全冇變**,只係加咗授權檔並令佢哋隨套件一齊交付。
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,212,984 bytes |
+| SHA-256 | `0eff7d0d310e2d256b7209673acc1d4dffd9f6eab16df3e03b49a42879b6106b` |
+| 內容 | 52 個檔案(多咗 `LICENSE-fw2sbom.txt`、`THIRD-PARTY-NOTICES.txt`) |
+| Reproducible | 是 —— `.\scripts\build-portable.ps1` |
+
+### PyInstaller 單檔 exe
+
+**呢個版本冇 build。** 用 `pyinstaller fw2sbom-service.spec`。
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `d3387ff901d2d580c35f7bc77373b7516b5298f16cf33773ab90fad7c81b553e` |
+| `container.py` | `322f3e638388c7e50122fa689c8b1c50c2e1458db71d799ac2cd30c5290ed510` |
+| `squashfs.py` | `0ff94cf6468983c694ebdccd71a9c85799c5de21fe00674747311ffccaf92326` |
+| `service.py` | `08f4f58f72db7eb594918dad3d283959475a8f47ffd33bc4612791522c9abecc` |
+| `evidence_report.py` | `5d22a065d38f2213ac9f7a4c310f135ca75bfa914e413b1f0ba14e43a65bbdcc` |
+| `spdx_report.py` | `ba3f0a59854c530d849ca830d1492b551760d78f3de25bffa65575542b2c97aa` |
+| `LICENSE-fw2sbom.txt` | `9d47d54f77f5293428d31103bb43035246593eb24d28795160dc03ad8c9e0021` |
+| `THIRD-PARTY-NOTICES.txt` | `d91e52359c2f14dc8e2f982afc913b99367316dba03418143340a6138b22bf98` |
+| `onecra_logo.png` | `a870f4d03b9bdbcc4c6bbc0077c09872bfe49a627400338a46d42a72b4a0c589` |
+| `onecra_icon.png` | `21b5280d2f905b5c7ccbcd1b8f284371f24e374e212f71a2838813f98b7596a1` |
+| `Start-fw2sbom.bat` | `1c52c4f0c7d2cae205dc199475c8a666e20e180a7301b7354499c1106a7adee5` |
+
+簽章包與 v1.7.0 相同,未變動。
+
+### 新增
+
+- **[LICENSE](LICENSE)** —— 專有授權,保留一切權利。Repo 公開只係因為 GitHub Pages
+  要 serve 下載頁,唔等於開源。明確允許客戶**自由使用、發佈、再散布 fw2sbom
+  產生嘅 SBOM 與報告** —— 產出物屬於使用者,Onecra 唔主張權利。亦明確允許
+  **閱讀原始碼做評估、安全審查同稽核**:一個產供應鏈文件嘅工具,應該容許依賴
+  嗰份文件嘅人檢查佢。
+- **[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)** —— 我哋散布咗啲乜唔係自己寫。
+  Runtime 依賴:冇。隨套件散布:CPython 3.12.7(PSF 授權,未修改)。
+- 兩份檔案而家**隨 portable 套件一齊交付**,分別叫 `LICENSE-fw2sbom.txt` 同
+  `THIRD-PARTY-NOTICES.txt`。
+
+### 修正
+
+- **套件入面本來只有 Python 嘅授權檔。** 客戶解壓見到 `LICENSE.txt`(PSF)擺喺
+  我哋原始碼隔離,合理會以為成個嘢係 PSF 授權 —— 一個歧義,喺一個做合規嘅產品
+  身上特別唔應該有。
+- 打包腳本刻意將我哋嗰份改名為 `LICENSE-fw2sbom.txt`,**唔可以蓋過 Python 嗰份**。
+  覆蓋掉自己再散布嘅軟體嘅授權檔,正正係呢個專案喺人哋韌體入面要捉嘅錯誤。
+  腳本亦加咗一項檢查:`LICENSE.txt` 唔見咗就直接中止,因為冇佢我哋冇權散布
+  嗰個直譯器。
+
+---
+
 ## v1.7.0
 
 | | |
