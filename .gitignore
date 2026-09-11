@@ -20,5 +20,5 @@ tests/schema/
 # Real vendor firmware for the corpus tests (python scripts/fetch-corpus.py)
 corpus/
 
-# The zip that the download page serves (copy it in at release time)
-site/downloads/
+# docs/ is the GitHub Pages source and IS tracked, zip included: Pages can only
+# serve files that are in the repository, so the download has to live there.

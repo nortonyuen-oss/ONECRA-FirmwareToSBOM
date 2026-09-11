@@ -56,6 +56,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
+| 下載頁 | `docs/`,由 GitHub Pages 發佈(見 [docs/README.md](docs/README.md)) |
 
 ---
 
@@ -96,7 +97,8 @@ Phase 2 剩餘(擴闊 router / CCTV 覆蓋):
 
 | 項目 | 說明 |
 |---|---|
-| Repo 轉 private | 已決定,待在 GitHub Settings 執行。git history 已查核:無客戶資料 |
+| Repo 維持 public | **原本決定轉 private,已推翻** —— 免費帳戶的 GitHub Pages 只支援公開倉庫,而下載頁要由 Pages 提供。git history 已查核:無客戶資料。倉庫目前**沒有 LICENSE**,法律上等於保留所有權利但原始碼公開;若要正式對外,值得補一份 |
+| 開啟 GitHub Pages | Settings → Pages → Deploy from a branch → `master` / `/docs`。做一次即可 |
 | 重建 PyInstaller exe | `dist/fw2sbom-service.exe` 仍是 1.4.0。重建**必須**用 `pyinstaller fw2sbom-service.spec`,裸 `--onefile` 不會帶 `signatures/` |
 | CPython hash pin | `scripts/python-embed.sha256` 仍為空。下次有網時跑 `build-portable.ps1 -PinHash` 並對照 python.org |
 | 真實 CCTV 韌體樣本 | 有樣本才能決定 Phase 2 剩餘項目的優先次序 |
