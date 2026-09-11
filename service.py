@@ -163,7 +163,7 @@ PAGE_TEMPLATE = """<!doctype html>
   <div class="topbar"></div>
   <header>
     <img class="brand-logo" src="__LOGO_DATA_URI__" alt="Onecra">
-    <p class="tagline">fw2sbom &middot; Firmware SBOM Generator</p>
+    <p class="tagline">fw2sbom &middot; Firmware SBOM Generator &middot; v__TOOL_VERSION__</p>
     <p class="sub">拖曳 firmware 映像到下方，產生 evidence-based CycloneDX 1.6 SBOM。支援 raw <code>.bin</code> 與廠商封包格式（自動去框）</p>
   </header>
 
@@ -311,7 +311,10 @@ drop.addEventListener('drop', (e) => {
 </html>
 """
 
-PAGE = PAGE_TEMPLATE.replace("__LOGO_DATA_URI__", LOGO_DATA_URI).replace("__ICON_DATA_URI__", ICON_DATA_URI)
+PAGE = (PAGE_TEMPLATE
+        .replace("__LOGO_DATA_URI__", LOGO_DATA_URI)
+        .replace("__ICON_DATA_URI__", ICON_DATA_URI)
+        .replace("__TOOL_VERSION__", core.TOOL_VERSION))
 
 
 def parse_multipart(body, boundary):
