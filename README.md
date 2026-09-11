@@ -73,52 +73,40 @@ chmod +x fw2sbom.py
 
 **Exit codes**: `0` 成功、`1` 輸入/IO/參數錯誤、`2` `--fail-if-empty` 且無元件命中。
 
-## 範例:分析 zephyr.bin
+## 範例:分析一份 firmware
 
 ```bash
-# repo 裡已經附了現成的 samples/zephyr.bin(合成樣本,32 KiB);
-# 想重新產生一份全新的,用附的產生器即可:
-python3 samples/make_test_bin.py
-
-# 基本用法
-./fw2sbom.py samples/zephyr.bin
-
-# 完整範例:指定輸出、縮排、verbose、同時 dump strings
-./fw2sbom.py samples/zephyr.bin -o samples/zephyr.sbom.json --pretty -v --dump-strings samples/zephyr.strings.txt
+./fw2sbom.py firmware.bin -o firmware.sbom.json --pretty -v --dump-strings firmware.strings.txt
 ```
 
 範例輸出(stderr 摘要):
 
 ```
-[fw2sbom] 7 component(s) identified -> samples/zephyr.sbom.json
-[fw2sbom]   zephyr                 version=3.5.0        confidence=0.97 (high)
-[fw2sbom]   mbedtls                version=3.4.0        confidence=0.97 (high)
+[fw2sbom] 3 component(s) identified -> firmware.sbom.json
+[fw2sbom]   mbedtls                version=3.4.0        confidence=0.9  (high)
 [fw2sbom]   lwip                   version=2.1.3        confidence=0.97 (high)
 [fw2sbom]   littlefs               version=2.8.0        confidence=0.97 (high)
-[fw2sbom]   newlib                 version=4.3.0        confidence=0.95 (high)
-[fw2sbom]   gcc-arm-none-eabi      version=12.2.0       confidence=0.95 (high)
-[fw2sbom]   cmsis                  version=5.9.0        confidence=0.95 (high)
 ```
 
 SBOM 中單一 component 的 evidence 範例:
 
 ```json
 {
-  "type": "operating-system",
-  "name": "zephyr",
-  "version": "3.5.0",
-  "purl": "pkg:github/zephyrproject-rtos/zephyr@3.5.0",
+  "type": "library",
+  "name": "mbedtls",
+  "version": "3.4.0",
+  "purl": "pkg:github/Mbed-TLS/mbedtls@3.4.0",
   "evidence": {
     "identity": [{
       "field": "name",
-      "confidence": 0.97,
+      "confidence": 0.9,
       "methods": [{
         "technique": "binary-analysis",
-        "confidence": 0.95,
-        "value": "regex '...' matched 'Booting Zephyr OS build zephyr-v3.5.0' at offset 0x2040"
+        "confidence": 0.9,
+        "value": "regex '[Mm]bed ?TLS[ /]v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'mbed TLS 3.4.0' at offset 0x1a30"
       }]
     }],
-    "occurrences": [{ "location": "zephyr.bin", "additionalContext": "first match at offset 0x2040" }]
+    "occurrences": [{ "location": "firmware.bin", "additionalContext": "first match at offset 0x1a30" }]
   }
 }
 ```
@@ -137,7 +125,7 @@ SBOM 中單一 component 的 evidence 範例:
 
 偵測是**通用的,不依賴任何廠商 magic**:掃描 8–256 bytes 的候選 record stride,
 要求同時存在「跨所有記錄皆固定的欄位」與「每筆 +1 的計數欄位」——隨機資料與一般
-平坦映像不會同時滿足這兩個條件(已用 `zephyr.bin` 與 200 KB 隨機資料驗證無誤判)。
+平坦映像不會同時滿足這兩個條件(已用合成測試韌體與 200 KB 隨機資料驗證無誤判)。
 接著:
 
 - **length byte 確認** — 若某固定欄位的值剛好等於 payload 寬度,即視為長度位元組,
@@ -395,10 +383,5 @@ fw2sbom/
 ├── onecra_logo.png         # 頁首品牌 logo(service.py 內嵌用)
 ├── onecra_icon.png         # 瀏覽器分頁 favicon(service.py 內嵌用)
 ├── README.md
-├── requirements.txt
-└── samples/
-    ├── make_test_bin.py    # 產生合成測試 firmware
-    ├── make_packet_bin.py  # 產生封包化(ISP-dump)測試樣本
-    ├── zephyr.bin          # 合成 Zephyr 樣本(32 KiB)
-    └── zephyr.sbom.json    # 範例輸出 SBOM
+└── requirements.txt
 ```
