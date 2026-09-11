@@ -21,7 +21,8 @@
           "regex": "stm32[a-z][0-9]+xx",
           "weight": 0.4
         }
-      ]
+      ],
+      "version_note": "The STM32 HAL exposes its version as numeric macros (__STM32xxxx_HAL_VERSION_MAIN/SUB1/SUB2), which compile to immediates rather than to a string. Obtain the version from the STM32Cube package used for the build."
     }
   ]
 }

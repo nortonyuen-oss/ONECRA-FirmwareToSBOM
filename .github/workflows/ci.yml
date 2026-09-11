@@ -54,7 +54,7 @@ jobs:
           mkdir -p "$RUNNER_TEMP/out"
           for image in "$RUNNER_TEMP"/fixtures/*.bin; do
             echo "--- $(basename "$image")"
-            python fw2sbom.py "$image" -d "$RUNNER_TEMP/out" --pretty -v
+            python fw2sbom.py "$image" -d "$RUNNER_TEMP/out" --format both --pretty -v
           done
           ls -l "$RUNNER_TEMP/out"
 
@@ -64,6 +64,7 @@ jobs:
         run: |
           python fw2sbom.py --version
           python -c "import fw2sbom; s = fw2sbom.load_signatures(); print(len(s), 'signatures from', fw2sbom.SIGNATURE_PACKS)"
+          python -c "import spdx_report; print('spdx renderer', spdx_report.SPDX_VERSION)"
 
   portable-package:
     name: Portable package (Windows)

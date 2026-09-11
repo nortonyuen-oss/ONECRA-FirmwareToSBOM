@@ -34,6 +34,7 @@ sys.path.insert(0, HERE)
 import evidence_report                                  # noqa: E402
 import fw2sbom as core                                   # noqa: E402
 import make_fixtures                                     # noqa: E402
+import spdx_report                                       # noqa: E402
 import service                                           # noqa: E402
 
 
@@ -83,9 +84,10 @@ def _analyze_uncached(name):
     bom = core.build_sbom(name, data, None, arch, hits, 6, len(strings),
                           container=container, opacity=opacity,
                           payload=payload, standards=standards)
+    spdx = spdx_report.build_spdx(bom, name, core.TOOL_NAME, core.TOOL_VERSION)
     return {"data": data, "container": container, "payload": payload,
             "arch": arch, "opacity": opacity, "standards": standards,
-            "strings": strings, "hits": hits, "bom": bom}
+            "strings": strings, "hits": hits, "bom": bom, "spdx": spdx}
 
 
 def versions(result):
@@ -117,17 +119,35 @@ class SignatureDatabaseTest(unittest.TestCase):
         for sig in core.get_signatures():
             core._validate_signature(sig, f"pack {sig.get('pack')}")
 
-    def test_every_signature_has_a_versioned_pattern(self):
-        """A signature with no version pattern can never be matched to a CVE.
+    def test_versionless_signatures_explain_themselves(self):
+        """Every signature either captures a version or says why it cannot.
 
-        Not yet true of every signature; this pins the current count so the
-        ratio only improves. Phase 1 drives the allowance to zero.
+        Some components genuinely put no version anywhere in a stripped image -
+        nrfx and the nRF5 DFU transport leave only API symbol names, confirmed
+        against a real device image. Inventing a regex for those would be the
+        guessing this tool refuses to do. So the rule is not "every signature
+        must capture a version", which invites a fake pattern; it is "a
+        signature with no version pattern must carry a version_note", which a
+        fake pattern cannot satisfy and a reader can check.
         """
-        without = [s["name"] for s in core.get_signatures()
-                   if not any("vgroup" in p for p in s["patterns"])]
-        self.assertLessEqual(
-            len(without), 9,
-            f"signatures with no version-capturing pattern: {sorted(without)}")
+        missing = []
+        for sig in core.get_signatures():
+            if any("vgroup" in p for p in sig["patterns"]):
+                continue
+            if not sig.get("version_note"):
+                missing.append(sig["name"])
+        self.assertEqual(
+            [], sorted(missing),
+            "signatures with neither a version-capturing pattern nor a "
+            "version_note explaining why one is impossible")
+
+    def test_version_notes_reach_the_sbom(self):
+        """The distinction has to survive into the document, not just the DB."""
+        components = analyze("cortexm_rtos.bin")["bom"]["components"]
+        cmsis = next(c for c in components if c["name"] == "cmsis")
+        props = {p["name"]: p["value"] for p in cmsis["properties"]}
+        self.assertNotIn("version", cmsis)
+        self.assertIn("fw2sbom:version", props)
 
     def test_missing_database_is_an_error(self):
         """No packs must fail loudly, never produce an empty SBOM quietly.
@@ -340,20 +360,51 @@ class SignatureMatchingTest(unittest.TestCase):
             with self.subTest(component=name):
                 self.assertEqual(found.get(name), version)
 
-    def test_ncs_release_is_inferred_from_the_zephyr_fork_tag(self):
+    def test_ncs_banner_gives_an_exact_version(self):
+        """The NCS boot banner carries the release; prefer it over inference."""
         hits = {h["sig"]["name"]: h for h in analyze("cortexm_rtos.bin")["hits"]}
         ncs = hits["nrf-connect-sdk"]
-        self.assertEqual(ncs["version"], "2.6.x")
-        self.assertIn("version_inferred", ncs)
+        self.assertEqual(ncs["version"], "2.6.0")
+        self.assertNotIn("version_inferred", ncs)
+        self.assertGreaterEqual(ncs["confidence"], 0.9)
 
-    def test_inferred_versions_are_marked_and_keep_the_purl_versionless(self):
+    def test_exact_ncs_version_reaches_the_purl(self):
         bom = analyze("cortexm_rtos.bin")["bom"]
         ncs = next(c for c in bom["components"] if c["name"] == "nrf-connect-sdk")
         props = {p["name"]: p["value"] for p in ncs["properties"]}
+        self.assertEqual(props["fw2sbom:version_source"], "exact-version-string")
+        self.assertTrue(ncs["purl"].endswith("@2.6.0"))
+
+    def test_ncs_release_is_still_inferred_without_a_banner(self):
+        """Images built from NCS without a boot banner keep the fork-tag route.
+
+        The mapping table is the only version source for those, so it has to
+        stay covered even though the fixture now takes the better path.
+        """
+        signatures = {s["name"]: s for s in core.get_signatures()}
+        zephyr = {"sig": signatures["zephyr"], "confidence": 0.9,
+                  "version": "3.5.99-ncs1", "evidence": []}
+        ncs = {"sig": signatures["nrf-connect-sdk"], "confidence": 0.6,
+               "version": None, "evidence": []}
+        core.infer_versions([zephyr, ncs])
+        self.assertEqual(ncs["version"], "2.6.x")
+        self.assertIn("NCS release mapping table", ncs["version_inferred"])
+
+    def test_inferred_versions_never_reach_the_purl(self):
+        """A purl version is read downstream as exact; an inferred one is not."""
+        signatures = {s["name"]: s for s in core.get_signatures()}
+        hit = {"sig": signatures["nrf-connect-sdk"], "confidence": 0.6,
+               "version": "2.6.x", "version_inferred": "from the fork tag",
+               "evidence": [(signatures["nrf-connect-sdk"]["patterns"][0],
+                             0, "Booting nRF Connect SDK", None)]}
+        bom = core.build_sbom("x.bin", b"\x00" * 64, None,
+                              {"label": None, "details": [],
+                               "looks_like_cortex_m": False},
+                              [hit], 6, 0)
+        comp = bom["components"][0]
+        props = {p["name"]: p["value"] for p in comp["properties"]}
         self.assertEqual(props["fw2sbom:version_source"], "inferred")
-        self.assertNotIn("@", ncs["purl"],
-                         "an inferred version must not be published as a purl "
-                         "version - downstream tools read that as exact")
+        self.assertNotIn("@", comp["purl"])
 
     def test_exact_versions_do_reach_the_purl(self):
         bom = analyze("cortexm_rtos.bin")["bom"]
@@ -585,9 +636,23 @@ class ServiceTest(unittest.TestCase):
         result = service.analyze_bytes("mcs51_display.bin",
                                        fixture("mcs51_display.bin"))
         self.assertTrue(result["sbom_filename"].endswith("_SBOM.cdx.json"))
+        self.assertTrue(result["spdx_filename"].endswith("_SBOM.spdx.json"))
         self.assertTrue(result["evidence_filename"].endswith("_Evidence.xlsx"))
         with zipfile.ZipFile(io.BytesIO(result["evidence_xlsx"])) as z:
             self.assertIsNone(z.testzip())
+
+    def test_both_sbom_formats_are_offered(self):
+        """The UI's two SBOM links must come from one analysis."""
+        result = service.analyze_bytes("cortexm_rtos.bin",
+                                       fixture("cortexm_rtos.bin"))
+        cdx = json.loads(result["sbom_json"])
+        spdx = json.loads(result["spdx_json"])
+        self.assertEqual(spdx["spdxVersion"], "SPDX-2.3")
+        self.assertEqual(len(spdx["packages"]), len(cdx["components"]) + 1)
+
+    def test_spdx_is_downloadable_from_the_store(self):
+        service._store_put("abc", {"spdx": "{}", "spdx_name": "x.spdx.json"})
+        self.assertEqual(service._store_get("abc")["spdx_name"], "x.spdx.json")
 
     def test_store_evicts_the_oldest_entry_when_full(self):
         for i in range(service.SBOM_STORE_MAX_ENTRIES + 5):
@@ -680,6 +745,135 @@ class SchemaValidationTest(unittest.TestCase):
         for name in SbomStructureTest.ALL:
             with self.subTest(fixture=name):
                 errors = sorted(validator.iter_errors(analyze(name)["bom"]),
+                                key=lambda e: list(e.path))
+                self.assertEqual(
+                    [], [f"{list(e.path)}: {e.message}" for e in errors])
+
+
+
+# --------------------------------------------------------------------------- #
+
+class SpdxTest(unittest.TestCase):
+    """SPDX 2.3 is a second rendering of one analysis, not a second analysis."""
+
+    def test_document_shape(self):
+        doc = analyze("cortexm_rtos.bin")["spdx"]
+        self.assertEqual(doc["spdxVersion"], "SPDX-2.3")
+        self.assertEqual(doc["dataLicense"], "CC0-1.0")
+        self.assertEqual(doc["SPDXID"], "SPDXRef-DOCUMENT")
+        self.assertTrue(doc["documentNamespace"].startswith("https://"))
+        self.assertTrue(doc["creationInfo"]["creators"][0].startswith("Tool: fw2sbom-"))
+
+    def test_spdx_ids_are_valid_and_unique(self):
+        for name in SbomStructureTest.ALL:
+            with self.subTest(fixture=name):
+                doc = analyze(name)["spdx"]
+                ids = [p["SPDXID"] for p in doc["packages"]]
+                self.assertEqual(len(ids), len(set(ids)), "duplicate SPDXID")
+                for spdx_id in ids:
+                    self.assertRegex(spdx_id, r"^SPDXRef-[A-Za-z0-9.\-]+$")
+
+    def test_relationships_resolve(self):
+        for name in SbomStructureTest.ALL:
+            with self.subTest(fixture=name):
+                doc = analyze(name)["spdx"]
+                known = {p["SPDXID"] for p in doc["packages"]}
+                known.add("SPDXRef-DOCUMENT")
+                describes = [r for r in doc["relationships"]
+                             if r["relationshipType"] == "DESCRIBES"]
+                self.assertEqual(len(describes), 1)
+                for rel in doc["relationships"]:
+                    self.assertIn(rel["spdxElementId"], known)
+                    self.assertIn(rel["relatedSpdxElement"], known)
+
+    def test_same_components_as_the_cyclonedx_document(self):
+        """The two files are handed to different tools; they must agree."""
+        for name in SbomStructureTest.ALL:
+            with self.subTest(fixture=name):
+                result = analyze(name)
+                cdx = {(c["name"], c.get("version")) for c in result["bom"]["components"]}
+                spdx = {(p["name"], p["versionInfo"])
+                        for p in result["spdx"]["packages"][1:]}
+                spdx = {(n, None if v == "NOASSERTION" else v) for n, v in spdx}
+                self.assertEqual(cdx, spdx)
+
+    def test_purls_are_carried_as_external_refs(self):
+        doc = analyze("cortexm_rtos.bin")["spdx"]
+        mbedtls = next(p for p in doc["packages"] if p["name"] == "mbedtls")
+        refs = mbedtls["externalRefs"]
+        self.assertEqual(refs[0]["referenceType"], "purl")
+        self.assertTrue(refs[0]["referenceLocator"].endswith("@3.4.0"))
+
+    def test_evidence_survives_into_comments(self):
+        """SPDX has nowhere structured for evidence; it must not be dropped."""
+        doc = analyze("cortexm_rtos.bin")["spdx"]
+        mbedtls = next(p for p in doc["packages"] if p["name"] == "mbedtls")
+        self.assertIn("binary-analysis", mbedtls["comment"])
+        self.assertIn("offset", mbedtls["comment"])
+        self.assertTrue(any("confidence" in a["comment"]
+                            for a in mbedtls["annotations"]))
+
+    def test_missing_version_is_explained(self):
+        doc = analyze("cortexm_rtos.bin")["spdx"]
+        cmsis = next(p for p in doc["packages"] if p["name"] == "cmsis")
+        self.assertEqual(cmsis["versionInfo"], "NOASSERTION")
+        self.assertTrue(any("No version could be determined" in a["comment"]
+                            for a in cmsis["annotations"]))
+
+    def test_document_states_that_cyclonedx_is_authoritative(self):
+        """A reader holding only the SPDX file must learn what it loses."""
+        doc = analyze("cortexm_rtos.bin")["spdx"]
+        self.assertIn("CycloneDX", doc["comment"])
+        self.assertIn("Absence of a component is not evidence of absence",
+                      doc["comment"])
+
+    def test_root_package_carries_the_firmware_hashes(self):
+        doc = analyze("cortexm_rtos.bin")["spdx"]
+        root = doc["packages"][0]
+        self.assertEqual(root["primaryPackagePurpose"], "FIRMWARE")
+        algorithms = {c["algorithm"] for c in root["checksums"]}
+        self.assertIn("SHA256", algorithms)
+
+    def test_opaque_payload_appears_as_a_package(self):
+        doc = analyze("opaque_encrypted.bin")["spdx"]
+        self.assertEqual(len(doc["packages"]), 2,
+                         "the opaque payload must be a package here too, or the "
+                         "SPDX reader sees an empty SBOM and reads it as clean")
+
+    def test_rendering_is_stable_across_runs(self):
+        """Same image, same findings - only timestamps may differ."""
+        first = analyze("cortexm_rtos.bin")["spdx"]
+        second = spdx_report.build_spdx(
+            analyze("cortexm_rtos.bin")["bom"], "cortexm_rtos.bin",
+            core.TOOL_NAME, core.TOOL_VERSION)
+        self.assertEqual(spdx_report.document_digest(first),
+                         spdx_report.document_digest(second))
+
+
+class SpdxSchemaValidationTest(unittest.TestCase):
+    """Validate against the SPDX specification's own schema when available."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            import jsonschema                            # noqa: F401
+        except ImportError:
+            raise unittest.SkipTest("jsonschema is not installed")
+        path = os.path.join(HERE, "schema", "spdx-2.3.schema.json")
+        if not os.path.exists(path):
+            raise unittest.SkipTest(
+                "SPDX schema not present; run tests/fetch_schema.py")
+        cls.schema_path = path
+
+    def test_every_fixture_spdx_validates(self):
+        from jsonschema import validators
+
+        with open(self.schema_path, encoding="utf-8") as f:
+            schema = json.load(f)
+        validator = validators.validator_for(schema)(schema)
+        for name in SbomStructureTest.ALL:
+            with self.subTest(fixture=name):
+                errors = sorted(validator.iter_errors(analyze(name)["spdx"]),
                                 key=lambda e: list(e.path))
                 self.assertEqual(
                     [], [f"{list(e.path)}: {e.message}" for e in errors])

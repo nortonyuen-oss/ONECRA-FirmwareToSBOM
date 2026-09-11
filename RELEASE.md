@@ -31,6 +31,81 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.6.0
+
+| | |
+|---|---|
+| Tag | `v1.6.0` |
+| Build 日期 | 2026-09-11 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 1(部分)**:SPDX 2.3 輸出與版本策略。CPE 相關工作已取消 ——
+客戶的 CVE 平台自行由 SBOM 以 ENISA 通報 API 比對,唔需要 fw2sbom 產生 CPE。
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,196,490 bytes |
+| SHA-256 | `a1e601f74fa8b6aec5e6c86c251062e2f902ad85f943d5ecc6a7486438354177` |
+| 內容 | 47 個檔案(多咗 `spdx_report.py`) |
+| Reproducible | 是 —— `.\scripts\build-portable.ps1`,CI 每次 build 兩次對 hash |
+
+### PyInstaller 單檔 exe
+
+**呢個版本冇 build。** 用 `pyinstaller fw2sbom-service.spec`。
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `3931b822e78b03178d6ab9e6140ac2410a35a18642a95f28819eee1dc65f1378` |
+| `service.py` | `d7885c3f946769b029e193482f243d13a27cae8b9a33aec4a262b244cbdecc70` |
+| `evidence_report.py` | `5d22a065d38f2213ac9f7a4c310f135ca75bfa914e413b1f0ba14e43a65bbdcc` |
+| `spdx_report.py` | `ba3f0a59854c530d849ca830d1492b551760d78f3de25bffa65575542b2c97aa` |
+| `onecra_logo.png` | `a870f4d03b9bdbcc4c6bbc0077c09872bfe49a627400338a46d42a72b4a0c589` |
+| `onecra_icon.png` | `21b5280d2f905b5c7ccbcd1b8f284371f24e374e212f71a2838813f98b7596a1` |
+| `Start-fw2sbom.bat` | `1c52c4f0c7d2cae205dc199475c8a666e20e180a7301b7354499c1106a7adee5` |
+| `signatures/linux.json` | `699af29a5c54c678820bfdf928b7ecbef211012b5bf9ada9b3cd94edfbbddba4` |
+| `signatures/mcu-lib.json` | `14f0c30b948af6ff58e996f3b111c00c66c354cb7066081f2eda820c85a97e09` |
+| `signatures/mcu-rtos.json` | `b87ccae1c638bd469f2c6d6766c54fc800ec7cee669fa1eba93235f8446271e3` |
+| `signatures/vendor-nordic.json` | `fef65845009fb7cb2d1522ffd03dbc087d2c725a4c03af06cdf4ff11ccabad3c` |
+| `signatures/vendor-st.json` | `fe10c9a08959248b3bb00e847c2c69bcd4bbe4c9d8c2bb7d37b0c842cbccaf0d` |
+
+### 新增
+
+- **SPDX 2.3 JSON 輸出**(`spdx_report.py`)。CLI `--format {cyclonedx,spdx,both}`;
+  web UI 多咗一個下載連結。兩份文件由**同一次分析**產生,唔可能互相矛盾。
+  9 份 fixture 嘅 SPDX 文件全部通過 SPDX 規格自己嘅 schema。
+  SPDX 2.3 冇 confidence / evidence 對應欄位,所以嗰啲入 `comment` 同
+  `annotations`,並且喺文件本身寫明「兩者不一致時以 CycloneDX 為準」。
+- **`--firmware-version`**:SBOM 根 component 嘅版本之前恆為 `UNKNOWN`(程式入面
+  個 hook 一直存在但冇人填)。冇咗佢,同一產品嘅唔同 release 喺下游分辨唔到。
+- **`version_note`**:有啲元件係**結構上**攞唔到版本 —— 真實 nRF5 韌體入面 nrfx
+  同 DFU 只留低 API symbol,STM32 HAL 嘅版本係數值巨集唔係字串。呢啲簽章而家帶
+  一段說明「點解攞唔到」同「去邊度攞」,輸出成
+  `fw2sbom:version_unavailable_reason`。
+- 測試規則由「最多 9 個簽章冇版本 pattern」改成「**每個簽章要麼有版本 pattern,
+  要麼有 version_note**」—— 後者冇辦法用一個假 regex 矇混。
+
+### 修正 / 改善
+
+- **nRF Connect SDK 版本由推論變精確**。個 boot banner
+  (`*** Booting nRF Connect SDK v2.6.0 ***`)本身就帶版本,之前個 pattern 冇
+  capture group,所以要靠 Zephyr fork tag 反查出 `2.6.x`、confidence 0.4、purl
+  唔帶版本。而家係 `2.6.0`、confidence 0.97、purl 帶版本。
+  Fork tag 推論路徑仍然保留(冇 banner 嘅映像先用),並有獨立測試。
+- 測試由 56 增至 73。
+
+### 唔會做(已與需求方確認)
+
+CPE 2.3 產生與 purl 規範化**取消**。客戶嘅 CVE 平台自行由 SBOM 比對,
+用 ENISA 嘅 CVE 通報 API,唔需要 fw2sbom 出 CPE。呢項原本係 roadmap Phase 1
+嘅主要內容。
+
+---
+
 ## v1.5.0
 
 | | |

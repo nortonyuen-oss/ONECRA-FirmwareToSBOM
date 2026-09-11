@@ -238,7 +238,8 @@
           "regex": "tc_(?:aes|sha256|hmac|ecc)_",
           "weight": 0.5
         }
-      ]
+      ],
+      "version_note": "TinyCrypt is vendored as source and carries no version string. Obtain the version from the SDK or repository revision it was taken from."
     },
     {
       "name": "openthread",
@@ -273,7 +274,8 @@
           "regex": "ble_hs_|ble_gap_|ble_gatt",
           "weight": 0.45
         }
-      ]
+      ],
+      "version_note": "Apache NimBLE has no runtime version banner; the version is recorded in the west or newt manifest of the build, not in the image."
     },
     {
       "name": "trusted-firmware-m",

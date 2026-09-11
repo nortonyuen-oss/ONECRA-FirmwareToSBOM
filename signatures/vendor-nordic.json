@@ -17,7 +17,8 @@
           "regex": "NRF_[A-Z0-9]+_NS|nRF[0-9]{4,5}",
           "weight": 0.45
         }
-      ]
+      ],
+      "version_note": "nrfx ships as source inside the nRF5 SDK and nRF Connect SDK and emits no version banner; a compiled image contains only API symbol names (nrfx_spim_init, nrfx_gpiote_init, ...). Confirmed against a real nRF5 image. Obtain the version from the vendor's west manifest or nrfx_glue.h."
     },
     {
       "name": "nrf-connect-sdk",
@@ -27,12 +28,18 @@
       "description": "nRF Connect SDK (NCS) - Nordic's Zephyr-based SDK; banner version is the Zephyr fork tag, not the NCS release",
       "patterns": [
         {
-          "regex": "Booting nRF Connect SDK",
-          "weight": 0.9
+          "regex": "Booting nRF Connect SDK v([0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.]+)?)",
+          "weight": 0.9,
+          "vgroup": 1
         },
         {
-          "regex": "v[0-9]+\\.[0-9]+\\.[0-9]+-ncs[0-9]+",
-          "weight": 0.6
+          "regex": "v([0-9]+\\.[0-9]+\\.[0-9]+-ncs[0-9]+)",
+          "weight": 0.6,
+          "vgroup": 1
+        },
+        {
+          "regex": "Booting nRF Connect SDK",
+          "weight": 0.7
         }
       ]
     },
@@ -51,7 +58,8 @@
           "regex": "dragoon/",
           "weight": 0.5
         }
-      ]
+      ],
+      "version_note": "The SoftDevice Controller is delivered as a pre-built library and carries no version string in the linked image. Obtain the version from the nRF Connect SDK release it was built against."
     },
     {
       "name": "nordic-mpsl",
@@ -64,7 +72,8 @@
           "regex": "MPSL ASSERT|MPSL Work|mpsl_[a-z_]+",
           "weight": 0.75
         }
-      ]
+      ],
+      "version_note": "The Multiprotocol Service Layer is a pre-built library with no version string; only assert and symbol text survives. Obtain the version from the nRF Connect SDK release."
     },
     {
       "name": "nrf5-sdk-ble-dfu",
@@ -85,7 +94,8 @@
           "regex": "nrf_dfu_[a-z_]+",
           "weight": 0.45
         }
-      ]
+      ],
+      "version_note": "The legacy nRF5 SDK prints no version banner; only DFU symbol names (ble_dfu_buttonless_bootloader_*, nrf_dfu_*) survive compilation. Confirmed against a real nRF5 image. Obtain the SDK version from the vendor's build manifest."
     }
   ]
 }

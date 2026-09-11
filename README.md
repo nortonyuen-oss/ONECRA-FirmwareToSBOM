@@ -1,6 +1,6 @@
 # fw2sbom
 
-Evidence-based **CycloneDX 1.6** SBOM generator for embedded firmware images
+Evidence-based **CycloneDX 1.6 / SPDX 2.3** SBOM generator for embedded firmware images
 (`.bin`):ARM Cortex-M / Zephyr-style 映像、MCS-51(8051)映像(顯示控制器 /
 monitor scaler 韌體),以及廠商 **packetized / ISP-dump** 格式(自動去框)。
 Designed to run out-of-the-box on Kali Linux (Python 3.9+, stdlib only — no pip
@@ -32,7 +32,8 @@ dependencies).
    Nordic nRF5 SDK(舊版)BLE DFU bootloader、MicroPython,以及 Linux 側的
    BusyBox、OpenSSL、zlib、U-Boot、Linux kernel、Dropbear、OpenSSH、SQLite、
    libcurl、musl、glibc
-6. **兩份交付物輸出** — CycloneDX 1.6 JSON + Excel 證據報告(見下方〈交付物〉)。
+6. **交付物輸出** — CycloneDX 1.6 JSON(必要時再加 SPDX 2.3 JSON)+ Excel
+   證據報告(見下方〈交付物〉)。
    每個 component 帶有:
    - `evidence.identity`(`binary-analysis` technique、confidence 0–0.97、
      命中的 regex + 字串 + offset)
@@ -63,6 +64,9 @@ chmod +x fw2sbom.py
 |---|---|
 | `input` | 要分析的 firmware 映像檔(raw `.bin`) |
 | `-o, --output FILE` | SBOM 輸出路徑(預設 `<input>.cdx.json`) |
+| `--format {cyclonedx,spdx,both}` | 輸出格式,預設 `cyclonedx`。`both` 由同一次分析產生兩份文件 |
+| `--firmware-version VER` | 這份映像所屬的**產品**韌體版本,寫入 SBOM 根 component |
+| `--signatures DIR` | 額外載入簽章包(可重複;亦看 `FW2SBOM_SIGNATURES`) |
 | `-d, --out-dir DIR` | 一次輸出兩份交付物到 DIR:`<stem>_SBOM.cdx.json` 與 `<stem>_Evidence.xlsx` |
 | `--evidence FILE` | 單獨指定 Excel 證據報告的輸出路徑 |
 | `--min-str-len N` | strings 最小長度,預設 6(≥3) |
@@ -176,6 +180,30 @@ component(帶 payload 的 SHA-256/SHA-1/MD5、entropy 等 evidence,confidence 0.
 [fw2sbom] recorded as a single opaque component; obtain a plaintext image or the vendor's SBOM to complete it
 ```
 
+## SBOM 格式:CycloneDX 與 SPDX
+
+```bash
+./fw2sbom.py firmware.bin --format both -d sbom_output/ --pretty
+```
+
+兩份文件由**同一次分析**產生,所以不可能互相矛盾。
+
+| | CycloneDX 1.6 | SPDX 2.3 |
+|---|---|---|
+| 每個元件的 confidence | `evidence.identity[].confidence`(結構化) | `annotations`(純文字) |
+| 命中的 regex / 字串 / offset | `evidence.identity[].methods[]`(結構化) | package `comment`(純文字) |
+| purl | `purl` 欄位 | `externalRefs`(`referenceType: purl`) |
+| 加密 payload | `firmware` 型別 component,confidence 0.0 | package,`versionInfo: NOASSERTION` + annotation |
+| 沒有版本的原因 | `fw2sbom:version_unavailable_reason` | annotation |
+
+CycloneDX 有為「binary-derived SBOM」而設的 `evidence` 物件,SPDX 2.3 沒有對應
+欄位。所以 SPDX 版的證據只能放進 `comment` 與 `annotations` —— 人看得到,機器大
+多看不到。**兩者不一致時以 CycloneDX 為準**,這句話也寫在 SPDX 文件本身的
+`comment` 裡,拿著單一檔案的人不必猜。
+
+之所以仍然輸出 SPDX:部分客戶與稽核方指名要它。一個他們吃得下的格式,勝過一個
+更好但他們吃不下的格式。
+
 ## 交付物 (Deliverables)
 
 ```bash
@@ -187,6 +215,7 @@ component(帶 payload 的 SHA-256/SHA-1/MD5、entropy 等 evidence,confidence 0.
 | 檔案 | 對象 | 內容 |
 |---|---|---|
 | `<stem>_SBOM.cdx.json` | 機器 / 供應鏈工具 | CycloneDX 1.6,每個 component 帶 evidence 與 confidence |
+| `<stem>_SBOM.spdx.json` | 指名要 SPDX 的下游 | SPDX 2.3(`--format spdx` 或 `both`) |
 | `<stem>_Evidence.xlsx` | 人 / 稽核 | 7 張工作表的證據與信心報告 |
 
 Excel 報告的工作表:
@@ -270,8 +299,32 @@ embedded-standard-data` 屬性,與 signature 命中的軟體元件明確區分�
    - Zephyr fork tag → NCS release 對照表(如 `v3.5.99-ncs1` → NCS `2.6.x`)
    - 命中字串內的 version-like token(無專屬 version pattern 時的 fallback)
 
-沒有任何版本線索的元件(raw .bin 常見,GCC `.comment` section 會被 strip)
-維持 `fw2sbom:version = unknown`,不臆測。要補齊精確版本,最可靠的做法是向
+沒有任何版本線索的元件維持 `fw2sbom:version = unknown`,**不臆測**。
+
+有些元件是**結構上**不可能從 stripped 映像取得版本的 —— 例如 nrfx 只留下
+`nrfx_spim_init` 之類的 API symbol,STM32 HAL 的版本是數值巨集而非字串。這類簽章
+帶一個 `version_note` 說明「為什麼拿不到」與「去哪裡拿」,輸出成
+`fw2sbom:version_unavailable_reason`:
+
+```json
+{ "name": "fw2sbom:version_unavailable_reason",
+  "value": "nrfx ships as source inside the nRF5 SDK and nRF Connect SDK and emits no version banner; a compiled image contains only API symbol names (nrfx_spim_init, ...). Obtain the version from the vendor's west manifest or nrfx_glue.h." }
+```
+
+「我們找不到版本」與「這個元件從來不帶版本」是兩件不同的事,下游做 CVE 比對的人
+需要分得清。測試強制每個簽章**要麼有版本擷取 pattern,要麼有 `version_note`** ——
+這條規則沒辦法用一個假 regex 來矇混過去。
+
+### 產品自己的版本
+
+SBOM 根 component 的版本預設是 `UNKNOWN`,因為只有廠商可靠地知道它。用
+`--firmware-version` 指定:
+
+```bash
+./fw2sbom.py firmware.bin --firmware-version "2.4.1"
+```
+
+不填的話,同一產品的不同 release 在下游系統裡分辨不出來。要補齊精確版本,最可靠的做法是向
 供應商索取 build 產物(`build/zephyr/.config`、west manifest)後人工合併。
 
 ## 拖拉式服務 (Drag-and-drop service)
@@ -478,6 +531,7 @@ schema 沒抓下來或沒裝 `jsonschema` 時,該項測試會 skip 而不是假�
 fw2sbom/
 ├── fw2sbom.py              # 主程式(CLI)
 ├── evidence_report.py      # Excel 證據報告產生器(stdlib-only xlsx writer)
+├── spdx_report.py          # SPDX 2.3 JSON 輸出(由 CycloneDX 文件轉換)
 ├── service.py              # 拖拉式本機網頁服務(localhost drag-and-drop UI)
 ├── onecra_logo.png         # 頁首品牌 logo(service.py 內嵌用)
 ├── onecra_icon.png         # 瀏覽器分頁 favicon(service.py 內嵌用)

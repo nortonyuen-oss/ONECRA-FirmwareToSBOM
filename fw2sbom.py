@@ -43,9 +43,10 @@ import uuid
 from datetime import datetime, timezone
 
 import evidence_report
+import spdx_report
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.5.0"
+TOOL_VERSION = "1.6.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -104,6 +105,10 @@ def _validate_signature(sig, source):
         raise ValueError(f"{where} has a versioned purl '{sig['purl']}'; the "
                          "database stores the versionless base and the version "
                          "is appended per match")
+
+    note = sig.get("version_note")
+    if note is not None and (not isinstance(note, str) or not note.strip()):
+        raise ValueError(f"{where} has an empty 'version_note'")
 
     patterns = sig.get("patterns")
     if not patterns or not isinstance(patterns, list):
@@ -1233,6 +1238,13 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         else:
             comp["properties"].append(
                 {"name": "fw2sbom:version", "value": "unknown (no version string found)"})
+            # "we could not find a version" and "this component never carries
+            # one" are different findings. Whoever matches this SBOM against a
+            # CVE feed needs to know which of the two they are looking at.
+            if sig.get("version_note"):
+                comp["properties"].append(
+                    {"name": "fw2sbom:version_unavailable_reason",
+                     "value": sig["version_note"]})
         components.append(comp)
         dep_refs.append(ref)
 
@@ -1457,6 +1469,12 @@ def main(argv=None):
                          "and <stem>_Evidence.xlsx")
     ap.add_argument("--evidence", metavar="FILE",
                     help="write the Excel evidence/confidence workbook to FILE")
+    ap.add_argument("--firmware-version", metavar="VERSION",
+                    help="the product firmware version this image is, recorded as "
+                         "the SBOM's root component version. Only the vendor knows "
+                         "it reliably; without it the root component is UNKNOWN and "
+                         "successive releases of a product cannot be told apart "
+                         "downstream.")
     ap.add_argument("--min-str-len", type=int, default=6, metavar="N",
                     help="minimum length for extracted strings (default: 6)")
     ap.add_argument("--dump-strings", metavar="FILE",
@@ -1469,6 +1487,11 @@ def main(argv=None):
                     help="do not detect/strip packetized container framing")
     ap.add_argument("--dump-payload", metavar="FILE",
                     help="write the de-framed payload (framing stripped) to FILE")
+    ap.add_argument("--format", choices=("cyclonedx", "spdx", "both"),
+                    default="cyclonedx",
+                    help="SBOM format to write (default: cyclonedx). 'spdx' emits "
+                         "SPDX 2.3 JSON; 'both' writes the two documents from the "
+                         "same analysis, so they cannot disagree.")
     ap.add_argument("--pretty", action="store_true", help="indent JSON output")
     ap.add_argument("--fail-if-empty", action="store_true",
                     help="exit with code 2 if no components are identified")
@@ -1538,26 +1561,47 @@ def main(argv=None):
     bom = build_sbom(args.input, data, file_magic, arm_info, hits,
                      args.min_str_len, len(strings),
                      container=container, opacity=opacity, payload=payload,
-                     standards=standards)
+                     standards=standards, firmware_version=args.firmware_version)
 
     stem = os.path.splitext(os.path.basename(args.input))[0]
+    want_cdx = args.format in ("cyclonedx", "both")
+    want_spdx = args.format in ("spdx", "both")
     if args.out_dir:
         try:
             os.makedirs(args.out_dir, exist_ok=True)
         except OSError as e:
             die(f"cannot create output directory {args.out_dir}: {e}")
-        out_path = args.output or os.path.join(args.out_dir, stem + "_SBOM.cdx.json")
-        evidence_path = args.evidence or os.path.join(args.out_dir,
-                                                      stem + "_Evidence.xlsx")
+        base = os.path.join(args.out_dir, stem)
+        cdx_path = args.output or base + "_SBOM.cdx.json"
+        spdx_path = base + "_SBOM.spdx.json"
+        evidence_path = args.evidence or base + "_Evidence.xlsx"
     else:
-        out_path = args.output or (args.input + ".cdx.json")
+        default_ext = ".cdx.json" if want_cdx else ".spdx.json"
+        chosen = args.output or (args.input + default_ext)
+        cdx_path = chosen if want_cdx else None
+        spdx_path = chosen if args.format == "spdx" else args.input + ".spdx.json"
         evidence_path = args.evidence
-    try:
-        with open(out_path, "w", encoding="utf-8") as f:
-            json.dump(bom, f, indent=2 if args.pretty else None)
-            f.write("\n")
-    except OSError as e:
-        die(f"cannot write SBOM to {out_path}: {e}")
+    # With --format both and an explicit -o, -o names the CycloneDX document and
+    # the SPDX one sits beside it; silently overwriting one with the other would
+    # be worse than a slightly surprising filename.
+    if args.format == "both" and args.output:
+        spdx_path = os.path.splitext(args.output)[0] + ".spdx.json"
+
+    def write_json(path, document, label):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(document, f, indent=2 if args.pretty else None)
+                f.write("\n")
+        except OSError as e:
+            die(f"cannot write {label} to {path}: {e}")
+
+    out_path = cdx_path or spdx_path
+    if want_cdx:
+        write_json(cdx_path, bom, "CycloneDX SBOM")
+    if want_spdx:
+        write_json(spdx_path,
+                   spdx_report.build_spdx(bom, args.input, TOOL_NAME, TOOL_VERSION),
+                   "SPDX SBOM")
 
     if container:
         print(f"[fw2sbom] packetized container: {container['stride']}-byte records, "
@@ -1580,7 +1624,11 @@ def main(argv=None):
             die(f"cannot write evidence workbook to {evidence_path}: {e}")
         print(f"[fw2sbom] evidence workbook -> {evidence_path}", file=sys.stderr)
 
-    print(f"[fw2sbom] {total} component(s) identified -> {out_path}", file=sys.stderr)
+    written = ([f"CycloneDX 1.6 -> {cdx_path}"] if want_cdx else []) + \
+              ([f"SPDX 2.3 -> {spdx_path}"] if want_spdx else [])
+    print(f"[fw2sbom] {total} component(s) identified", file=sys.stderr)
+    for line in written:
+        print(f"[fw2sbom]   {line}", file=sys.stderr)
     for h in hits:
         v = h["version"] or "?"
         print(f"[fw2sbom]   {h['sig']['name']:<22} version={v:<12} "

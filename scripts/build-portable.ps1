@@ -67,6 +67,7 @@ $PayloadFromRoot = @(
     'service.py',
     'fw2sbom.py',
     'evidence_report.py',
+    'spdx_report.py',
     'onecra_logo.png',
     'onecra_icon.png'
 )
@@ -248,6 +249,14 @@ if ($SkipSmokeTest) {
         throw "staged interpreter cannot import service.py (exit $LASTEXITCODE)"
     }
     Write-Step '  service.py imports cleanly'
+
+    # Both SBOM formats come from the same analysis; a missing spdx_report.py
+    # would only surface when a customer clicked the SPDX download.
+    & $stagedPython '-B' '-c' 'import spdx_report' | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "staged interpreter cannot import spdx_report.py (exit $LASTEXITCODE)"
+    }
+    Write-Step '  spdx_report.py imports cleanly'
 
     # A package whose component database did not arrive starts up and then
     # reports "no components" for every firmware it is given. Prove the packs

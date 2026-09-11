@@ -17,8 +17,9 @@ or by hand:
 Without them the schema test skips, so the suite still runs offline - it just
 proves less.
 
-bom-1.6.schema.json references the other two by filename, so all three are
-needed for $ref resolution.
+bom-1.6.schema.json references spdx.schema.json and jsf-0.82.schema.json by
+bare filename, so those are needed for $ref resolution. spdx-2.3.schema.json is
+the SPDX specification's own schema and validates fw2sbom's other output.
 """
 
 import json
@@ -26,16 +27,27 @@ import os
 import sys
 import urllib.request
 
-BASE = ("https://raw.githubusercontent.com/CycloneDX/specification/"
-        "1.6/schema/")
+CYCLONEDX_BASE = ("https://raw.githubusercontent.com/CycloneDX/specification/"
+                  "1.6/schema/")
 
-SCHEMAS = ["bom-1.6.schema.json", "spdx.schema.json", "jsf-0.82.schema.json"]
+# name -> URL. bom-1.6.schema.json references the next two by bare filename, so
+# all three are needed for $ref resolution; spdx-2.3.schema.json is standalone
+# and validates the other rendering of the same analysis.
+SCHEMAS = {
+    "bom-1.6.schema.json": CYCLONEDX_BASE + "bom-1.6.schema.json",
+    "spdx.schema.json": CYCLONEDX_BASE + "spdx.schema.json",
+    "jsf-0.82.schema.json": CYCLONEDX_BASE + "jsf-0.82.schema.json",
+    # The 2.3 schema lives on the spec repo's support/v2.3 branch; the
+    # development branch has moved on to 3.x and no longer carries it.
+    "spdx-2.3.schema.json": ("https://raw.githubusercontent.com/spdx/spdx-spec/"
+                             "support/v2.3/schemas/spdx-schema.json"),
+}
 
 TIMEOUT = 30
 
 
 def fetch(name, out_dir):
-    url = BASE + name
+    url = SCHEMAS[name]
     path = os.path.join(out_dir, name)
     with urllib.request.urlopen(url, timeout=TIMEOUT) as response:
         raw = response.read()
@@ -54,7 +66,7 @@ def main(argv):
     out_dir = argv[1] if len(argv) > 1 else os.path.join(
         os.path.dirname(os.path.abspath(__file__)), "schema")
     os.makedirs(out_dir, exist_ok=True)
-    for name in SCHEMAS:
+    for name in sorted(SCHEMAS):
         path, size = fetch(name, out_dir)
         print(f"{name:<26} {size:>8} bytes -> {path}")
     return 0

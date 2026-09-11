@@ -196,7 +196,8 @@
           "regex": "/lib/ld-musl-",
           "weight": 0.8
         }
-      ]
+      ],
+      "version_note": "musl assembles its version banner at runtime from a format string and a separate constant, so a stripped image yields the format string but not the version. In a Linux rootfs the exact version is in the package database (/lib/apk/db/installed, /usr/lib/opkg/status), which fw2sbom does not parse yet."
     },
     {
       "name": "glibc",

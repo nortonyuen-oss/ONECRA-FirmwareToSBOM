@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import evidence_report
 import fw2sbom as core
+import spdx_report
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FW2SBOM_PORT", "8765"))
@@ -174,12 +175,13 @@ PAGE_TEMPLATE = """<!doctype html>
     transition: background .15s;
   }
   #download:hover { background: var(--accent-strong); }
-  #download-evidence {
-    display: inline-block; margin-top: 1rem; margin-left: .6rem; padding: .6rem 1.1rem;
+  #download-spdx, #download-evidence {
+    display: inline-block; padding: .6rem 1.1rem;
     background: transparent; color: var(--accent); border: 1px solid var(--accent);
     border-radius: 8px; font-weight: 600; text-decoration: none; font-size: .9rem;
   }
-  #download-evidence:hover { background: var(--accent-soft); }
+  #download-spdx:hover, #download-evidence:hover { background: var(--accent-soft); }
+  .actions { flex-wrap: wrap; }
   .empty { color: var(--muted); font-size: .9rem; }
   .notice {
     border: 1px solid color-mix(in srgb, var(--medium) 40%, var(--border));
@@ -220,6 +222,7 @@ PAGE_TEMPLATE = """<!doctype html>
       </table>
       <div class="actions">
         <a id="download" href="#">下載 SBOM (CycloneDX JSON)</a>
+        <a id="download-spdx" href="#">下載 SBOM (SPDX 2.3 JSON)</a>
         <a id="download-evidence" href="#">下載證據報告 (Excel)</a>
       </div>
     </div>
@@ -238,6 +241,7 @@ const card = document.getElementById('result');
 const meta = document.getElementById('meta');
 const tbody = document.getElementById('tbody');
 const download = document.getElementById('download');
+const spdxLink = document.getElementById('download-spdx');
 const evidenceLink = document.getElementById('download-evidence');
 
 function setStatus(msg, isErr) {
@@ -326,6 +330,8 @@ async function handleFile(file) {
 
   download.href = data.download_url;
   download.download = data.download_filename;
+  spdxLink.href = data.spdx_url;
+  spdxLink.download = data.spdx_filename;
   evidenceLink.href = data.evidence_url;
   evidenceLink.download = data.evidence_filename;
   card.classList.add('show');
@@ -411,6 +417,7 @@ def analyze_bytes(filename, data):
                           len(strings), container=container, opacity=opacity,
                           payload=payload, standards=standards)
 
+    spdx = spdx_report.build_spdx(bom, name, core.TOOL_NAME, core.TOOL_VERSION)
     sbom_filename = stem + "_SBOM.cdx.json"
     context = core.build_evidence_context(
         os.path.basename(name), data, payload, arm_info, container, opacity,
@@ -433,6 +440,8 @@ def analyze_bytes(filename, data):
     return {
         "sbom_json": json.dumps(bom, indent=2),
         "sbom_filename": sbom_filename,
+        "spdx_json": json.dumps(spdx, indent=2),
+        "spdx_filename": stem + "_SBOM.spdx.json",
         "evidence_xlsx": evidence.getvalue(),
         "evidence_filename": stem + "_Evidence.xlsx",
         "components": summary,
@@ -467,6 +476,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_html(PAGE, write_body=write_body)
         elif self.path.startswith("/download/"):
             self._send_attachment(self.path[len("/download/"):], "json",
+                                  "application/json", write_body)
+        elif self.path.startswith("/spdx/"):
+            self._send_attachment(self.path[len("/spdx/"):], "spdx",
                                   "application/json", write_body)
         elif self.path.startswith("/evidence/"):
             self._send_attachment(
@@ -542,6 +554,7 @@ class Handler(BaseHTTPRequestHandler):
         out_filename = result["sbom_filename"]
         _store_put(sbom_id, {
             "json": result["sbom_json"], "json_name": out_filename,
+            "spdx": result["spdx_json"], "spdx_name": result["spdx_filename"],
             "xlsx": result["evidence_xlsx"],
             "xlsx_name": result["evidence_filename"],
         })
@@ -556,6 +569,8 @@ class Handler(BaseHTTPRequestHandler):
             "opacity": result["opacity"],
             "download_url": f"/download/{sbom_id}",
             "download_filename": out_filename,
+            "spdx_url": f"/spdx/{sbom_id}",
+            "spdx_filename": result["spdx_filename"],
             "evidence_url": f"/evidence/{sbom_id}",
             "evidence_filename": result["evidence_filename"],
         })
