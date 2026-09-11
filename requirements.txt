@@ -1,0 +1,7 @@
+# fw2sbom runs on the Python 3.8+ standard library only - no required packages.
+#
+# Optional (for validating the generated SBOM against the official schema):
+# jsonschema>=4.0
+#
+# System tools used if present (Kali has them by default):
+#   file(1) - libmagic fingerprint of the input binary

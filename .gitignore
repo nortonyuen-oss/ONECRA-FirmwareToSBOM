@@ -1,0 +1,10 @@
+# Build artifacts (regenerate via README's PyInstaller / embeddable-Python instructions)
+__pycache__/
+*.pyc
+build/
+dist/
+dist-portable/
+*.spec
+
+# Local Claude Code settings (machine/user-specific)
+.claude/settings.local.json

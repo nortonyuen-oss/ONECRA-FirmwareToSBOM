@@ -1,0 +1,675 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:4952abfc-144c-4be8-8c48-a372023a8e4c",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-09-08T01:51:23Z",
+    "lifecycles": [
+      {
+        "phase": "post-build"
+      }
+    ],
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "fw2sbom",
+          "version": "1.2.0",
+          "description": "Binary fingerprint + string signature SBOM extractor"
+        }
+      ]
+    },
+    "component": {
+      "type": "firmware",
+      "bom-ref": "firmware-root",
+      "name": "zephyr.bin",
+      "hashes": [
+        {
+          "alg": "SHA-256",
+          "content": "bb6f0b67a5eaf7c5b621a7cfe4fb464e8da403ac1b7623c19ab06cb141ef617e"
+        },
+        {
+          "alg": "SHA-1",
+          "content": "af64f8b8cc7dae2764cec54c36dab9deeb39ad55"
+        },
+        {
+          "alg": "MD5",
+          "content": "15b600e387c3b29096ffd42588bc909a"
+        }
+      ],
+      "properties": [
+        {
+          "name": "fw2sbom:file_size_bytes",
+          "value": "32768"
+        },
+        {
+          "name": "fw2sbom:cortex_m_vector_table",
+          "value": "detected"
+        },
+        {
+          "name": "fw2sbom:vector_table_detail",
+          "value": "initial SP 0x20010000 points into typical SRAM"
+        },
+        {
+          "name": "fw2sbom:vector_table_detail",
+          "value": "reset vector 0x000004c1 has Thumb bit set"
+        },
+        {
+          "name": "fw2sbom:vector_table_detail",
+          "value": "14/14 plausible exception vectors in slots 2-15"
+        },
+        {
+          "name": "fw2sbom:file_magic",
+          "value": "data"
+        },
+        {
+          "name": "fw2sbom:payload_verdict",
+          "value": "plaintext"
+        },
+        {
+          "name": "fw2sbom:payload_entropy_bits_per_byte",
+          "value": "1.5112"
+        },
+        {
+          "name": "fw2sbom:payload_longest_identical_run",
+          "value": "24042"
+        },
+        {
+          "name": "fw2sbom:payload_chi_square",
+          "value": "4615790.5"
+        },
+        {
+          "name": "fw2sbom:payload_printable_ratio",
+          "value": "0.0129"
+        },
+        {
+          "name": "fw2sbom:payload_duplicate_16b_blocks",
+          "value": "2012"
+        }
+      ]
+    },
+    "properties": [
+      {
+        "name": "fw2sbom:sbom_type",
+        "value": "binary-derived"
+      },
+      {
+        "name": "fw2sbom:analysis_methods",
+        "value": "file(1) magic, packetized-container de-framing, printable-string extraction, signature/regex matching, Cortex-M vector-table heuristics, entropy/opacity analysis"
+      },
+      {
+        "name": "fw2sbom:offset_reference",
+        "value": "file"
+      },
+      {
+        "name": "fw2sbom:strings_extracted",
+        "value": "20"
+      },
+      {
+        "name": "fw2sbom:min_string_length",
+        "value": "6"
+      },
+      {
+        "name": "fw2sbom:disclaimer",
+        "value": "This SBOM was derived from static analysis of a stripped firmware binary. Component identification and versions are heuristic (evidence-based) and may be incomplete or inaccurate. Absence of a component is not evidence of absence."
+      },
+      {
+        "name": "fw2sbom:opacity_disclaimer",
+        "value": "An 'opaque' verdict means the payload is encrypted, obfuscated or compressed with an unrecognised scheme. No static tool can enumerate components in that state; the SBOM is therefore metadata-only by necessity and must be completed from a vendor-supplied SBOM or plaintext image."
+      }
+    ]
+  },
+  "components": [
+    {
+      "type": "operating-system",
+      "bom-ref": "component-1-zephyr",
+      "name": "zephyr",
+      "description": "Zephyr RTOS",
+      "purl": "pkg:github/zephyrproject-rtos/zephyr@3.5.0",
+      "evidence": {
+        "identity": [
+          {
+            "field": "name",
+            "confidence": 0.97,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.95,
+                "value": "regex 'Booting Zephyr OS build (?:zephyr-)?v?([0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.]+)?)' matched 'Booting Zephyr OS build zephyr-v3.5.0' at offset 0x2040 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.9,
+                "value": "regex 'Zephyr version ([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'Zephyr version 3.5.0' at offset 0x2071 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.7,
+                "value": "regex 'zephyr-v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'zephyr-v3.5.0' at offset 0x2040 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.6,
+                "value": "regex 'Zephyr OS' matched 'Zephyr OS' at offset 0x2040 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.4,
+                "value": "regex 'ZEPHYR_BASE|zephyr,\\w+|zephyr/' matched 'ZEPHYR_BASE' at offset 0x2089 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.2,
+                "value": "regex 'west build' matched 'west build' at offset 0x21e2 of the file"
+              }
+            ]
+          },
+          {
+            "field": "version",
+            "confidence": 0.97,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.95,
+                "value": "regex 'Booting Zephyr OS build (?:zephyr-)?v?([0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.]+)?)' matched 'Booting Zephyr OS build zephyr-v3.5.0' at offset 0x2040 of the file"
+              }
+            ]
+          }
+        ],
+        "occurrences": [
+          {
+            "location": "zephyr.bin",
+            "additionalContext": "first match at offset 0x2040 of the file"
+          }
+        ]
+      },
+      "properties": [
+        {
+          "name": "fw2sbom:confidence",
+          "value": "0.97"
+        },
+        {
+          "name": "fw2sbom:confidence_level",
+          "value": "high"
+        },
+        {
+          "name": "fw2sbom:matched_patterns",
+          "value": "6"
+        },
+        {
+          "name": "fw2sbom:version_source",
+          "value": "exact-version-string"
+        }
+      ],
+      "supplier": {
+        "name": "Zephyr Project"
+      },
+      "version": "3.5.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "component-2-mbedtls",
+      "name": "mbedtls",
+      "description": "Mbed TLS cryptographic library",
+      "purl": "pkg:github/Mbed-TLS/mbedtls@3.4.0",
+      "evidence": {
+        "identity": [
+          {
+            "field": "name",
+            "confidence": 0.97,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.9,
+                "value": "regex '[Mm]bed ?TLS[ /]v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'mbed TLS 3.4.0' at offset 0x20ba of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.5,
+                "value": "regex 'MBEDTLS_[A-Z0-9_]+' matched 'MBEDTLS_ERR_SSL_ALLOC_FAILED' at offset 0x20e4 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.5,
+                "value": "regex 'mbedtls_[a-z0-9_]+' matched 'mbedtls_ssl_handshake' at offset 0x20cb of the file"
+              }
+            ]
+          },
+          {
+            "field": "version",
+            "confidence": 0.97,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.9,
+                "value": "regex '[Mm]bed ?TLS[ /]v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'mbed TLS 3.4.0' at offset 0x20ba of the file"
+              }
+            ]
+          }
+        ],
+        "occurrences": [
+          {
+            "location": "zephyr.bin",
+            "additionalContext": "first match at offset 0x20ba of the file"
+          }
+        ]
+      },
+      "properties": [
+        {
+          "name": "fw2sbom:confidence",
+          "value": "0.97"
+        },
+        {
+          "name": "fw2sbom:confidence_level",
+          "value": "high"
+        },
+        {
+          "name": "fw2sbom:matched_patterns",
+          "value": "3"
+        },
+        {
+          "name": "fw2sbom:version_source",
+          "value": "exact-version-string"
+        }
+      ],
+      "supplier": {
+        "name": "Arm / Trusted Firmware"
+      },
+      "version": "3.4.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "component-3-lwip",
+      "name": "lwip",
+      "description": "lwIP TCP/IP stack",
+      "purl": "pkg:github/lwip-tcpip/lwip@2.1.3",
+      "evidence": {
+        "identity": [
+          {
+            "field": "name",
+            "confidence": 0.97,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.9,
+                "value": "regex 'lwIP[ v/]+([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'lwIP 2.1.3' at offset 0x2105 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.6,
+                "value": "regex 'lwIP' matched 'lwIP' at offset 0x2105 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.4,
+                "value": "regex 'lwip_[a-z_]+|LWIP_[A-Z_]+' matched 'lwip_socket' at offset 0x2113 of the file"
+              }
+            ]
+          },
+          {
+            "field": "version",
+            "confidence": 0.97,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.9,
+                "value": "regex 'lwIP[ v/]+([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'lwIP 2.1.3' at offset 0x2105 of the file"
+              }
+            ]
+          }
+        ],
+        "occurrences": [
+          {
+            "location": "zephyr.bin",
+            "additionalContext": "first match at offset 0x2105 of the file"
+          }
+        ]
+      },
+      "properties": [
+        {
+          "name": "fw2sbom:confidence",
+          "value": "0.97"
+        },
+        {
+          "name": "fw2sbom:confidence_level",
+          "value": "high"
+        },
+        {
+          "name": "fw2sbom:matched_patterns",
+          "value": "3"
+        },
+        {
+          "name": "fw2sbom:version_source",
+          "value": "exact-version-string"
+        }
+      ],
+      "supplier": {
+        "name": "lwIP project"
+      },
+      "version": "2.1.3"
+    },
+    {
+      "type": "library",
+      "bom-ref": "component-4-littlefs",
+      "name": "littlefs",
+      "description": "littlefs embedded filesystem",
+      "purl": "pkg:github/littlefs-project/littlefs@2.8.0",
+      "evidence": {
+        "identity": [
+          {
+            "field": "name",
+            "confidence": 0.97,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.9,
+                "value": "regex 'littlefs[ v/]+([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'littlefs v2.8.0' at offset 0x2141 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.6,
+                "value": "regex 'littlefs' matched 'littlefs' at offset 0x2141 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.45,
+                "value": "regex 'lfs_(?:mount|format|file_open)' matched 'lfs_mount' at offset 0x2154 of the file"
+              }
+            ]
+          },
+          {
+            "field": "version",
+            "confidence": 0.97,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.9,
+                "value": "regex 'littlefs[ v/]+([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'littlefs v2.8.0' at offset 0x2141 of the file"
+              }
+            ]
+          }
+        ],
+        "occurrences": [
+          {
+            "location": "zephyr.bin",
+            "additionalContext": "first match at offset 0x2141 of the file"
+          }
+        ]
+      },
+      "properties": [
+        {
+          "name": "fw2sbom:confidence",
+          "value": "0.97"
+        },
+        {
+          "name": "fw2sbom:confidence_level",
+          "value": "high"
+        },
+        {
+          "name": "fw2sbom:matched_patterns",
+          "value": "3"
+        },
+        {
+          "name": "fw2sbom:version_source",
+          "value": "exact-version-string"
+        }
+      ],
+      "supplier": {
+        "name": "littlefs project"
+      },
+      "version": "2.8.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "component-5-newlib",
+      "name": "newlib",
+      "description": "newlib C standard library",
+      "purl": "pkg:generic/newlib@4.3.0",
+      "evidence": {
+        "identity": [
+          {
+            "field": "name",
+            "confidence": 0.95,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.85,
+                "value": "regex 'newlib[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'newlib 4.3.0' at offset 0x2122 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.5,
+                "value": "regex 'newlib' matched 'newlib' at offset 0x2122 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.3,
+                "value": "regex '_impure_ptr|__sinit|_reent' matched '_impure_ptr' at offset 0x2132 of the file"
+              }
+            ]
+          },
+          {
+            "field": "version",
+            "confidence": 0.95,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.85,
+                "value": "regex 'newlib[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'newlib 4.3.0' at offset 0x2122 of the file"
+              }
+            ]
+          }
+        ],
+        "occurrences": [
+          {
+            "location": "zephyr.bin",
+            "additionalContext": "first match at offset 0x2122 of the file"
+          }
+        ]
+      },
+      "properties": [
+        {
+          "name": "fw2sbom:confidence",
+          "value": "0.95"
+        },
+        {
+          "name": "fw2sbom:confidence_level",
+          "value": "high"
+        },
+        {
+          "name": "fw2sbom:matched_patterns",
+          "value": "3"
+        },
+        {
+          "name": "fw2sbom:version_source",
+          "value": "exact-version-string"
+        }
+      ],
+      "supplier": {
+        "name": "Red Hat / newlib project"
+      },
+      "version": "4.3.0"
+    },
+    {
+      "type": "application",
+      "bom-ref": "component-6-gcc-arm-none-eabi",
+      "name": "gcc-arm-none-eabi",
+      "description": "GCC toolchain (compiler identification strings)",
+      "purl": "pkg:generic/gcc@12.2.0",
+      "evidence": {
+        "identity": [
+          {
+            "field": "name",
+            "confidence": 0.95,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.9,
+                "value": "regex 'GCC:? \\([^)]*\\) ([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'GCC: (Zephyr SDK 0.16.3) 12.2.0' at offset 0x2161 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.5,
+                "value": "regex 'arm-zephyr-eabi' matched 'arm-zephyr-eabi' at offset 0x2183 of the file"
+              }
+            ]
+          },
+          {
+            "field": "version",
+            "confidence": 0.95,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.9,
+                "value": "regex 'GCC:? \\([^)]*\\) ([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'GCC: (Zephyr SDK 0.16.3) 12.2.0' at offset 0x2161 of the file"
+              }
+            ]
+          }
+        ],
+        "occurrences": [
+          {
+            "location": "zephyr.bin",
+            "additionalContext": "first match at offset 0x2161 of the file"
+          }
+        ]
+      },
+      "properties": [
+        {
+          "name": "fw2sbom:confidence",
+          "value": "0.95"
+        },
+        {
+          "name": "fw2sbom:confidence_level",
+          "value": "high"
+        },
+        {
+          "name": "fw2sbom:matched_patterns",
+          "value": "2"
+        },
+        {
+          "name": "fw2sbom:version_source",
+          "value": "exact-version-string"
+        }
+      ],
+      "supplier": {
+        "name": "GNU Project"
+      },
+      "version": "12.2.0"
+    },
+    {
+      "type": "library",
+      "bom-ref": "component-7-cmsis",
+      "name": "cmsis",
+      "description": "Arm CMSIS (Cortex Microcontroller Software Interface Standard)",
+      "purl": "pkg:github/ARM-software/CMSIS_5@5.9.0",
+      "evidence": {
+        "identity": [
+          {
+            "field": "name",
+            "confidence": 0.95,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.85,
+                "value": "regex 'CMSIS[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'CMSIS-5.9.0' at offset 0x2196 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.5,
+                "value": "regex 'CMSIS' matched 'CMSIS' at offset 0x2196 of the file"
+              },
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.35,
+                "value": "regex 'SysTick_Handler|NVIC_[A-Za-z]+|__NVIC' matched 'SysTick_Handler' at offset 0x21a6 of the file"
+              }
+            ]
+          },
+          {
+            "field": "version",
+            "confidence": 0.95,
+            "methods": [
+              {
+                "technique": "binary-analysis",
+                "confidence": 0.85,
+                "value": "regex 'CMSIS[- ]?v?([0-9]+\\.[0-9]+\\.[0-9]+)' matched 'CMSIS-5.9.0' at offset 0x2196 of the file"
+              }
+            ]
+          }
+        ],
+        "occurrences": [
+          {
+            "location": "zephyr.bin",
+            "additionalContext": "first match at offset 0x2196 of the file"
+          }
+        ]
+      },
+      "properties": [
+        {
+          "name": "fw2sbom:confidence",
+          "value": "0.95"
+        },
+        {
+          "name": "fw2sbom:confidence_level",
+          "value": "high"
+        },
+        {
+          "name": "fw2sbom:matched_patterns",
+          "value": "3"
+        },
+        {
+          "name": "fw2sbom:version_source",
+          "value": "exact-version-string"
+        }
+      ],
+      "supplier": {
+        "name": "Arm"
+      },
+      "version": "5.9.0"
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "firmware-root",
+      "dependsOn": [
+        "component-1-zephyr",
+        "component-2-mbedtls",
+        "component-3-lwip",
+        "component-4-littlefs",
+        "component-5-newlib",
+        "component-6-gcc-arm-none-eabi",
+        "component-7-cmsis"
+      ]
+    },
+    {
+      "ref": "component-1-zephyr",
+      "dependsOn": []
+    },
+    {
+      "ref": "component-2-mbedtls",
+      "dependsOn": []
+    },
+    {
+      "ref": "component-3-lwip",
+      "dependsOn": []
+    },
+    {
+      "ref": "component-4-littlefs",
+      "dependsOn": []
+    },
+    {
+      "ref": "component-5-newlib",
+      "dependsOn": []
+    },
+    {
+      "ref": "component-6-gcc-arm-none-eabi",
+      "dependsOn": []
+    },
+    {
+      "ref": "component-7-cmsis",
+      "dependsOn": []
+    }
+  ]
+}
