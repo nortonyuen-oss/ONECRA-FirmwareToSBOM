@@ -154,9 +154,74 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.12.0</span>
+        <span class="ver">1.13.0</span>
         <span class="date">2026-09-14</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>ESP32 韌體:晶片與 ESP-IDF 版本是讀出來的</h2>
+        <p>
+          ESP32 系列佔 IoT 裝置很大一塊,而它的韌體既不是平坦的 MCU 映像,也不是
+          Linux 映像。把整顆 flash 當一團 blob 掃,結果跟拿 router 韌體這樣掃一樣差。
+          現在兩種輸入都按它自己的結構切開:
+        </p>
+        <div class="tw"><table>
+          <thead><tr><th>你手上的檔案</th><th>裡面的結構</th><th>怎麼切</th></tr></thead>
+          <tbody>
+            <tr><td>Application image(OTA 檔)</td><td class="n">24-byte header + 各帶載入位址的 segment</td><td>header 與每個 segment 各自一段</td></tr>
+            <tr><td>整顆 flash dump / factory 檔</td><td class="n">0x1000 bootloader、0x8000 partition table</td><td>依 partition table —— 那是裝置自己用的地圖</td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          更重要的是兩件<strong>宣告出來、而不是比對出來</strong>的事實。映像的
+          header 直接寫明是哪顆晶片(ESP32 / S2 / S3 / C2 / C3 / C5 / C6 / H2 / P4),
+          連帶指令集 —— <strong>沒有任何熵值或 opcode 統計分得開 Xtensa 與 RISC-V,
+          但這個欄位分得開</strong>。而 ESP-IDF 會把自己的版本寫進映像裡的一個結構
+          (<code>esp_app_desc_t</code>),同時帶出專案名稱、應用版本、build 日期,
+          以及原始 ELF 的 SHA-256。
+        </p>
+        <p>
+          這類證據跟「剛好命中 regex 的字串」不是同一個等級,所以 confidence 給到
+          0.97,與從套件資料庫讀出來的元件同級:
+        </p>
+        <div class="tw"><table>
+          <thead><tr><th>元件</th><th>版本</th><th>Confidence</th><th>證據</th></tr></thead>
+          <tbody>
+            <tr><td>esp-idf</td><td class="n">5.5.4.260407</td><td class="n">0.97</td><td>映像 header 內的宣告</td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          <strong>留空的欄位一律當作沒有這項資訊。</strong>真實的 build 常常只填一
+          部分 —— 公開的 Tasmota 映像就只填 IDF 版本,其餘全部留空。空欄位不會變成
+          一個版本是空字串的元件:那比沒有元件更糟,因為 CVE 比對會當真。
+        </p>
+        <p>
+          驗證用的不只是合成測試檔:ESP32 與 ESP32-C3 的公開 Tasmota 映像、加上一份
+          完整的 factory flash 映像都實際跑過。也因此才發現真實的 partition 佈局不一定
+          照教科書走。
+        </p>
+        <div class="fixed">
+          <div class="h">要知道的限制</div>
+          <p>
+            ESP-IDF 本身帶了 mbedTLS、lwIP、FreeRTOS,但 fw2sbom
+            <strong>不會從 IDF 版本反推它們的版本</strong>。Tasmota 這類 release build
+            把這些元件自己的字串剝掉了(整份 2 MB 映像有七千多段可列印字串,卻一個
+            <code>mbedtls</code>、<code>lwip</code> 或 <code>FreeRTOS</code> 都沒有),
+            所以它們不會出現在 SBOM 裡。這是「讀不到」,不是「不存在」—— 猜一個版本
+            出來會直接變成錯誤的 CVE 清單。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,242,015 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">6b014fcc5b3d657e98c1dbeaf1ab9f9b38b1c36ab71dc38465b68cdd27eb3296</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.12.0</span>
+        <span class="date">2026-09-14</span>
       </div>
       <div>
         <h2>直接讀 .elf、.hex、.s19 與 .uf2</h2>

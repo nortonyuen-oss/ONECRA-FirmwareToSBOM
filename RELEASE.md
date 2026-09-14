@@ -31,6 +31,82 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.13.0
+
+| | |
+|---|---|
+| Tag | `v1.13.0` |
+| 程式碼 commit | `35cf37a49aa0582653236904039dfded78fa6d69`(ESP32 實作;`v1.13.0` 標籤指向之後嗰個發佈 commit) |
+| Build 日期 | 2026-09-14 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 3(第二階段)**:Espressif ESP32 系列。
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,242,015 bytes |
+| SHA-256 | `6b014fcc5b3d657e98c1dbeaf1ab9f9b38b1c36ab71dc38465b68cdd27eb3296` |
+| 內容 | 56 個檔案(多咗 `esp32.py`) |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `01540f85b3551e916584ea623a3e9fecfeb8df54161ea19c009d99aa2c422f33` |
+| `container.py` | `2e946118b0760620ffcbbd283d631710951b79769063902f0fd40a2b415a2ea5` |
+| `esp32.py` | `9791d914db0122f1ee2f92eea3bbcd0f5cdfce1c0428b32a537bec02aa9bf162` |
+
+其餘檔案與 v1.12.0 相同。
+
+### 新增
+
+- **`esp32.py`** —— ESP32 韌體按佢自己嘅結構切,唔再當一嚿嘢掃:
+
+  | 輸入 | 切法 |
+  |---|---|
+  | Application image(OTA 檔) | 24-byte header + 每個帶載入位址嘅 segment |
+  | 整顆 flash / factory 檔 | 0x1000 bootloader、0x8000 partition table,**按 partition 切** |
+
+- **晶片型號係讀出嚟,唔係估**。Header 嘅 chip ID 直接寫明 ESP32 / S2 / S3 /
+  C2 / C3 / C5 / C6 / H2 / P4,連帶指令集。**冇任何熵值或 opcode 統計分得開
+  Xtensa 同 RISC-V**,但呢個欄位分得開。表上冇嘅新型號會照實報
+  `unknown chip 0xNNNN`。
+- **ESP-IDF 版本由 `esp_app_desc_t` 讀出** —— 結構欄位,唔係啱啱命中 regex 嘅
+  字串,所以 confidence 同套件資料庫同級(0.97),
+  `fw2sbom:evidence_class = esp-idf-app-descriptor`。連帶讀出專案名稱、應用
+  版本、build 日期時間、原始 ELF 嘅 SHA-256。
+- **空欄位當冇資料**。真實 build 好多時只填一部分(公開嘅 Tasmota 映像淨係填
+  `idf_ver`),空字串唔會變成「版本係空字串」嘅元件 —— 嗰樣比冇元件更糟,因為
+  CVE 比對會當真。
+- **Flash dump 入面邊個 image 代表產品**:帶 app descriptor 嗰個。Bootloader
+  位置最低但永遠冇 descriptor,攞第一個搵到嘅會報錯 entry point 兼漏咗 IDF
+  版本。
+
+### 驗證
+
+唔淨止合成 fixture:ESP32 同 ESP32-C3 嘅公開 Tasmota v15.6.0 映像、加一份完整
+factory flash 映像都實際跑過,三份都讀到 `esp-idf 5.5.4.260407`。真實 partition
+佈局唔一定照教科書(Tasmota 用 `safeboot` 而唔係 `factory`)—— 呢點就係跑真檔
+先見到嘅。
+
+### 已知限制
+
+ESP-IDF 本身帶咗 mbedTLS、lwIP、FreeRTOS,但**版本唔會由 IDF 版本推導出嚟**。
+Tasmota 呢類 release build 剝走咗呢啲元件自己嘅字串(成個 2 MB 映像有 7,070 段
+可列印字串,但一個 `mbedtls` / `lwip` / `FreeRTOS` 都冇),所以 SBOM 就唔會有
+佢哋 —— 呢個係「讀唔到」,唔係「唔存在」。
+
+### 測試
+
+151 個(由 133 增加)。新增 `EspressifTest` 十八項,連兩個合成 fixture
+(`esp32_app.bin`、`esp32_flash.bin`),兩者都納入 CycloneDX schema 驗證。
+
+---
+
 ## v1.12.0
 
 | | |
