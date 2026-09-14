@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-11** · 版本 **v1.7.1** · commit `8e5ebd6`
+快照日期:**2026-09-14** · 版本 **v1.7.1** · commit `b5dcc30`
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -57,7 +57,8 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
-| 下載頁 | `docs/`,由 GitHub Pages 發佈(見 [docs/README.md](docs/README.md)) |
+| 授權 | 專有([LICENSE](LICENSE));第三方歸屬見 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) |
+| 下載頁 | **已上線** <https://nortonyuen-oss.github.io/ONECRA-FirmwareToSBOM/> |
 
 ---
 
@@ -94,12 +95,23 @@ Phase 2 剩餘(擴闊 router / CCTV 覆蓋):
 
 ---
 
+## 下載站
+
+**已上線:**<https://nortonyuen-oss.github.io/ONECRA-FirmwareToSBOM/>
+
+由 GitHub Pages 從 `master` 的 `/docs` 發佈。端到端驗證過:從公開網址下載到的
+zip,雜湊與頁面公佈的一致;解壓後用套件內的直譯器跑真實 router 韌體,得到 366
+個元件,CycloneDX 與 SPDX 皆通過官方 schema。
+
+倉庫因此**維持 public**(原本決定轉 private,已推翻 —— 免費帳戶的 Pages 只支援
+公開倉庫)。git history 已查核:無客戶資料。授權為專有。
+
+---
+
 ## 待辦(非程式碼)
 
 | 項目 | 說明 |
 |---|---|
-| Repo 維持 public | **原本決定轉 private,已推翻** —— 免費帳戶的 GitHub Pages 只支援公開倉庫,而下載頁要由 Pages 提供。git history 已查核:無客戶資料。授權已補上(v1.7.1,專有) |
-| 開啟 GitHub Pages | Settings → Pages → Deploy from a branch → `master` / `/docs`。做一次即可 |
 | 重建 PyInstaller exe | `dist/fw2sbom-service.exe` 仍是 1.4.0。重建**必須**用 `pyinstaller fw2sbom-service.spec`,裸 `--onefile` 不會帶 `signatures/` |
 | CPython hash pin | `scripts/python-embed.sha256` 仍為空。下次有網時跑 `build-portable.ps1 -PinHash` 並對照 python.org |
 | 真實 CCTV 韌體樣本 | 有樣本才能決定 Phase 2 剩餘項目的優先次序 |
