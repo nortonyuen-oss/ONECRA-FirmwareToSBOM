@@ -31,6 +31,80 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.12.0
+
+| | |
+|---|---|
+| Tag | `v1.12.0` |
+| Build 日期 | 2026-09-14 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 3(第一階段)**:交付格式。
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,236,313 bytes |
+| SHA-256 | `33d2d753f258a3790bbecc7f93fce17022f6533139da733fb336b1966b74af9c` |
+| 內容 | 55 個檔案(多咗 `image_input.py`) |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `cf95b312453a0d8d508c8c08c8c914d7867346f9a589854142d897f3fa359236` |
+| `image_input.py` | `58baf56e63a7ddd2eeb0ce909a0ad324c73bd60e57fb03b5db7a08c3d8120aa1` |
+| `service.py` | `119d0882f4ab7ee4b2a14cbc30f28e4b0edca2e293300230ab67ef89186f56f0` |
+
+其餘檔案與 v1.11.0 相同。
+
+### 新增
+
+- **`image_input.py`** —— 直接讀四種交付格式,唔再叫人先跑 `objcopy`:
+
+  | 格式 | 來源 | 定址 |
+  |---|---|---|
+  | Intel HEX | 燒錄工具 | 16 / 20 / 32-bit |
+  | Motorola S-record | 燒錄工具 | 16 / 24 / 32-bit |
+  | UF2 | RP2040、部分 Nordic | 512-byte 區塊 |
+  | ELF | linker 直接輸出 | PT_LOAD 區段 |
+
+- **空隙填 `0xFF`** —— 四種格式都係稀疏嘅,重組要決定空隙放咩。`0xFF` 係抹除
+  flash 讀出嚟嘅值,亦係裝置自己會見到嘅嘢。填充量會如實記錄。
+- **重組過程寫入 SBOM** —— `input_format`、`image_base_address`、`entry_point`、
+  `padding_inserted_bytes`,加一句 `offset_basis` 講明「本文件嘅 offset 指向重建
+  出嚟嘅映像,唔係交付檔案入面嘅位元組位置」。
+- **雜湊仍然描述交付檔案** —— 客戶核對嘅係人哋寄畀佢嗰個檔案,唔係我哋重建出嚟
+  嗰個。
+- ELF 讀 ARM / MIPS / RISC-V / Xtensa / AArch64;`p_paddr` 優先於 `p_vaddr`
+  (MCU 上 load address 先係位元組實際寫入嘅地方)。
+- Object file(冇 program header)會明確拒絕並講明「多數係 object file 而唔係
+  linked image」。
+
+### 修正
+
+- **v1.10.0 引入逐區段判定嗰陣,漏咗「指令集正面識別即為明文」呢條規則。**
+  密集 MCU 程式碼本來就達 7 bits/byte,單靠熵值門檻會判成加密 —— 結果
+  **普通 Cortex-M 韌體被報成讀唔到嘅加密區段**。v1.10.0 同 v1.11.0 都受影響。
+- 當時所有測試都通過,因為測試輔助函式跳過咗 `main()` 實際會行嗰步
+  (`summarise_opacity`)。輔助函式而家同 `main()` 行同一條路,並加咗一項測試
+  直接鎖住呢個行為。
+
+### 測試
+
+133 個(由 122 增加)。新增 `InputFormatTest` 七項、`ReassembledAnalysisTest`
+三項,同一項專門鎖住上面嗰個 regression。
+
+### 驗證
+
+同一份韌體以五種形式交付(`.bin`、`.hex`、`.s19`、`.uf2`、`.elf`),
+**五次分析結果完全一致**。
+
+---
+
 ## v1.11.0
 
 | | |

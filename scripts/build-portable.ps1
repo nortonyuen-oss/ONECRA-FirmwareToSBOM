@@ -72,6 +72,7 @@ $PayloadFromRoot = @(
     'evidence_report.py',
     'spdx_report.py',
     'vendor_sbom.py',
+    'image_input.py',
     'onecra_logo.png',
     'onecra_icon.png'
 )
@@ -277,7 +278,7 @@ if ($SkipSmokeTest) {
 
     # Both SBOM formats come from the same analysis; a missing spdx_report.py
     # would only surface when a customer clicked the SPDX download.
-    & $stagedPython '-B' '-c' 'import spdx_report, container, squashfs, elf, vendor_sbom' | Out-Null
+    & $stagedPython '-B' '-c' 'import spdx_report, container, squashfs, elf, vendor_sbom, image_input' | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "staged interpreter cannot import every module (exit $LASTEXITCODE)"
     }

@@ -154,9 +154,65 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.11.0</span>
+        <span class="ver">1.12.0</span>
         <span class="date">2026-09-14</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>直接讀 .elf、.hex、.s19 與 .uf2</h2>
+        <p>
+          工具鏈交給使用者的是 <code>.elf</code>,燒錄工具交出來的是 <code>.hex</code>
+          或 <code>.s19</code>。<strong>raw <code>.bin</code> 是那種你要先知道才懂得
+          去要的格式。</strong>之前 fw2sbom 只收 <code>.bin</code>,其他一律叫人先跑
+          <code>objcopy</code> —— 但那一步需要裝對應的交叉工具鏈,而手上拿著韌體的人
+          往往做不到。
+        </p>
+        <p>現在四種交付格式直接讀:</p>
+        <div class="tw"><table>
+          <thead><tr><th>格式</th><th>來源</th><th>定址</th></tr></thead>
+          <tbody>
+            <tr><td>Intel HEX</td><td>燒錄工具</td><td class="n">16 / 20 / 32-bit</td></tr>
+            <tr><td>Motorola S-record</td><td>燒錄工具</td><td class="n">16 / 24 / 32-bit</td></tr>
+            <tr><td>UF2</td><td>RP2040、部分 Nordic 開發板</td><td class="n">512-byte 區塊</td></tr>
+            <tr><td>ELF</td><td>linker 的直接輸出</td><td class="n">PT_LOAD 區段</td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          這四種都是<strong>稀疏</strong>的 —— 它們描述的是「某位址有這些資料」,不是
+          一個連續檔案。重組時必須決定空隙放什麼,答案是 <code>0xFF</code>,因為那就是
+          抹除過的 flash 讀出來的值,也是裝置自己會看到的東西。重組過程會寫進 SBOM:
+          證據裡的 offset 之後指的是重建出來的映像,而說明它是從哪個檔案重建的,是
+          「可重現的發現」與「令人困惑的發現」之間的差別。
+        </p>
+        <p>
+          雜湊仍然描述<strong>你收到的那個檔案</strong>,不是我們重建出來的東西 ——
+          客戶核對的是別人寄給他的檔案。
+        </p>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            v1.10.0 引入逐區段判定時,把「指令集一旦正面識別即為明文」這條規則漏在
+            路上了。密集的微控制器程式碼本來就達 7 bits/byte,單靠熵值門檻會把它判成
+            加密 —— 於是<strong>普通的 Cortex-M 韌體被報成讀不出來的加密區段</strong>。
+          </p>
+          <p>
+            所有測試當時都通過,因為測試輔助函式跳過了 <code>main()</code> 實際會走的
+            那一步。輔助函式現在與 <code>main()</code> 走同一條路,這類缺陷再也沒有地方
+            可以躲。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,236,313 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">33d2d753f258a3790bbecc7f93fce17022f6533139da733fb336b1966b74af9c</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.11.0</span>
+        <span class="date">2026-09-14</span>
+        
       </div>
       <div>
         <h2>匯入廠商 SBOM,並且比對</h2>

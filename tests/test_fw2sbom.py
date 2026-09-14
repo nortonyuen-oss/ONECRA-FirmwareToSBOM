@@ -17,6 +17,7 @@ directory; nothing here depends on a checked-in binary.
     python tests/test_fw2sbom.py
 """
 
+import hashlib
 import io
 import json
 import os
@@ -34,6 +35,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
 import container                                        # noqa: E402
+import image_input                                      # noqa: E402
 import elf                                              # noqa: E402
 import evidence_report                                  # noqa: E402
 import fw2sbom as core                                   # noqa: E402
@@ -83,10 +85,18 @@ def _analyze_uncached(name):
     arch = core.analyze_architecture(payload)
     opacity = core.analyze_opacity(payload, arch["label"])
     standards = core.detect_embedded_standards(payload)
-    segments, rootfs, _warnings = core.analyze_segments(payload, 6)
+    # Mirror main(): the architecture reaches segment judgement, and the
+    # headline verdict is summarised from the segments. A helper that skips
+    # either step tests a pipeline the product does not have - which is how a
+    # flat Cortex-M image came to be reported as encrypted without a single
+    # test noticing.
+    segments, rootfs, _warnings = core.analyze_segments(
+        payload, 6, False, arch["label"])
     strings = [pair for seg in segments for pair in seg.get("strings", [])]
     hits = core.merge_segment_hits(segments)
+    hits = core.merge_hit_lists(hits, core.scan_rootfs_files(rootfs, 6))
     packages = core.packages_to_components(rootfs)
+    opacity = core.summarise_opacity(segments, opacity)
     opacity = core.reconcile_opacity(opacity, hits + packages, standards)
     bom = core.build_sbom(name, data, None, arch, hits, 6, len(strings),
                           container=container, opacity=opacity,
@@ -733,6 +743,24 @@ class SegmentOpacityTest(unittest.TestCase):
         self.assertEqual(opaque[0]["evidence"]["identity"][0]["confidence"], 0.0)
         self.assertIn("vendor", opaque[0]["description"].lower())
 
+    def test_an_identified_instruction_set_still_settles_a_flat_image(self):
+        """Dense microcontroller code reaches ~7 bits/byte legitimately.
+
+        An entropy threshold alone calls that encrypted; a recognised vector
+        table settles what the statistic cannot. Per-segment judging briefly
+        dropped the architecture on the way through and reported ordinary
+        Cortex-M firmware as an unreadable region - with every test passing,
+        because the helper skipped the step main() actually takes.
+        """
+        for name in ("cortexm_rtos.bin", "cortexm_utf16.bin",
+                     "mcs51_display.bin"):
+            with self.subTest(fixture=name):
+                result = analyze(name)
+                self.assertIsNotNone(result["arch"]["label"])
+                self.assertFalse(result["opacity"]["opaque"])
+                self.assertEqual(core.opaque_segments(result["segments"]), [],
+                                 "an identified image has no unreadable region")
+
     def test_a_flat_mcu_image_is_judged_exactly_as_before(self):
         """One segment covering the payload must behave as it always did."""
         for name, expected in [("cortexm_rtos.bin", False),
@@ -925,6 +953,222 @@ class VendorSbomTest(unittest.TestCase):
             self.assertIn("bom-ref", component)
             self.assertIn("name", component)
             self.assertIn("type", component)
+
+
+# --------------------------------------------------------------------------- #
+
+def build_intel_hex(payload, base=0x08000000, chunk=32):
+    lines, upper = [], None
+
+    def record(kind, address, data):
+        body = bytes([len(data), (address >> 8) & 0xFF, address & 0xFF, kind]) + data
+        return ":" + (body + bytes([(-sum(body)) & 0xFF])).hex().upper()
+
+    for i in range(0, len(payload), chunk):
+        address = base + i
+        high = address >> 16
+        if high != upper:
+            lines.append(record(0x04, 0, high.to_bytes(2, "big")))
+            upper = high
+        lines.append(record(0x00, address & 0xFFFF, payload[i:i + chunk]))
+    lines.append(record(0x01, 0, b""))
+    return "\n".join(lines).encode()
+
+
+def build_srec(payload, base=0x08000000, chunk=32):
+    lines = ["S00600004844521B"]
+    for i in range(0, len(payload), chunk):
+        address, data = base + i, payload[i:i + chunk]
+        core_bytes = bytes([4 + len(data) + 1]) + address.to_bytes(4, "big") + data
+        lines.append("S3" + (core_bytes
+                             + bytes([~sum(core_bytes) & 0xFF])).hex().upper())
+    lines.append("S70500000000FA")
+    return "\n".join(lines).encode()
+
+
+def build_uf2(payload, base=0x08000000, family=0xE48BFF56):
+    blocks, total = b"", (len(payload) + 255) // 256
+    for index in range(total):
+        chunk = payload[index * 256:(index + 1) * 256]
+        blocks += struct.pack("<8I", 0x0A324655, 0x9E5D5157, 0x00002000,
+                              base + index * 256, len(chunk), index, total,
+                              family)
+        blocks += chunk + b"\x00" * (476 - len(chunk))
+        blocks += struct.pack("<I", 0x0AB16F30)
+    return blocks
+
+
+def build_elf_image(segments, machine=40, is64=False, little=True):
+    """A linked ELF carrying PT_LOAD segments at absolute addresses."""
+    endian = "<" if little else ">"
+    ehsize = 64 if is64 else 52
+    phentsize = 56 if is64 else 32
+    offset = ehsize + phentsize * len(segments)
+    body, headers = b"", b""
+    for address, blob in segments:
+        body += blob
+        if is64:
+            headers += struct.pack(endian + "IIQQQQQQ", 1, 4, offset, address,
+                                   address, len(blob), len(blob), 4)
+        else:
+            headers += struct.pack(endian + "IIIIIIII", 1, offset, address,
+                                   address, len(blob), len(blob), 4, 4)
+        offset += len(blob)
+    head = bytearray(ehsize)
+    head[0:4] = b"\x7fELF"
+    head[4], head[5], head[6] = (2 if is64 else 1), (1 if little else 2), 1
+    struct.pack_into(endian + "HH", head, 16, 2, machine)
+    if is64:
+        struct.pack_into(endian + "Q", head, 32, ehsize)
+        struct.pack_into(endian + "HHH", head, 52, ehsize, phentsize,
+                         len(segments))
+    else:
+        struct.pack_into(endian + "I", head, 28, ehsize)
+        struct.pack_into(endian + "HHH", head, 40, ehsize, phentsize,
+                         len(segments))
+    return bytes(head) + headers + body
+
+
+class InputFormatTest(unittest.TestCase):
+    """A toolchain hands out .elf; a flashing tool hands out .hex or .s19.
+
+    A raw .bin is the form you have to know to ask for, and telling the person
+    holding the firmware to go and find objcopy is not an answer. All four
+    must reassemble to the same bytes, and therefore to the same SBOM.
+    """
+
+    def payload(self):
+        return fixture("cortexm_rtos.bin")
+
+    def test_every_format_reassembles_to_the_same_bytes(self):
+        payload = self.payload()
+        for label, blob in [
+                ("Intel HEX", build_intel_hex(payload)),
+                ("Motorola S-record", build_srec(payload)),
+                ("UF2", build_uf2(payload)),
+                ("ELF", build_elf_image([(0x08000000, payload)]))]:
+            with self.subTest(format=label):
+                loaded = image_input.detect_and_load(blob)
+                self.assertTrue(loaded["converted"])
+                self.assertTrue(loaded["format"].startswith(label.split()[0]))
+                self.assertEqual(loaded["data"], payload)
+                self.assertEqual(loaded["base_address"], 0x08000000)
+
+    def test_raw_input_is_passed_through_untouched(self):
+        """An ordinary .bin analysis must be byte-for-byte what it was."""
+        payload = self.payload()
+        loaded = image_input.detect_and_load(payload)
+        self.assertFalse(loaded["converted"])
+        self.assertIs(loaded["data"], payload)
+        self.assertEqual(loaded["format"], "raw binary")
+
+    def test_gaps_are_filled_with_erased_flash_and_reported(self):
+        """What goes between two regions is a decision, and it is recorded."""
+        blob = build_elf_image([(0x08000000, b"A" * 64),
+                                (0x08000400, b"B" * 64)])
+        loaded = image_input.detect_and_load(blob)
+        self.assertEqual(len(loaded["data"]), 0x400 + 64)
+        self.assertEqual(loaded["data"][:64], b"A" * 64)
+        self.assertEqual(loaded["data"][64:0x400], b"\xff" * (0x400 - 64))
+        self.assertEqual(loaded["gaps_filled"], 0x400 - 64)
+        self.assertTrue(any("erased flash" in w for w in loaded["warnings"]))
+
+    def test_a_corrupt_record_is_refused_with_the_line_number(self):
+        """These files come from outside; a bad one must not be a traceback."""
+        good = build_intel_hex(b"hello world" * 8)
+        lines = good.split(b"\n")
+        lines[2] = lines[2][:-2] + b"00"          # break one checksum
+        with self.assertRaises(image_input.InputFormatError) as caught:
+            image_input.detect_and_load(b"\n".join(lines))
+        self.assertIn("checksum", str(caught.exception))
+        self.assertIn("line 3", str(caught.exception))
+
+        srec = build_srec(b"hello world" * 8).split(b"\n")
+        srec[1] = srec[1][:-2] + b"00"
+        with self.assertRaises(image_input.InputFormatError) as caught:
+            image_input.detect_and_load(b"\n".join(srec))
+        self.assertIn("checksum", str(caught.exception))
+
+    def test_an_object_file_says_why_it_cannot_be_used(self):
+        """The message has to tell the user what to go and get instead."""
+        with self.assertRaises(image_input.InputFormatError) as caught:
+            image_input.detect_and_load(build_elf_image([]))
+        message = str(caught.exception)
+        self.assertIn("object file", message)
+        self.assertIn("linked image", message)
+
+    def test_elf_reads_every_architecture_we_claim(self):
+        for machine, name, is64 in [(40, "ARM", False), (8, "MIPS", False),
+                                    (243, "RISC-V", True), (94, "Xtensa", False),
+                                    (183, "AArch64", True)]:
+            with self.subTest(machine=name):
+                blob = build_elf_image([(0x1000, b"payload" * 32)],
+                                       machine=machine, is64=is64)
+                loaded = image_input.detect_and_load(blob)
+                self.assertIn(name, loaded["format"])
+
+    def test_a_uf2_with_mixed_families_is_flagged(self):
+        payload = b"x" * 512
+        mixed = (build_uf2(payload[:256], family=0x1111)
+                 + build_uf2(payload[256:], base=0x08000100, family=0x2222))
+        loaded = image_input.detect_and_load(mixed)
+        self.assertTrue(any("family" in w for w in loaded["warnings"]))
+
+
+class ReassembledAnalysisTest(unittest.TestCase):
+    """Converting the input must not change a single conclusion."""
+
+    def test_the_sbom_is_the_same_whichever_format_arrived(self):
+        payload = fixture("cortexm_rtos.bin")
+        baseline = analyze("cortexm_rtos.bin")
+        expected = {h["sig"]["name"]: h["version"] for h in baseline["hits"]}
+
+        for label, blob in [("hex", build_intel_hex(payload)),
+                            ("srec", build_srec(payload)),
+                            ("uf2", build_uf2(payload)),
+                            ("elf", build_elf_image([(0x08000000, payload)]))]:
+            with self.subTest(format=label):
+                loaded = image_input.detect_and_load(blob)
+                arch = core.analyze_architecture(loaded["data"])
+                segments, rootfs, _w = core.analyze_segments(
+                    loaded["data"], 6, False, arch["label"])
+                hits = core.merge_segment_hits(segments)
+                self.assertEqual(
+                    {h["sig"]["name"]: h["version"] for h in hits}, expected)
+
+    def test_the_document_says_it_was_reassembled(self):
+        """Offsets then refer to the rebuilt image, and must say so."""
+        payload = fixture("cortexm_rtos.bin")
+        loaded = image_input.detect_and_load(build_intel_hex(payload))
+        arch = core.analyze_architecture(loaded["data"])
+        segments, rootfs, _w = core.analyze_segments(
+            loaded["data"], 6, False, arch["label"])
+        bom = core.build_sbom("delivered.hex", build_intel_hex(payload), None,
+                              arch, core.merge_segment_hits(segments), 6, 0,
+                              segments=segments, source=loaded)
+        props = {p["name"]: p["value"]
+                 for p in bom["metadata"]["component"]["properties"]}
+        self.assertEqual(props["fw2sbom:input_format"], "Intel HEX")
+        self.assertEqual(props["fw2sbom:image_base_address"], "0x8000000")
+        self.assertIn("reassembled image", props["fw2sbom:offset_basis"])
+
+    def test_hashes_describe_the_delivered_file_not_our_rebuild(self):
+        """A customer checksums what they were sent, not what we made of it."""
+        payload = fixture("cortexm_rtos.bin")
+        delivered = build_intel_hex(payload)
+        loaded = image_input.detect_and_load(delivered)
+        arch = core.analyze_architecture(loaded["data"])
+        segments, _r, _w = core.analyze_segments(loaded["data"], 6, False,
+                                                 arch["label"])
+        bom = core.build_sbom("delivered.hex", delivered, None, arch,
+                              core.merge_segment_hits(segments), 6, 0,
+                              segments=segments, source=loaded)
+        recorded = {h["alg"]: h["content"]
+                    for h in bom["metadata"]["component"]["hashes"]}
+        self.assertEqual(recorded["SHA-256"],
+                         hashlib.sha256(delivered).hexdigest())
+        self.assertNotEqual(recorded["SHA-256"],
+                            hashlib.sha256(payload).hexdigest())
 
 # --------------------------------------------------------------------------- #
 

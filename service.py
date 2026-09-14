@@ -30,6 +30,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import evidence_report
 import fw2sbom as core
+import image_input
 import spdx_report
 
 HOST = "127.0.0.1"
@@ -402,12 +403,20 @@ def parse_multipart(body, boundary):
 
 def analyze_bytes(filename, data):
     """Run the fw2sbom pipeline in-process on in-memory bytes."""
+    delivered = data
+    try:
+        source = image_input.detect_and_load(data)
+    except image_input.InputFormatError as e:
+        raise ValueError(f"cannot read this file: {e}")
+    data = source["data"]
+
     container = core.detect_packet_container(data)
     payload = core.deframe(data, container) if container else data
     arm_info = core.analyze_architecture(payload)
     opacity = core.analyze_opacity(payload, arm_info["label"])
     standards = core.detect_embedded_standards(payload)
-    segments, rootfs, _warnings = core.analyze_segments(payload, 6, False)
+    segments, rootfs, _warnings = core.analyze_segments(
+        payload, 6, False, arm_info["label"])
     strings = [pair for segment in segments
                for pair in segment.get("strings", [])]
     hits = core.merge_segment_hits(segments)
@@ -416,10 +425,11 @@ def analyze_bytes(filename, data):
     opacity = core.reconcile_opacity(opacity, hits + packages, standards)
     name = filename or "firmware.bin"
     stem = os.path.splitext(os.path.basename(name))[0]
-    bom = core.build_sbom(name, data, None, arm_info, hits, 6,
+    bom = core.build_sbom(name, delivered, None, arm_info, hits, 6,
                           len(strings), container=container, opacity=opacity,
                           payload=payload, standards=standards,
-                          segments=segments, rootfs=rootfs, packages=packages)
+                          segments=segments, rootfs=rootfs, packages=packages,
+                          source=source)
 
     spdx = spdx_report.build_spdx(bom, name, core.TOOL_NAME, core.TOOL_VERSION)
     sbom_filename = stem + "_SBOM.cdx.json"
@@ -458,7 +468,9 @@ def analyze_bytes(filename, data):
         "n_strings": len(strings),
         "cortex_m": arm_info["looks_like_cortex_m"],
         "architecture": arm_info["label"],
-        "file_size_bytes": len(data),
+        "file_size_bytes": len(delivered),
+        "input_format": source["format"],
+        "reassembled": source["converted"],
         "container": container,
         "opacity": opacity,
     }

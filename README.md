@@ -65,7 +65,7 @@ chmod +x fw2sbom.py
 
 | 參數 | 說明 |
 |---|---|
-| `input` | 要分析的 firmware 映像檔(raw `.bin`) |
+| `input` | 要分析的 firmware 映像檔:`.bin`、`.elf`、`.hex`、`.s19`/`.srec`、`.uf2` |
 | `-o, --output FILE` | SBOM 輸出路徑(預設 `<input>.cdx.json`) |
 | `--format {cyclonedx,spdx,both}` | 輸出格式,預設 `cyclonedx`。`both` 由同一次分析產生兩份文件 |
 | `--firmware-version VER` | 這份映像所屬的**產品**韌體版本,寫入 SBOM 根 component |
@@ -599,7 +599,8 @@ schema 沒抓下來或沒裝 `jsonschema` 時,該項測試會 skip 而不是假�
   但不會嘗試破解廠商加密)
 - 框架在**後**的封包格式(`[payload][checksum][length][page][seq]`)去框後會少掉
   第一個 payload chunk:第一組框架之前的那段資料無法與檔頭區分
-- 對 ELF/HEX 輸入會警告(請先 `arm-none-eabi-objcopy -O binary app.elf app.bin`)
+- 交付格式:raw `.bin`、ELF、Intel HEX、Motorola S-record、UF2 都直接讀取;
+  稀疏格式的空隙以 `0xFF`(抹除 flash)填補,填充量與重組基底位址寫入 SBOM
 
 ## 授權
 

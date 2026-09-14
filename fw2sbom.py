@@ -44,12 +44,13 @@ from datetime import datetime, timezone
 
 import container
 import elf
+import image_input
 import evidence_report
 import spdx_report
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.11.0"
+TOOL_VERSION = "1.12.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1153,7 +1154,7 @@ def confidence_level(c):
 # Segment analysis
 # --------------------------------------------------------------------------- #
 
-def analyze_segments(payload, min_str_len=6, verbose=False):
+def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None):
     """Split a payload into containers and analyse each one separately.
 
     A flat microcontroller image produces exactly one segment covering the
@@ -1176,7 +1177,7 @@ def analyze_segments(payload, min_str_len=6, verbose=False):
                      "label": "firmware image", "content": payload,
                      "expanded": False, "warnings": []}]
 
-    judge_segments(segments, payload, verbose)
+    judge_segments(segments, payload, architecture, verbose)
 
     rootfs = None
     for segment in segments:
@@ -1213,7 +1214,7 @@ def looks_blank(blob, sample=1 << 20):
     return blank >= BLANK_RATIO * len(window)
 
 
-def judge_segments(segments, payload, verbose=False):
+def judge_segments(segments, payload, architecture=None, verbose=False):
     """Give every segment its own opacity verdict.
 
     A firmware image is not one substance. This one is a 64 MB flash dump
@@ -1222,6 +1223,12 @@ def judge_segments(segments, payload, verbose=False):
     disappears into the padding. Measured per segment, the kernel reads 7.9999
     with no blank runs and 2083 repeated 16-byte blocks, which is what it
     actually is.
+
+    `architecture` applies only to a flat image that is all one segment, and
+    only when the instruction set was positively identified. That rule exists
+    because dense microcontroller code legitimately reaches ~7 bits/byte and an
+    entropy threshold alone calls it encrypted; a recognised vector table
+    settles the question that the statistic cannot.
     """
     for segment in segments:
         if segment["kind"] == "filesystem":
@@ -1247,7 +1254,10 @@ def judge_segments(segments, payload, verbose=False):
                 f"{segment['length']} bytes", verbose)
             continue
 
-        verdict = analyze_opacity(blob)
+        # The whole payload as one segment is the case the architecture rule
+        # was written for; a region inside a container is not.
+        verdict = analyze_opacity(
+            blob, architecture if segment["kind"] == "image" else None)
         # Content we successfully expanded is by definition readable, whatever
         # the compressed form scored.
         if expanded and verdict["opaque"] and not verdict["compression"]:
@@ -1479,7 +1489,7 @@ def packages_to_components(rootfs):
 def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_strings,
                container=None, opacity=None, payload=None, standards=None,
                firmware_version=None, segments=None, rootfs=None, packages=None,
-               vendor=None):
+               vendor=None, source=None):
     fname = os.path.basename(input_path)
     hashes = file_hashes(data)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1502,6 +1512,33 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         fw_props.append({"name": "fw2sbom:vector_table_detail", "value": d})
     if file_magic:
         fw_props.append({"name": "fw2sbom:file_magic", "value": file_magic})
+    if source and source.get("converted"):
+        # Every offset in the evidence below refers to the image we rebuilt,
+        # not to the delivered file. Saying so is the difference between a
+        # reproducible finding and a confusing one.
+        fw_props.append({"name": "fw2sbom:input_format",
+                         "value": source["format"]})
+        fw_props.append({"name": "fw2sbom:reassembled_bytes",
+                         "value": str(len(source["data"]))})
+        if source.get("base_address") is not None:
+            fw_props.append({"name": "fw2sbom:image_base_address",
+                             "value": f"0x{source['base_address']:x}"})
+        if source.get("entry_point") is not None:
+            fw_props.append({"name": "fw2sbom:entry_point",
+                             "value": f"0x{source['entry_point']:x}"})
+        if source.get("family_id"):
+            fw_props.append({"name": "fw2sbom:uf2_family_id",
+                             "value": source["family_id"]})
+        if source.get("gaps_filled"):
+            fw_props.append({
+                "name": "fw2sbom:padding_inserted_bytes",
+                "value": str(source["gaps_filled"])})
+        for warning in source.get("warnings", [])[:6]:
+            fw_props.append({"name": "fw2sbom:input_note", "value": warning})
+        fw_props.append({
+            "name": "fw2sbom:offset_basis",
+            "value": "offsets in this document refer to the reassembled "
+                     "image, not to byte positions in the delivered file"})
     for i, segment in enumerate(segments or [], 1):
         detail = (f"{segment['kind']} at 0x{segment['offset']:x}, "
                   f"{segment['length']} bytes: {segment['label']}")
@@ -2213,15 +2250,26 @@ def main(argv=None):
 
     vendor_documents = load_vendor_sboms(args.vendor_sbom, args.verbose)
 
-    data = read_binary(args.input)
-    log(f"read {len(data)} bytes from {args.input}", args.verbose)
+    delivered = read_binary(args.input)
+    log(f"read {len(delivered)} bytes from {args.input}", args.verbose)
+
+    # A toolchain hands out .elf, a flashing tool hands out .hex or .s19, and a
+    # raw .bin is the form you have to know to ask for. Reassemble whichever
+    # arrived rather than telling the customer to find objcopy.
+    try:
+        source = image_input.detect_and_load(
+            delivered, args.verbose, lambda m: log(m, True))
+    except image_input.InputFormatError as e:
+        die(f"{args.input}: {e}")
+    data = source["data"]
 
     file_magic = run_file_command(args.input, args.verbose)
     if file_magic:
         log(f"file(1): {file_magic}", args.verbose)
-        if any(k in file_magic for k in ("ELF", "PE32", "Mach-O")):
-            log("WARNING: input looks like a linked executable, not a raw .bin; "
-                "results may be off (strip to raw binary with objcopy -O binary)", True)
+        if (not source["converted"]
+                and any(k in file_magic for k in ("PE32", "Mach-O"))):
+            log("WARNING: input looks like a host executable, not firmware; "
+                "results may be meaningless", True)
 
     container = None if args.no_deframe else detect_packet_container(data, args.verbose)
     payload = deframe(data, container) if container else data
@@ -2248,7 +2296,7 @@ def main(argv=None):
     standards = detect_embedded_standards(payload, args.verbose)
 
     segments, rootfs, seg_warnings = analyze_segments(
-        payload, args.min_str_len, args.verbose)
+        payload, args.min_str_len, args.verbose, arm_info["label"])
     for warning in seg_warnings:
         log(f"container warning: {warning}", True)
 
@@ -2283,12 +2331,12 @@ def main(argv=None):
                                     packages, args.verbose)
     opacity = summarise_opacity(segments, opacity)
     opacity = reconcile_opacity(opacity, hits + packages, standards, args.verbose)
-    bom = build_sbom(args.input, data, file_magic, arm_info, hits,
+    bom = build_sbom(args.input, delivered, file_magic, arm_info, hits,
                      args.min_str_len, len(strings),
                      container=container, opacity=opacity, payload=payload,
                      standards=standards, firmware_version=args.firmware_version,
                      segments=segments, rootfs=rootfs, packages=packages,
-                     vendor=vendor)
+                     vendor=vendor, source=source)
 
     stem = os.path.splitext(os.path.basename(args.input))[0]
     want_cdx = args.format in ("cyclonedx", "both")
@@ -2336,6 +2384,13 @@ def main(argv=None):
               f"+ {container['payload_width']}B payload "
               f"({container['payload_bytes']} payload bytes)", file=sys.stderr)
         print(f"[fw2sbom]   layout {container['layout']}", file=sys.stderr)
+
+    if source["converted"]:
+        print(f"[fw2sbom] input: {source['format']} reassembled into "
+              f"{len(data)} bytes"
+              + (f" from base 0x{source['base_address']:x}"
+                 if source["base_address"] is not None else ""),
+              file=sys.stderr)
 
     rootfs_arch = (rootfs or {}).get("binaries", {}).get("architecture")
     if arm_info["label"]:
