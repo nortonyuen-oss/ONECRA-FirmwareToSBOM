@@ -27,6 +27,7 @@ stdlib implementation; an image using one is reported as unreadable with the
 compressor named, rather than silently producing an empty file list.
 """
 
+import collections
 import lzma
 import struct
 import zlib
@@ -56,6 +57,10 @@ MAX_ENTRIES = 200_000           # a big rootfs has a few thousand
 MAX_FILE_BYTES = 64 * 1024 * 1024
 MAX_TOTAL_READ = 512 * 1024 * 1024
 
+# Decompressed fragment blocks held for reuse. Each is at most one block, so
+# the default bounds this at block_size x 16 - a few MB at the usual 256 KiB.
+FRAGMENT_CACHE_BLOCKS = 16
+
 
 class SquashFSError(Exception):
     """The image cannot be opened at all (bad magic, version, compressor)."""
@@ -84,6 +89,10 @@ class SquashFS:
         self.offset = offset
         self.warnings = []
         self._meta_cache = {}
+        # Small files are packed together into shared fragment blocks, so
+        # reading a rootfs file by file decompresses the same block over and
+        # over - on a real router image that was most of the analysis time.
+        self._fragment_cache = collections.OrderedDict()
         self._bytes_read = 0
 
         if data[offset:offset + 4] != MAGIC:
@@ -276,9 +285,15 @@ class SquashFS:
             at = self.offset + start
             if at + size > len(self.data):
                 raise SquashFSError("fragment past end of image")
-            blob = self.data[at:at + size]
-            fragment = (blob if encoded & UNCOMPRESSED_BIT
-                        else _decompress(self.compressor, blob, self.block_size))
+            fragment = self._fragment_cache.get(start)
+            if fragment is None:
+                blob = self.data[at:at + size]
+                fragment = (blob if encoded & UNCOMPRESSED_BIT
+                            else _decompress(self.compressor, blob,
+                                             self.block_size))
+                self._fragment_cache[start] = fragment
+                while len(self._fragment_cache) > FRAGMENT_CACHE_BLOCKS:
+                    self._fragment_cache.popitem(last=False)
             chunks.append(fragment[node["offset"]:])
 
         return b"".join(chunks)[:node["size"]]

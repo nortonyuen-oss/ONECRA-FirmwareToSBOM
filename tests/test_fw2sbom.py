@@ -34,6 +34,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
 import container                                        # noqa: E402
+import elf                                              # noqa: E402
 import evidence_report                                  # noqa: E402
 import fw2sbom as core                                   # noqa: E402
 import make_fixtures                                     # noqa: E402
@@ -984,6 +985,78 @@ class SpdxSchemaValidationTest(unittest.TestCase):
 
 # --------------------------------------------------------------------------- #
 
+
+# --------------------------------------------------------------------------- #
+
+class ElfReaderTest(unittest.TestCase):
+    """The ELF reader parses untrusted binaries out of customer firmware."""
+
+    @staticmethod
+    def minimal_elf(machine=8, elf_class=1, endian=1, elf_type=2):
+        """An ELF header with no program or section headers.
+
+        52 bytes for 32-bit and 64 for 64-bit, and the two put e_ehsize
+        onwards at different offsets - which is the whole reason the reader
+        branches on EI_CLASS, and why a 64-bit header squeezed into 52 bytes
+        must be rejected rather than half-read.
+        """
+        is64 = elf_class == 2
+        head = bytearray(64 if is64 else 52)
+        head[0:4] = b"ELF"
+        head[4], head[5], head[6] = elf_class, endian, 1
+        fmt = "<" if endian == 1 else ">"
+        struct.pack_into(fmt + "HH", head, 16, elf_type, machine)
+        struct.pack_into(fmt + "H", head, 54 if is64 else 40,
+                         64 if is64 else 52)          # e_ehsize
+        return bytes(head)
+
+    def test_header_fields(self):
+        info = elf.parse(self.minimal_elf())
+        self.assertEqual(info["machine"], "MIPS")
+        self.assertEqual(info["class"], 32)
+        self.assertEqual(info["endian"], "little")
+        self.assertEqual(info["type"], "EXEC")
+
+    def test_big_endian_and_64_bit_are_read(self):
+        info = elf.parse(self.minimal_elf(machine=183, elf_class=2, endian=2,
+                                          elf_type=3))
+        self.assertEqual(info["machine"], "AArch64")
+        self.assertEqual(info["class"], 64)
+        self.assertEqual(info["endian"], "big")
+        self.assertEqual(info["type"], "DYN")
+
+    def test_non_elf_is_rejected(self):
+        for blob in (b"", b"MZ\x90\x00", b"\x7fELX" + b"\x00" * 60,
+                     b"\x7fELF" + b"\x09" + b"\x00" * 60):
+            with self.subTest(blob=blob[:8]):
+                self.assertIsNone(elf.parse(blob))
+
+    def test_truncated_headers_do_not_raise(self):
+        """Firmware is untrusted; a short read must not be a traceback."""
+        full = self.minimal_elf()
+        for cut in range(4, len(full)):
+            with self.subTest(length=cut):
+                elf.parse(full[:cut])          # must simply not raise
+
+    def test_absurd_header_counts_are_ignored(self):
+        blob = bytearray(self.minimal_elf())
+        struct.pack_into("<HH", blob, 44, 0xFFFF, 40)   # e_phnum, e_shentsize
+        struct.pack_into("<H", blob, 48, 0xFFFF)        # e_shnum
+        info = elf.parse(bytes(blob))
+        self.assertIsNotNone(info)
+        self.assertEqual(info["needed"], [])
+
+    def test_soname_key_strips_the_version(self):
+        self.assertEqual(elf.soname_key("libcrypto.so.1.1"), "libcrypto.so")
+        self.assertEqual(elf.soname_key("/usr/lib/libz.so.1"), "libz.so")
+        self.assertEqual(elf.soname_key("busybox"), "busybox")
+        self.assertIsNone(elf.soname_key(None))
+
+    def test_machine_names_cover_the_targets_we_claim(self):
+        for machine_id in (8, 40, 183, 62, 243):
+            self.assertNotIn("machine-", elf.EM_NAMES[machine_id])
+
+
 class RealFirmwareTest(unittest.TestCase):
     """Run the whole pipeline over a real vendor image.
 
@@ -1087,6 +1160,61 @@ class RealFirmwareTest(unittest.TestCase):
                              if c["type"] == "operating-system"}
         self.assertEqual(operating_systems.get("OpenWrt"), "22.03.4")
         self.assertEqual(operating_systems.get("linux-kernel"), "5.10.176")
+
+    def test_the_architecture_comes_from_the_elf_headers(self):
+        """A Linux image has no vector table; this is the only source."""
+        binaries = self.rootfs["binaries"]
+        self.assertEqual(binaries["architecture"], "MIPS (32-bit little-endian)")
+        self.assertGreater(binaries["binary_count"], 400)
+
+    def test_library_dependencies_are_resolved(self):
+        binaries = self.rootfs["binaries"]
+        self.assertGreater(binaries["file_dependency_count"], 500)
+        self.assertGreater(len(binaries["package_dependencies"]), 100)
+
+    def test_kernel_modules_declare_their_licence(self):
+        modules = self.rootfs["binaries"]["modules"]
+        self.assertGreater(len(modules), 150)
+        licensed = [m for m in modules if m["license"]]
+        self.assertGreater(len(licensed), 150)
+
+    def test_packages_carry_their_declared_licence(self):
+        licensed = [p for p in self.packages if p.get("license")]
+        self.assertGreater(len(licensed), 200)
+        by_name = {p["name"]: p.get("license") for p in self.packages}
+        self.assertEqual(by_name.get("busybox"), "GPL-2.0")
+        self.assertEqual(by_name.get("dropbear"), "MIT")
+
+    def test_declared_cpes_are_read_not_invented(self):
+        """OpenWrt tags the security-relevant packages with a CPE itself.
+
+        Reading that is not the CPE generation that was cut from the plan: the
+        vendor stated it, we pass it through, and the property says so.
+        """
+        with_cpe = {p["name"]: p["cpe"] for p in self.packages if p.get("cpe")}
+        self.assertGreater(len(with_cpe), 40)
+        self.assertEqual(with_cpe.get("busybox"),
+                         "cpe:2.3:a:busybox:busybox:1.35.0:*:*:*:*:*:*:*")
+        self.assertEqual(with_cpe.get("libopenssl1.1"),
+                         "cpe:2.3:a:openssl:openssl:1.1.1t:*:*:*:*:*:*:*")
+
+    def test_the_sbom_carries_a_real_dependency_graph(self):
+        bom = core.build_sbom(
+            self.IMAGE, self.data, None,
+            {"label": None, "details": [], "looks_like_cortex_m": False},
+            self.hits, 6, 0, segments=self.segments, rootfs=self.rootfs,
+            packages=self.packages)
+        edges = sum(len(d["dependsOn"]) for d in bom["dependencies"][1:])
+        self.assertGreater(edges, 500, "package-to-package edges")
+        refs = {c["bom-ref"] for c in bom["components"]}
+        refs.add(bom["metadata"]["component"]["bom-ref"])
+        for entry in bom["dependencies"]:
+            self.assertIn(entry["ref"], refs)
+            for target in entry["dependsOn"]:
+                self.assertIn(target, refs)
+        busybox = next(c for c in bom["components"] if c["name"] == "busybox")
+        self.assertEqual(busybox["licenses"][0]["license"]["name"], "GPL-2.0")
+        self.assertTrue(busybox["cpe"].startswith("cpe:2.3:a:busybox:"))
 
     def test_a_real_image_is_analysed_in_reasonable_time(self):
         """A customer waits for this in a browser."""

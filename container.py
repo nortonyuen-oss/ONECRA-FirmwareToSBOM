@@ -33,11 +33,13 @@ algorithm named rather than skipped in silence. "We could not open this" and
 """
 
 import bz2
+import collections
 import lzma
 import re
 import struct
 import zlib
 
+import elf
 import squashfs
 
 # A decompressed region is capped so a crafted image cannot exhaust memory.
@@ -286,6 +288,49 @@ def _parse_apk_installed(text):
     return packages
 
 
+# The status file is a summary; the per-package control records carry more.
+# On OpenWrt they add the declared licence, the upstream source package, the
+# declared dependencies, and - for the packages that matter to a CVE feed -
+# a CPE the build system assigned itself. Reading a declared identifier is not
+# the same as inventing one: this is the vendor stating what the package is.
+CONTROL_DIRS = {
+    "opkg": "/usr/lib/opkg/info/",
+    "dpkg": "/var/lib/dpkg/info/",
+}
+
+
+def read_package_controls(image, files, manager):
+    """{package: {License, CPE-ID, Depends, Source, ...}} from control files."""
+    directory = CONTROL_DIRS.get(manager)
+    controls = {}
+    if not directory:
+        return controls
+    for path, _node in files.items():
+        if not (path.startswith(directory) and path.endswith(".control")):
+            continue
+        text = _read_text(image, files, path, limit=256 * 1024)
+        if not text:
+            continue
+        blocks = _parse_control_blocks(text)
+        if not blocks:
+            continue
+        fields = blocks[0]
+        name = fields.get("Package") or path[len(directory):-len(".control")]
+        controls[name] = fields
+    return controls
+
+
+def _split_depends(value):
+    """Dependency names from a Depends field, dropping version constraints."""
+    names = []
+    for item in (value or "").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        names.append(item.split("(")[0].split()[0].strip())
+    return [n for n in names if n]
+
+
 def read_package_database(image, files):
     """Installed packages with exact versions, from the on-image database.
 
@@ -319,9 +364,44 @@ def read_package_database(image, files):
                 "manager": manager,
                 "source_path": path,
             })
-        if packages:
-            return {"manager": manager, "path": path, "packages": packages}
+        if not packages:
+            continue
+        controls = read_package_controls(image, files, manager)
+        for package in packages:
+            fields = controls.get(package["name"])
+            if not fields:
+                continue
+            package["license"] = fields.get("License") or None
+            package["cpe"] = _normalise_cpe(fields.get("CPE-ID"),
+                                            package["version"])
+            package["source"] = fields.get("SourceName") or fields.get("Source")
+            package["depends"] = _split_depends(fields.get("Depends"))
+            if fields.get("Description") and not package["description"]:
+                package["description"] = fields["Description"]
+        return {"manager": manager, "path": path, "packages": packages,
+                "controls": len(controls)}
     return None
+
+
+def _normalise_cpe(declared, version):
+    """Turn a declared CPE 2.2 URI into a 2.3 name, keeping the version.
+
+    OpenWrt writes CPE 2.2 ("cpe:/a:openssl:openssl"). Consumers generally
+    want 2.3. The vendor, product and part come from the declaration; only the
+    version is filled in from the installed package, and only when the
+    declaration does not already carry one.
+    """
+    if not declared or not declared.startswith("cpe:/"):
+        return None
+    parts = declared[len("cpe:/"):].split(":")
+    part = parts[0] if parts else "a"
+    vendor = parts[1] if len(parts) > 1 and parts[1] else "*"
+    product = parts[2] if len(parts) > 2 and parts[2] else "*"
+    declared_version = parts[3] if len(parts) > 3 and parts[3] else None
+    # The package version carries a downstream revision ("1.1.1t-2"); the
+    # upstream part before the last dash is what a CVE feed matches on.
+    use = declared_version or (version or "").rsplit("-", 1)[0] or "*"
+    return f"cpe:2.3:{part}:{vendor}:{product}:{use}:*:*:*:*:*:*:*"
 
 
 def read_os_release(image, files):
@@ -348,6 +428,158 @@ def read_os_release(image, files):
     return None
 
 
+# --------------------------------------------------------------------------- #
+# Binaries inside the root filesystem
+# --------------------------------------------------------------------------- #
+
+# A rootfs has a few hundred ELFs; the caps stop a crafted image turning this
+# into an unbounded amount of work.
+MAX_BINARIES = 4000
+MAX_SCANNED_BYTES = 192 * 1024 * 1024
+
+
+def read_package_file_lists(image, files, manager):
+    """{file path: package name}, from the package manager's own file lists.
+
+    opkg and dpkg both record which files each package installed. That mapping
+    is what lifts a DT_NEEDED edge between two files into a dependency between
+    two packages - which is the form an SBOM actually wants.
+    """
+    owners = {}
+    if manager == "opkg":
+        prefix, suffix = "/usr/lib/opkg/info/", ".list"
+    elif manager == "dpkg":
+        prefix, suffix = "/var/lib/dpkg/info/", ".list"
+    else:
+        return owners
+    for path, node in files.items():
+        if not (path.startswith(prefix) and path.endswith(suffix)):
+            continue
+        package = path[len(prefix):-len(suffix)].split(":")[0]
+        text = _read_text(image, files, path, limit=2 * 1024 * 1024)
+        if not text:
+            continue
+        for line in text.splitlines():
+            line = line.strip()
+            if line.startswith("/"):
+                owners.setdefault(line, package)
+    return owners
+
+
+def analyze_binaries(image, files, package_info=None, verbose=False, log=None):
+    """Parse every ELF in the filesystem and relate them to each other.
+
+    Returns the instruction set (a Linux image has no vector table to
+    recognise, so this is the only place it is stated), the toolchains that
+    built the binaries, kernel-module metadata, and the dependency edges.
+    """
+    say = log or (lambda *_a, **_k: None)
+    machines = collections.Counter()
+    toolchains = collections.Counter()
+    providers = {}            # soname or filename -> path that provides it
+    binaries = []
+    modules = []
+    warnings = []
+    scanned = 0
+
+    for path, node in sorted(files.items()):
+        if len(binaries) >= MAX_BINARIES or scanned > MAX_SCANNED_BYTES:
+            warnings.append("stopped reading binaries at the configured cap")
+            break
+        size = node.get("size", 0)
+        if size < 64:
+            continue
+        try:
+            blob = image.read_file(node)
+        except squashfs.SquashFSError as e:
+            warnings.append(f"{path}: {e}")
+            continue
+        scanned += len(blob)
+        if not elf.looks_like_elf(blob[:20]):
+            continue
+        info = elf.parse(blob)
+        if not info:
+            continue
+
+        machines[(info["machine"], info["class"], info["endian"])] += 1
+        if info["comment"]:
+            toolchains[info["comment"]] += 1
+
+        name = path.rsplit("/", 1)[-1]
+        providers.setdefault(name, path)
+        if info["soname"]:
+            providers.setdefault(info["soname"], path)
+        key = elf.soname_key(info["soname"] or name)
+        if key:
+            providers.setdefault(key, path)
+
+        binaries.append({"path": path, "needed": info["needed"],
+                         "soname": info["soname"], "type": info["type"]})
+        if info["modinfo"]:
+            modules.append({
+                "path": path,
+                "name": info["modinfo"].get("name") or name,
+                "version": info["modinfo"].get("version"),
+                "license": info["modinfo"].get("license"),
+                "description": info["modinfo"].get("description"),
+            })
+
+    architecture = None
+    if machines:
+        (machine, width, endian), count = machines.most_common(1)[0]
+        architecture = f"{machine} ({width}-bit {endian}-endian)"
+        say(f"rootfs: {len(binaries)} ELF binaries, {architecture} "
+            f"({count}/{len(binaries)})")
+
+    # --- DT_NEEDED, lifted from files to packages where we can ------------
+    owners = {}
+    if package_info:
+        owners = read_package_file_lists(image, files, package_info["manager"])
+        if owners:
+            say(f"rootfs: {len(owners)} files attributed to packages")
+
+    file_edges = 0
+    package_edges = collections.defaultdict(set)
+    unresolved = collections.Counter()
+    for binary in binaries:
+        source_package = owners.get(binary["path"])
+        for needed in binary["needed"]:
+            target = (providers.get(needed)
+                      or providers.get(elf.soname_key(needed)))
+            if target is None:
+                unresolved[needed] += 1
+                continue
+            file_edges += 1
+            target_package = owners.get(target)
+            if (source_package and target_package
+                    and source_package != target_package):
+                package_edges[source_package].add(target_package)
+
+    if file_edges:
+        say(f"rootfs: {file_edges} library dependencies resolved"
+            + (f", {sum(len(v) for v in package_edges.values())} package edges"
+               if package_edges else ""))
+    if unresolved:
+        # Usually the C library's own internal names, or a library the vendor
+        # left out of the image. Worth recording, not worth a warning each.
+        warnings.append(
+            f"{len(unresolved)} library name(s) referenced but not present in "
+            f"the image, e.g. {', '.join(list(unresolved)[:4])}")
+
+    return {
+        "architecture": architecture,
+        "machines": dict(machines),
+        "binary_count": len(binaries),
+        "toolchains": dict(toolchains),
+        "modules": modules,
+        "file_owners": owners,
+        "file_dependency_count": file_edges,
+        "package_dependencies": {k: sorted(v) for k, v in package_edges.items()},
+        "unresolved": dict(unresolved),
+        "warnings": warnings,
+    }
+
+
 def inspect_filesystem(segment, verbose=False, log=None):
     """Read what an on-image filesystem can tell us about its contents."""
     say = log or (lambda *_a, **_k: None)
@@ -371,5 +603,9 @@ def inspect_filesystem(segment, verbose=False, log=None):
     else:
         say("rootfs: no package database found")
 
+    binaries = analyze_binaries(image, files, packages, verbose, say)
+    segment["warnings"].extend(binaries["warnings"])
+
     return {"image": image, "files": files, "packages": packages,
-            "os_release": os_release, "file_count": len(files)}
+            "os_release": os_release, "file_count": len(files),
+            "binaries": binaries}

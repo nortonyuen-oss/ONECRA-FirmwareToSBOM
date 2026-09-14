@@ -209,6 +209,17 @@ v1.7.0 起會走訪容器:
 | SquashFS rootfs | 檔案清單 | — |
 | `/etc/openwrt_release`、`/etc/os-release` | 發行版名稱與版本 | 0.97 |
 | **套件資料庫** | **每個已安裝套件的精確版本** | 0.97 |
+| 套件 `.control` 記錄 | 宣告的授權、上游來源、宣告的相依、廠商自訂的 CPE | 0.97 |
+| **rootfs 內的 ELF** | 指令集、`DT_NEEDED` 實際連結關係、kernel module 的 `.modinfo` | — |
+
+Linux 映像沒有向量表可以辨認,**指令集是從 rootfs 裡的 ELF header 讀出來的**。
+依賴關係有兩個獨立來源:套件管理員宣告的 `Depends`(意圖),與 linker 寫進每個
+binary 的 `DT_NEEDED`(實際連結的證據);兩者都沒有的套件就沒有出邊,不會替它
+編一條。
+
+`CPE-ID` 是 OpenWrt 自己在 `.control` 裡標註的,涵蓋與 CVE 最相關的那批套件。
+fw2sbom **讀取**這個宣告並轉成 CPE 2.3,標記 `cpe_source =
+declared-in-package-database` —— 這與「猜一個 CPE 出來」是兩回事。
 
 最後一項是 Linux 韌體 SBOM 品質的主要來源。`/usr/lib/opkg/status`(以及 dpkg、
 apk 的對應檔案)不是啟發式猜測,而是套件管理器自己的安裝紀錄。一份 14 MB 的

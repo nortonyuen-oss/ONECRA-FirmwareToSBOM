@@ -47,7 +47,7 @@ import evidence_report
 import spdx_report
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.7.1"
+TOOL_VERSION = "1.8.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1215,6 +1215,10 @@ def packages_to_components(rootfs):
             "manager": database["manager"],
             "source_path": database["path"],
             "architecture": package["architecture"],
+            "license": package.get("license"),
+            "cpe": package.get("cpe"),
+            "source": package.get("source"),
+            "depends": package.get("depends") or [],
             "confidence": 0.97 if package["version"] else 0.9,
         })
     return components
@@ -1262,6 +1266,25 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
     if rootfs:
         fw_props.append({"name": "fw2sbom:rootfs_files",
                          "value": str(rootfs["file_count"])})
+        binaries = rootfs.get("binaries") or {}
+        if binaries.get("architecture"):
+            # A Linux image has no vector table to recognise; the ELF headers
+            # inside it are the only place the instruction set is stated.
+            fw_props.append({"name": "fw2sbom:rootfs_architecture",
+                             "value": binaries["architecture"]})
+        if binaries.get("binary_count"):
+            fw_props.append({"name": "fw2sbom:rootfs_elf_binaries",
+                             "value": str(binaries["binary_count"])})
+        if binaries.get("file_dependency_count"):
+            fw_props.append({
+                "name": "fw2sbom:linked_library_dependencies",
+                "value": str(binaries["file_dependency_count"])})
+        if binaries.get("modules"):
+            fw_props.append({"name": "fw2sbom:kernel_modules",
+                             "value": str(len(binaries["modules"]))})
+        for toolchain in sorted(binaries.get("toolchains") or {})[:3]:
+            fw_props.append({"name": "fw2sbom:rootfs_toolchain",
+                             "value": toolchain})
         if rootfs.get("packages"):
             fw_props.append({"name": "fw2sbom:package_database",
                              "value": f"{rootfs['packages']['path']} "
@@ -1461,6 +1484,21 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         if package["architecture"]:
             comp["properties"].append({"name": "fw2sbom:target_architecture",
                                        "value": package["architecture"]})
+        if package.get("license"):
+            # The package's own declaration, not a guess from file contents.
+            comp["licenses"] = [{"license": {"name": package["license"]}}]
+            comp["properties"].append({"name": "fw2sbom:license_source",
+                                       "value": "package-database"})
+        if package.get("cpe"):
+            # Declared by the build system that produced the image. Reading a
+            # stated identifier is not the same as inferring one, so it is
+            # recorded as-is and labelled with where it came from.
+            comp["cpe"] = package["cpe"]
+            comp["properties"].append({"name": "fw2sbom:cpe_source",
+                                       "value": "declared-in-package-database"})
+        if package.get("source"):
+            comp["properties"].append({"name": "fw2sbom:source_package",
+                                       "value": package["source"]})
         if package["version"]:
             comp["version"] = package["version"]
             comp["evidence"]["identity"].append({
@@ -1603,11 +1641,46 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             ],
         },
         "components": components,
-        "dependencies": [{"ref": f"firmware:{hashes['SHA-256'][:24]}",
-                          "dependsOn": dep_refs}]
-                        + [{"ref": r, "dependsOn": []} for r in dep_refs],
+        "dependencies": _dependency_graph(
+            f"firmware:{hashes['SHA-256'][:24]}", dep_refs,
+            packages or [], rootfs),
     }
     return bom
+
+
+def _dependency_graph(root_ref, dep_refs, packages, rootfs):
+    """CycloneDX dependencies, with real edges where we can establish them.
+
+    Everything hangs off the firmware, as before. On top of that, a Linux
+    image tells us two independent things about what depends on what: the
+    package manager's declared Depends, and the DT_NEEDED entries the linker
+    actually recorded in each binary. Declared dependencies are authoritative
+    about intent; DT_NEEDED is evidence of what was really linked. Both are
+    used, and a package with neither simply has no outgoing edges rather than
+    an invented one.
+    """
+    by_name = {}
+    for i, package in enumerate(packages, 1):
+        by_name[package["name"]] = f"package-{i}-{package['name']}"
+
+    edges = {ref: set() for ref in dep_refs}
+    if packages:
+        resolved = (rootfs or {}).get("binaries", {}).get(
+            "package_dependencies", {})
+        for package in packages:
+            ref = by_name[package["name"]]
+            for target in package.get("depends") or []:
+                target_ref = by_name.get(target)
+                if target_ref and target_ref != ref:
+                    edges[ref].add(target_ref)
+            for target in resolved.get(package["name"], []):
+                target_ref = by_name.get(target)
+                if target_ref and target_ref != ref:
+                    edges[ref].add(target_ref)
+
+    return ([{"ref": root_ref, "dependsOn": dep_refs}]
+            + [{"ref": ref, "dependsOn": sorted(edges.get(ref, ()))}
+               for ref in dep_refs])
 
 
 def build_evidence_context(filename, data, payload, arm_info, container,
@@ -1840,8 +1913,12 @@ def main(argv=None):
               f"({container['payload_bytes']} payload bytes)", file=sys.stderr)
         print(f"[fw2sbom]   layout {container['layout']}", file=sys.stderr)
 
+    rootfs_arch = (rootfs or {}).get("binaries", {}).get("architecture")
     if arm_info["label"]:
         print(f"[fw2sbom] architecture: {arm_info['label']}", file=sys.stderr)
+    elif rootfs_arch:
+        print(f"[fw2sbom] architecture: {rootfs_arch} (from ELF headers in the "
+              "root filesystem)", file=sys.stderr)
 
     total = len(hits) + len(standards) + len(packages) + (1 if rootfs and
                                                           rootfs.get("os_release") else 0)
@@ -1874,9 +1951,18 @@ def main(argv=None):
     if packages:
         database = rootfs["packages"]
         versioned = sum(1 for p in packages if p["version"])
+        licensed = sum(1 for p in packages if p.get("license"))
+        declared_cpe = sum(1 for p in packages if p.get("cpe"))
         print(f"[fw2sbom] {len(packages)} package(s) from {database['path']} "
-              f"({database['manager']}), {versioned} with exact versions",
-              file=sys.stderr)
+              f"({database['manager']}), {versioned} with exact versions, "
+              f"{licensed} with a declared licence, {declared_cpe} with a "
+              f"declared CPE", file=sys.stderr)
+        binaries = (rootfs or {}).get("binaries") or {}
+        if binaries.get("binary_count"):
+            print(f"[fw2sbom] {binaries['binary_count']} ELF binaries, "
+                  f"{binaries['file_dependency_count']} linked library "
+                  f"dependencies, {len(binaries['modules'])} kernel modules",
+                  file=sys.stderr)
     for h in hits:
         v = h["version"] or "?"
         print(f"[fw2sbom]   {h['sig']['name']:<22} version={v:<12} "

@@ -31,6 +31,86 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.8.0
+
+| | |
+|---|---|
+| Tag | `v1.8.0` |
+| Build 日期 | 2026-09-14 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 2(第二階段)**:讀 rootfs 入面嘅二進位檔。
+
+### 對真實韌體嘅效果
+
+同一台 GL.iNet router,同 v1.7.0 比:
+
+| | v1.7.0 | v1.8.0 |
+|---|---|---|
+| 元件數 | 366 | 366 |
+| 指令集 | **未識別** | **MIPS (32-bit little-endian)** |
+| 帶授權嘅元件 | 0 | **262** |
+| 帶 CPE 嘅元件 | 0 | **54**(廠商自己聲明) |
+| 套件間依賴邊 | 0 | **1268** |
+| 分析時間 | 10.2 秒 | 11.4 秒 |
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,221,328 bytes |
+| SHA-256 | `5efad0a0e08992844c79e8f75b19b30b290f77e574f96baabac3ae4e6d4b6eed` |
+| 內容 | 53 個檔案(多咗 `elf.py`) |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `516f6262cf7772ab596a79d40549cff12cbce580cf774afb1cd4b18a9ca87c80` |
+| `container.py` | `56972c5d6bb363b2d2c024e7d941f7ef80121ce3b5987353711da474a534ba82` |
+| `squashfs.py` | `1e36e5b2504e32b123de66ff4b35d9229f6426fba51dcfe8a172b17450002486` |
+| `elf.py` | `1ea84f0f4845e279d5d0805a170b0dc970e43f1b8122e914d47981c895de8ccf` |
+| `service.py` | `08f4f58f72db7eb594918dad3d283959475a8f47ffd33bc4612791522c9abecc` |
+| `evidence_report.py` | `5d22a065d38f2213ac9f7a4c310f135ca75bfa914e413b1f0ba14e43a65bbdcc` |
+| `spdx_report.py` | `ba3f0a59854c530d849ca830d1492b551760d78f3de25bffa65575542b2c97aa` |
+| `LICENSE-fw2sbom.txt` | `9d47d54f77f5293428d31103bb43035246593eb24d28795160dc03ad8c9e0021` |
+| `THIRD-PARTY-NOTICES.txt` | `d91e52359c2f14dc8e2f982afc913b99367316dba03418143340a6138b22bf98` |
+
+簽章包、圖片與 `Start-fw2sbom.bat` 與 v1.7.1 相同。
+
+### 新增
+
+- **`elf.py`** —— 唯讀 ELF reader,純 stdlib。讀 header、dynamic table 同幾個
+  具名 section。真實 rootfs 467 個 ELF,0.68 秒,零警告。
+- **指令集識別** —— Linux 映像冇向量表可以認,之前一律回報「未識別」。
+  ELF header 直接講明。
+- **真正嘅依賴圖** —— 兩個獨立來源:套件管理員聲明嘅 `Depends`,同 linker 實際
+  寫入每個 binary 嘅 `DT_NEEDED`。前者係意圖,後者係實際連結嘅證據。用 opkg 嘅
+  檔案清單將檔案層級嘅邊升去套件層級 —— 1268 條。兩者都冇嘅套件就冇出邊,
+  唔會砌一條出嚟。
+- **聲明授權** —— 讀 `.control` 嘅 `License:`,362 個套件入面 262 個有。
+  CycloneDX `licenses` 欄位,標記 `license_source = package-database`。
+- **廠商聲明嘅 CPE** —— OpenWrt 自己喺 `.control` 寫 `CPE-ID:`,54 個套件有,
+  啱啱好係 CVE 相關嗰批(busybox、curl、dropbear、dnsmasq、iptables、openssl…)。
+  轉成 CPE 2.3 並標記 `cpe_source = declared-in-package-database`。
+  **呢個唔係之前取消咗嘅「產生 CPE」** —— 係讀取廠商已經聲明嘅識別碼。
+- **Kernel module metadata** —— `.modinfo` 嘅 version / license / description。
+  192 個 module,179 個聲明 GPL。
+
+### 效能
+
+SquashFS reader 加咗 fragment block 快取。細檔案打包喺共用嘅 fragment 入面,
+逐個讀就會重複解壓同一個 block —— 讀 467 個 ELF 由 **12.01 秒減到 0.68 秒**。
+
+### 測試
+
+101 個(由 88 增加)。新增 `ElfReaderTest`(含截斷、非 ELF、荒謬 header 計數等
+不可信輸入案例)同六項 corpus 測試。
+
+---
+
 ## v1.7.1
 
 | | |
