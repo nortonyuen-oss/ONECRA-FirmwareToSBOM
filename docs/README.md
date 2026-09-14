@@ -55,20 +55,51 @@ API 失敗、被限流、離線或倉庫轉私有時,計數器只是不出現 �
 
 ### 要讓計數器真的動起來
 
-把 zip 發佈成 GitHub Release 的 asset:
+用 [`scripts/publish-release.ps1`](../scripts/publish-release.ps1):
 
-1. 倉庫頁 → **Releases** → **Draft a new release**
-2. Tag 選已經存在的 `v1.8.0`,標題寫 `fw2sbom v1.8.0`
-3. 把 `dist-portable/fw2sbom-portable.zip` 拖進附件區,**改名成
-   `fw2sbom-portable-1.8.0.zip`** —— 檔名要與頁面上的一致,否則腳本不會改指向
-4. 說明欄可以直接貼 [RELEASE.md](../RELEASE.md) 對應那一節
-5. **Publish release**
+```powershell
+$env:GITHUB_TOKEN = "ghp_..."     # 需要 repo 權限;用完可以撤銷
+.\scripts\publish-release.ps1
+```
 
-發佈後重新整理下載頁,按鈕會自動改指向 release asset,計數器出現。
+腳本會從 `fw2sbom.py` 讀版本、把 `dist-portable/fw2sbom-portable.zip` 以
+`fw2sbom-portable-<版本>.zip` 上傳、release notes 直接取自 [RELEASE.md](../RELEASE.md)
+對應那一節,最後**把檔案下載回來重算雜湊確認一致**才算成功。
 
-> 一旦改用 Releases 發佈,`docs/downloads/` 裡那份副本就只是備援,可以考慮
-> 不再 commit —— 那會省掉每版約 11 MB 永久留在 git 歷史裡的成本(見上一節)。
-> 之後可以做的整理,不急。
+兩道保險:
+
+- RELEASE.md 那一節若**沒有提到**你正要上傳的那個雜湊,腳本會拒絕發佈 ——
+  避免 release notes 與實際檔案講的是兩回事。
+- Token 只從 `$env:GITHUB_TOKEN` 讀,用於兩次 API 呼叫,**不會被印出、記錄或寫檔**。
+
+要手動做也可以:倉庫頁 → Releases → Draft a new release → tag 選 `v1.8.0` →
+拖 zip 進附件區並**改名成 `fw2sbom-portable-1.8.0.zip`**(檔名必須與頁面上的
+一致,否則按鈕不會改指向)→ Publish。
+
+發佈後重新整理下載頁,按鈕自動改指向 release asset,計數器出現。
+
+### 發佈之後:停止把 zip 放進 git
+
+這一步**必須排在第一個 release 發佈之後**。現在就刪掉 `docs/downloads/` 裡的
+zip,線上那個下載按鈕會立刻 404 —— 它目前服務的就是那份檔案。
+
+確認 release 存在、按鈕已經改指向之後:
+
+```bash
+git rm -r --cached docs/downloads
+rm -rf docs/downloads
+printf '
+docs/downloads/
+' >> .gitignore
+```
+
+然後把 `index.html` 按鈕的 `href` 直接寫成 release 的 URL
+(`https://github.com/<owner>/<repo>/releases/latest/download/fw2sbom-portable-<版本>.zip`),
+JS 那段就只剩下顯示計數的工作。
+
+這會省掉每版約 11 MB 永久留在 git 歷史裡的成本(見上一節)。**已經 commit 過的
+那幾份不會因此消失** —— 它們留在歷史裡,要真的移除得改寫歷史,不值得為了體積做。
+這一步只是讓它停止繼續長。
 
 ## 版本說明 (changelog.html)
 
