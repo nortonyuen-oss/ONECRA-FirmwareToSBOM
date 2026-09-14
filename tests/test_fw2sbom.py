@@ -1081,6 +1081,20 @@ class RealFirmwareTest(unittest.TestCase):
         cls.hits = core.merge_segment_hits(cls.segments)
         cls.packages = core.packages_to_components(cls.rootfs)
 
+        # The same image analysed as if it shipped no package database - the
+        # common case outside OpenWrt. Walking 14 MB is slow enough that doing
+        # it per test method trebled the suite's runtime.
+        original = container.read_package_database
+        try:
+            container.read_package_database = lambda image, files: None
+            cls.bare_segments, cls.bare_rootfs, _w = core.analyze_segments(
+                cls.data, 6)
+            cls.bare_hits = core.scan_rootfs_files(cls.bare_rootfs, 6)
+        finally:
+            container.read_package_database = original
+        cls.bare_merged = core.merge_hit_lists(
+            core.merge_segment_hits(cls.bare_segments), cls.bare_hits)
+
     def test_the_container_is_walked_without_warnings(self):
         self.assertEqual(self.warnings, [])
         kinds = [s["kind"] for s in self.segments]
@@ -1215,6 +1229,83 @@ class RealFirmwareTest(unittest.TestCase):
         busybox = next(c for c in bom["components"] if c["name"] == "busybox")
         self.assertEqual(busybox["licenses"][0]["license"]["name"], "GPL-2.0")
         self.assertTrue(busybox["cpe"].startswith("cpe:2.3:a:busybox:"))
+
+    def test_a_package_database_suppresses_per_file_scanning(self):
+        """Where the package manager has spoken, do not add heuristics.
+
+        An exact version from the build system cannot be improved on by a
+        regex over the same file, and a second opinion that disagrees is
+        worse than no second opinion.
+        """
+        extra = core.scan_rootfs_files(self.rootfs, 6)
+        owners = self.rootfs["binaries"]["file_owners"]
+        for hit in extra:
+            for path in hit.get("files", []):
+                self.assertNotIn(path, owners,
+                                 "a file a package already accounts for was "
+                                 "scanned anyway")
+
+    def test_package_metadata_is_never_scanned(self):
+        """opkg's own .control files describe packages we already have.
+
+        Scanning them matches signature names inside Description fields and
+        invents version-less components sourced from text files.
+        """
+        scanned = [path for path, _blob
+                   in container.unclaimed_files(self.rootfs)]
+        for path in scanned:
+            self.assertFalse(path.startswith("/usr/lib/opkg/"),
+                             f"scanned package metadata: {path}")
+
+    def test_without_a_package_database_the_files_are_read_instead(self):
+        """The case that matters for devices outside OpenWrt.
+
+        Most vendor firmware ships no package database at all, and until the
+        root filesystem files were scanned those images produced nothing from
+        the rootfs whatsoever. Simulating that here is the only way to test it
+        without a second corpus image.
+        """
+        found = {h["sig"]["name"]: h for h in self.bare_hits}
+        self.assertGreater(len(found), 5)
+
+        # Versions cross-checked against the package database, which is
+        # ground truth for this image.
+        for name, version, path in [
+                ("busybox", "1.35.0", "/bin/busybox"),
+                ("libcurl", "7.88.1", "/usr/bin/curl"),
+                ("zlib", "1.2.11", "/usr/lib/libz.so.1.2.11")]:
+            with self.subTest(component=name):
+                self.assertIn(name, found)
+                self.assertEqual(found[name]["version"], version)
+                self.assertIn(path, found[name]["files"])
+
+    def test_evidence_names_the_file_the_match_came_from(self):
+        """Not whichever of the component's files happens to sort first.
+
+        Pointing an auditor at a config file for a string that came out of a
+        binary elsewhere is a defect in the document, not a cosmetic one.
+        """
+        bom = core.build_sbom(
+            "corpus.bin", self.data, None,
+            {"label": None, "details": [], "looks_like_cortex_m": False},
+            self.bare_merged, 6, 0, segments=self.bare_segments,
+            rootfs=self.bare_rootfs, packages=[])
+
+        openssl = next(c for c in bom["components"] if c["name"] == "openssl")
+        value = openssl["evidence"]["identity"][0]["methods"][0]["value"]
+        source = openssl["evidence"]["occurrences"][1]["location"]
+        self.assertIn(source, value,
+                      "the quoted match must name the file it came from")
+        self.assertTrue(source.startswith("/usr/bin/openssl"),
+                        f"expected the openssl binary, got {source}")
+
+    def test_evidence_distinguishes_executables_from_other_files(self):
+        """A banner compiled into a binary and a version in a config file are
+        not the same evidence, and the document should not imply they are."""
+        kinds = {h.get("file_kind") for h in self.bare_hits}
+        self.assertTrue(kinds)
+        for kind in kinds:
+            self.assertIn(kind, ("an executable", "a non-executable file"))
 
     def test_a_real_image_is_analysed_in_reasonable_time(self):
         """A customer waits for this in a browser."""

@@ -31,6 +31,86 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.9.0
+
+| | |
+|---|---|
+| Tag | `v1.9.0` |
+| Build 日期 | 2026-09-14 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 2(第三階段)**:掃描根檔案系統入面嘅檔案。
+
+### 之前嘅缺口
+
+Filesystem segment 嘅 `content` 係 `None`,所以 rootfs 入面 3274 個檔案
+**一個都冇被掃過簽章**。rootfs 嘅資訊全部嚟自套件資料庫同 ELF 中繼資料。
+有資料庫嗰陣冇乜所謂;冇資料庫嘅映像(大部分非 OpenWrt 廠商裝置)就完全
+攞唔到 rootfs 嘅元件。
+
+### 對真實韌體嘅效果
+
+同一台 GL.iNet router,**模擬冇套件資料庫**(即係 CCTV 嗰種情況):
+
+| | v1.8.0 | v1.9.0 |
+|---|---|---|
+| rootfs 元件 | **0** | **9** |
+| 總元件(signature) | 6 | 15 |
+
+以套件資料庫做 ground truth 對過,版本全部啱:BusyBox 1.35.0
+(`/bin/busybox`)、curl 7.88.1(`/usr/bin/curl`)、zlib 1.2.11
+(`/usr/lib/libz.so.1.2.11`)、U-Boot 2022.01(`/usr/sbin/fw_printenv`)。
+
+**有套件資料庫嗰陣結果完全不變**(366 個元件)—— 冇加噪音。
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,223,099 bytes |
+| SHA-256 | `92e1af9c566888d6affe155ae63ba5ef8635997d6932915f84cd20b5020c512e` |
+| 內容 | 53 個檔案 |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `f0f7a3b11414607cde356e358b62831bd76f5fe1e0e454e8625a21814c2e57a1` |
+| `container.py` | `64515067d21dd5e3804628eda8167c1bf31f5ea3c218281b488df0b1251ff7a6` |
+
+其餘檔案與 v1.8.0 相同。
+
+### 新增
+
+- **逐檔簽章比對** —— 掃描**冇被任何套件認領**嘅 rootfs 檔案。套件管理員嘅記錄
+  對佢涵蓋嘅檔案係權威嘅,喺上面再疊啟發式只會加噪音;佢冇涵蓋嗰部分先係新資訊。
+  冇套件資料庫嘅裝置,咁就係每一個檔案。
+- **證據指向實際檔案路徑** —— 稽核人員可以去睇 `/usr/sbin/dropbear`;
+  「offset 0x3f1a80」佢做唔到任何嘢。
+- **區分可執行檔同其他檔案** —— 編譯進二進位檔嘅 banner 同設定檔入面一行版本
+  註記,證據力唔同。`fw2sbom:evidence_file_kind` 記低。
+- **排除套件管理員自己嘅 bookkeeping 目錄** —— `.control` 入面有
+  `Description: The OpenSSL Project is ...`,掃佢會撞出冇版本、來源係文字檔嘅
+  假 `openssl` 命中。
+
+### 修正
+
+- **證據引用錯檔案。** 原本用該元件**字母序第一個**檔案,唔一定係產生嗰句引文
+  嘅檔案。實測中 OpenSSL 嘅版本引文嚟自 `/usr/bin/openssl`,文件卻指住一個 YAML
+  設定檔。喺稽核文件裡面指錯檔案唔係外觀問題。
+
+### 測試
+
+106 個(由 101 增加)。新增五項,包括「有資料庫時唔可以掃已認領檔案」、
+「永遠唔掃套件 metadata」、「模擬冇資料庫並以資料庫做 ground truth 核對版本」。
+
+corpus 測試嘅「冇套件資料庫」分析改為每個 class 算一次 —— 逐個測試方法重算
+令套件執行時間由 30 秒變 69 秒。
+
+---
+
 ## v1.8.0
 
 | | |

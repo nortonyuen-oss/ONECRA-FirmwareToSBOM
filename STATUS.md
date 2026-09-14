@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-14** · 版本 **v1.8.0**
+快照日期:**2026-09-14** · 版本 **v1.9.0**
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -24,7 +24,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 |---|---|---|
 | **IoT / MCU**<br>ARM Cortex-M、8051 | 可用 | 架構識別、封包容器去框、加密映像誠實標記、內嵌標準資料(EDID / MCCS)。版本能拿的都拿了,拿不到的說明為什麼 |
 | **Router / Gateway**<br>Linux, MIPS / ARM | 可用(OpenWrt 類) | uImage + 壓縮 kernel + SquashFS + ELF。真實 GL.iNet router:**366 個元件、362 個帶精確版本、262 個帶授權、1268 條依賴邊**。FIT / TRX / 廠商自訂檔頭尚未支援 |
-| **CCTV / NVR**<br>Linux, 專有 SoC | 部分 | 用標準 uImage + SquashFS 的機型現在就能分析。廠商自訂容器要逐個加;整段加密的機型上限仍是 opaque |
+| **CCTV / NVR**<br>Linux, 專有 SoC | 部分 | 用標準 uImage + SquashFS 的機型現在就能分析,**即使沒有套件資料庫也能從檔案本身取得元件**。廠商自訂容器要逐個加;整段加密的機型上限仍是 opaque |
 | **PC BIOS / UEFI**<br>x86, EDK2 | 未開始 | 獨立的問題域(Flash Descriptor / FV / FFS / GUID),與 Linux 那條路幾乎不共用程式碼 |
 
 ### 真實韌體實測
@@ -46,6 +46,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | `v1.6.0` | **Phase 1**:SPDX 2.3 輸出、`--firmware-version`、`version_note` 版本策略 |
 | `v1.7.1` | 專有授權與第三方歸屬,隨套件交付 |
 | `v1.8.0` | **Phase 2 第二階段**:ELF reader、指令集識別、依賴圖、聲明授權與廠商 CPE、kernel module metadata |
+| `v1.9.0` | **Phase 2 第三階段**:逐檔簽章比對(冇套件資料庫嘅映像先有 rootfs 元件)、證據指向檔案路徑 |
 | `v1.7.0` | **Phase 2 第一階段**:容器走訪、解壓、SquashFS 4.0 reader、opkg / dpkg / apk 套件資料庫、發行版識別、真實韌體 corpus 測試 |
 
 ### 工程現況
@@ -54,7 +55,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 |---|---|
 | 程式碼 | 約 7,300 行,7 個模組 + 6 個簽章包(36 個簽章) |
 | 依賴 | 無。Python 3.9+ 標準函式庫 |
-| 測試 | 101 個。9 個合成 fixture + 1 份真實廠商韌體 corpus |
+| 測試 | 106 個。9 個合成 fixture + 1 份真實廠商韌體 corpus |
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
@@ -86,8 +87,6 @@ Phase 2 剩餘(擴闊 router / CCTV 覆蓋):
 - 更多容器格式:FIT、TRX、TP-Link / D-Link / HiSilicon 等廠商自訂檔頭
 - 更多檔案系統:JFFS2、UBI / UBIFS、CramFS
 - 分區段 opacity 判定
-- 對**沒有套件資料庫**的映像,逐檔做簽章比對並歸屬到檔案(ELF reader 已就位,
-  但目前只在有資料庫時用來建依賴圖)
 - CCTV:廠商 SBOM 匯入與合併
 
 之後:Phase 3(HEX / SREC / UF2 / ELF 輸入、ESP32、RISC-V)、Phase 4(UEFI)。

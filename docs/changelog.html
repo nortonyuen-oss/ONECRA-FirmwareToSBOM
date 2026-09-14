@@ -154,9 +154,48 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.8.0</span>
+        <span class="ver">1.9.0</span>
         <span class="date">2026-09-14</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>讀取根檔案系統裡的每一個檔案</h2>
+        <p>
+          之前根檔案系統只有兩個資訊來源:套件資料庫,以及二進位檔的中繼資料。
+          <strong>裡面的檔案本身從來沒有被掃描過。</strong>對 OpenWrt 這種有完整
+          套件記錄的裝置影響不大;但大多數廠商韌體根本沒有套件資料庫,那些映像
+          的根檔案系統因此一個元件都產生不出來。
+        </p>
+        <ul>
+          <li><strong>逐檔簽章比對</strong> —— 掃描<strong>沒有被任何套件認領</strong>的檔案。套件管理員的記錄對它涵蓋的檔案是權威的,在上面再疊啟發式判斷只會增加雜訊;它沒涵蓋的部分才是新資訊。沒有套件資料庫的裝置,那就是每一個檔案。</li>
+          <li><strong>證據指向實際檔案</strong> —— 命中會記錄它來自哪一個檔案路徑。稽核人員可以去看 <code>/usr/sbin/dropbear</code>;「payload 的 offset 0x3f1a80」則什麼也做不了。</li>
+          <li><strong>區分可執行檔與其他檔案</strong> —— 編譯進二進位檔的版本 banner,與設定檔裡的一行版本註記,證據力不同。文件不應該讓它們看起來一樣。</li>
+        </ul>
+        <p>
+          以手上那台 router 模擬「沒有套件資料庫」來驗證:根檔案系統由 0 個元件變成
+          9 個帶檔案歸屬的元件,版本以套件資料庫作為對照全部正確 ——
+          BusyBox 1.35.0、curl 7.88.1、zlib 1.2.11、U-Boot 2022.01。
+        </p>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            證據原本引用的是該元件<strong>字母序第一個</strong>檔案,不一定是產生那句
+            引文的檔案。實測中 OpenSSL 的版本引文來自 <code>/usr/bin/openssl</code>,
+            文件卻指向一個 YAML 設定檔。在稽核文件裡指錯檔案不是外觀問題。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,223,099 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">92e1af9c566888d6affe155ae63ba5ef8635997d6932915f84cd20b5020c512e</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.8.0</span>
+        <span class="date">2026-09-14</span>
+        
       </div>
       <div>
         <h2>讀取韌體裡的二進位檔</h2>

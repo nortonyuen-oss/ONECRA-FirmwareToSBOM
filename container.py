@@ -580,6 +580,62 @@ def analyze_binaries(image, files, package_info=None, verbose=False, log=None):
     }
 
 
+# Directories holding the package manager's own bookkeeping. When a package
+# database exists these files describe packages we have already enumerated
+# authoritatively, and scanning them is actively harmful: a .control file's
+# "Description: The OpenSSL Project is ..." matches the openssl signature and
+# produces a version-less component sourced from a text file.
+PACKAGE_METADATA_DIRS = ("/usr/lib/opkg/", "/var/lib/opkg/", "/var/lib/dpkg/",
+                         "/lib/apk/db/")
+
+# Scanning caps. A rootfs has a few thousand files; these stop a crafted image
+# turning a scan into unbounded work.
+MAX_SCAN_FILES = 6000
+MAX_SCAN_BYTES = 192 * 1024 * 1024
+MAX_SCAN_FILE_BYTES = 32 * 1024 * 1024
+
+
+def unclaimed_files(rootfs, log=None):
+    """Yield (path, contents) for files no package in the image accounts for.
+
+    The package manager's record is authoritative for the files it covers, so
+    those are left alone - piling regex heuristics on top of an exact version
+    from the build system can only add noise. What it does not cover is a
+    different matter: vendor binaries dropped into the image, statically
+    linked blobs, and every file on a device that ships no package database at
+    all. That last case is the common one outside OpenWrt, and until now it
+    produced no components from the root filesystem whatsoever.
+    """
+    say = log or (lambda *_a, **_k: None)
+    image = rootfs.get("image")
+    files = rootfs.get("files") or {}
+    owners = (rootfs.get("binaries") or {}).get("file_owners") or {}
+    if image is None:
+        return
+
+    scanned = count = skipped = 0
+    for path, node in sorted(files.items()):
+        if count >= MAX_SCAN_FILES or scanned >= MAX_SCAN_BYTES:
+            say(f"rootfs: stopped scanning after {count} files")
+            return
+        if path in owners:
+            continue
+        if any(path.startswith(d) for d in PACKAGE_METADATA_DIRS):
+            continue
+        size = node.get("size", 0)
+        if size < 16 or size > MAX_SCAN_FILE_BYTES:
+            skipped += 1
+            continue
+        try:
+            blob = image.read_file(node)
+        except squashfs.SquashFSError:
+            skipped += 1
+            continue
+        scanned += len(blob)
+        count += 1
+        yield path, blob
+
+
 def inspect_filesystem(segment, verbose=False, log=None):
     """Read what an on-image filesystem can tell us about its contents."""
     say = log or (lambda *_a, **_k: None)

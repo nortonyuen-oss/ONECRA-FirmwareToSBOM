@@ -43,11 +43,12 @@ import uuid
 from datetime import datetime, timezone
 
 import container
+import elf
 import evidence_report
 import spdx_report
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.8.0"
+TOOL_VERSION = "1.9.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1158,6 +1159,51 @@ def analyze_segments(payload, min_str_len=6, verbose=False):
     return segments, rootfs, warnings
 
 
+def scan_rootfs_files(rootfs, min_str_len=6, verbose=False):
+    """Signature-match the root filesystem files a package database misses.
+
+    Returns hits shaped like match_signatures()' output, each carrying the
+    path inside the image it came from. That path is better evidence than a
+    byte offset into a decompressed blob: an auditor can go and look at
+    /usr/sbin/dropbear, and cannot do anything with "offset 0x3f1a80".
+    """
+    if not rootfs:
+        return []
+    best = {}
+    files = bytes_read = 0
+    for path, blob in container.unclaimed_files(
+            rootfs, (lambda m: log(m, verbose)) if verbose else None):
+        files += 1
+        bytes_read += len(blob)
+        # A version string inside an executable is the component's own banner,
+        # compiled in. The same string in a config file or a script is a human
+        # note that may be stale, or may be describing something the device
+        # talks to rather than something it contains. Both are worth reporting;
+        # they are not worth reporting as if they were the same evidence.
+        kind = ("an executable" if elf.looks_like_elf(blob[:20])
+                else "a non-executable file")
+        for hit in match_signatures(extract_strings(blob, min_str_len)):
+            name = hit["sig"]["name"]
+            hit["file"] = path
+            hit["file_kind"] = kind
+            previous = best.get(name)
+            if previous is None or hit["confidence"] > previous["confidence"] \
+                    or (hit["version"] and not previous["version"]):
+                hit["files"] = sorted(set((previous or {}).get("files", []))
+                                      | {path})
+                best[name] = hit
+            else:
+                previous["files"] = sorted(set(previous.get("files", []))
+                                           | {path})
+    hits = sorted(best.values(), key=lambda h: -h["confidence"])
+    if files:
+        log(f"rootfs: scanned {files} unclaimed file(s) ({bytes_read} bytes), "
+            f"{len(hits)} component(s) matched", verbose)
+    for hit in hits:
+        infer_versions([hit], False)
+    return hits
+
+
 def merge_segment_hits(segments):
     """One component per name, carrying evidence from every segment it is in.
 
@@ -1187,6 +1233,34 @@ def merge_segment_hits(segments):
                 existing["version"] = hit["version"]
                 if hit.get("version_inferred"):
                     existing["version_inferred"] = hit["version_inferred"]
+    return sorted(merged.values(), key=lambda h: -h["confidence"])
+
+
+def merge_hit_lists(primary, extra):
+    """Combine two hit lists, keeping the better-evidenced sighting of each.
+
+    A component found both in a decompressed segment and in a specific file
+    is one component; the file path is worth keeping either way, because it
+    is the more useful of the two locations.
+    """
+    merged = {hit["sig"]["name"]: hit for hit in primary}
+    for hit in extra:
+        name = hit["sig"]["name"]
+        previous = merged.get(name)
+        if previous is None:
+            merged[name] = hit
+            continue
+        if hit.get("files"):
+            previous["files"] = sorted(
+                set(previous.get("files", [])) | set(hit["files"]))
+        if hit["confidence"] > previous["confidence"]:
+            hit["files"] = previous["files"]
+            hit["segments"] = previous.get("segments", [])
+            hit["version"] = previous["version"] or hit["version"]
+            merged[name] = hit
+        elif hit["version"] and not previous["version"]:
+            previous["version"] = hit["version"]
+            previous.pop("version_inferred", None)
     return sorted(merged.values(), key=lambda h: -h["confidence"])
 
 
@@ -1336,14 +1410,19 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         ref = f"component-{i}-{sig['name']}"
         exact_version = hit["version"] and not hit.get("version_inferred")
         purl = sig["purl"] + (f"@{hit['version']}" if exact_version else "")
-        where = hit.get("segment") or offset_space
+        files_found_in = hit.get("files") or []
+        source_file = hit.get("file")
+        where = (f"{hit.get('file_kind', 'a file')} in the root filesystem, "
+                 f"{source_file}"
+                 if source_file
+                 else f"the {hit.get('segment') or offset_space}")
         methods = []
         for pat, offset, text, _v in hit["evidence"]:
             methods.append({
                 "technique": "binary-analysis",
                 "confidence": pat["weight"],
                 "value": f"regex '{pat['regex']}' matched '{text}' "
-                         f"at offset 0x{offset:x} of the {where}",
+                         f"at offset 0x{offset:x} in {where}",
             })
         comp = {
             "type": sig["type"],
@@ -1361,7 +1440,7 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
                     "location": fname,
                     "additionalContext":
                         f"first match at offset 0x{hit['evidence'][0][1]:x} "
-                        f"of the {where}",
+                        f"in {where}",
                 }],
             },
             "properties": [
@@ -1376,6 +1455,17 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             comp["properties"].append(
                 {"name": "fw2sbom:found_in_segments",
                  "value": ", ".join(hit["segments"])})
+        ordered = ([source_file] + [f for f in files_found_in if f != source_file]
+                   if source_file else files_found_in)
+        for path in ordered[:MAX_EVIDENCE_PER_COMPONENT]:
+            comp["evidence"]["occurrences"].append({"location": path})
+        if files_found_in:
+            comp["properties"].append(
+                {"name": "fw2sbom:found_in_files",
+                 "value": str(len(files_found_in))})
+            comp["properties"].append(
+                {"name": "fw2sbom:evidence_file_kind",
+                 "value": hit.get("file_kind", "a file")})
         if hit["version"]:
             comp["version"] = hit["version"]
             inferred = hit.get("version_inferred")
@@ -1849,6 +1939,8 @@ def main(argv=None):
             die(f"cannot write strings dump: {e}")
 
     hits = merge_segment_hits(segments)
+    hits = merge_hit_lists(hits, scan_rootfs_files(
+        rootfs, args.min_str_len, args.verbose))
     packages = packages_to_components(rootfs)
     for hit in hits:
         log(f"match: {hit['sig']['name']} confidence={hit['confidence']} "
