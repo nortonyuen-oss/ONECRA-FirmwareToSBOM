@@ -334,6 +334,37 @@ def build_router_uimage():
             + b"\xff" * 4096)
 
 
+@fixture("encrypted_kernel.bin")
+def build_encrypted_kernel():
+    """A flash dump whose kernel is encrypted, followed by erased flash.
+
+    Modelled on a real device: a uImage header that claims gzip, a payload
+    that is not gzip and not anything else readable, and tens of megabytes of
+    0xFF after it. Measured as one lump the image reads as low-entropy
+    "plaintext" - the padding outvotes the ciphertext - and the SBOM says the
+    firmware is plaintext with no components, when the truth is that its one
+    real region could not be read at all.
+
+    The repeated 16-byte blocks are deliberate: identical plaintext blocks
+    encrypting to identical ciphertext is the signature of ECB mode, and
+    saying so is worth more to a reader than "high entropy".
+    """
+    r = rng("encrypted_kernel")
+    block_pool = [bytes(r.randrange(0x100) for _ in range(16))
+                  for _ in range(64)]
+    body = bytearray()
+    while len(body) < 512 * 1024:
+        # Mostly unique blocks, with a few repeats as ECB would produce.
+        body += (r.choice(block_pool) if r.random() < 0.04
+                 else bytes(r.randrange(0x100) for _ in range(16)))
+    payload = bytes(body)
+
+    header = struct.pack(">IIIIIIII", 0x27051956, 0, 0, len(payload),
+                         0, 0, 0, 0x05020201)      # Linux/ARM, gzip, but not
+    header += b"\x00" * 32                          # no name, as the real one had
+    return header + payload + b"\xff" * (2 * 1024 * 1024)
+
+
 @fixture("bare_unknown.bin")
 def build_bare_unknown():
     """Plaintext image of no recognised architecture and no known component.

@@ -48,7 +48,7 @@ import evidence_report
 import spdx_report
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.9.0"
+TOOL_VERSION = "1.10.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -989,6 +989,40 @@ def analyze_opacity(payload, architecture=None):
     }
 
 
+def summarise_opacity(segments, whole_image):
+    """The headline verdict, taken from the segments that hold content.
+
+    Measuring a whole flash dump in one go lets its erased tail outvote what
+    is actually in it: 3.6 MB of encrypted kernel beside 60 MB of 0xFF reads
+    as 0.74 bits/byte, and the SBOM says "plaintext". The segments know
+    better, so when there are segments the headline comes from them.
+    """
+    judged = [s for s in segments
+              if s.get("opacity") and not s.get("blank")]
+    if not judged:
+        return whole_image
+
+    opaque = [s for s in judged if s["opacity"]["opaque"]]
+    if not opaque:
+        return whole_image
+
+    worst = max(opaque, key=lambda s: s["opacity"]["entropy"])
+    summary = dict(worst["opacity"])
+    summary["reasons"] = (
+        [f"{len(opaque)} of {len(judged)} content segment(s) could not be "
+         f"enumerated; the most opaque is {worst['label']} at offset "
+         f"0x{worst['offset']:x}"]
+        + list(worst["opacity"]["reasons"]))
+    if whole_image and whole_image.get("verdict") != summary["verdict"]:
+        summary["whole_image_verdict"] = whole_image["verdict"]
+        summary["reasons"].append(
+            f"measured over the whole image the verdict would be "
+            f"'{whole_image['verdict']}' (entropy "
+            f"{whole_image['entropy']:.3f}); that figure is dominated by "
+            f"regions that hold no content")
+    return summary
+
+
 def reconcile_opacity(opacity, hits, standards, verbose=False):
     """Settle a contradiction between the opacity verdict and what was found.
 
@@ -1141,6 +1175,8 @@ def analyze_segments(payload, min_str_len=6, verbose=False):
                      "label": "firmware image", "content": payload,
                      "expanded": False, "warnings": []}]
 
+    judge_segments(segments, payload, verbose)
+
     rootfs = None
     for segment in segments:
         if segment["kind"] == "filesystem" and rootfs is None:
@@ -1157,6 +1193,78 @@ def analyze_segments(payload, min_str_len=6, verbose=False):
                 f"from {len(segment['strings'])} strings", verbose)
 
     return segments, rootfs, warnings
+
+
+# A region is blank flash rather than content when almost every byte is an
+# erased-flash value. Judging such a region as "plaintext, entropy 0.7" and
+# letting it dominate a whole-image verdict is how an encrypted kernel sitting
+# next to 60 MB of padding gets reported as plaintext.
+BLANK_BYTES = (0x00, 0xFF)
+BLANK_RATIO = 0.99
+
+
+def looks_blank(blob, sample=1 << 20):
+    """True when a region is erased flash rather than content."""
+    if not blob:
+        return True
+    window = blob[:sample] if len(blob) > sample else blob
+    blank = sum(1 for b in window if b in BLANK_BYTES)
+    return blank >= BLANK_RATIO * len(window)
+
+
+def judge_segments(segments, payload, verbose=False):
+    """Give every segment its own opacity verdict.
+
+    A firmware image is not one substance. This one is a 64 MB flash dump
+    holding a 3.6 MB encrypted kernel and 60 MB of erased flash; measured as a
+    whole it reads as 0.74 bits/byte - "plaintext" - and the encryption
+    disappears into the padding. Measured per segment, the kernel reads 7.9999
+    with no blank runs and 2083 repeated 16-byte blocks, which is what it
+    actually is.
+    """
+    for segment in segments:
+        if segment["kind"] == "filesystem":
+            # Read structurally; entropy of the compressed image says nothing
+            # about whether its contents were enumerable.
+            segment["opacity"] = None
+            continue
+
+        blob = segment["content"]
+        if blob is None:
+            start = segment["offset"]
+            blob = payload[start:start + segment["length"]]
+            expanded = False
+        else:
+            expanded = segment.get("expanded", False)
+
+        if looks_blank(blob):
+            segment["blank"] = True
+            segment["opacity"] = None
+            segment["label"] = (segment["label"] if segment["kind"] != "unclaimed"
+                                else "blank flash")
+            log(f"segment 0x{segment['offset']:08x}: erased flash, "
+                f"{segment['length']} bytes", verbose)
+            continue
+
+        verdict = analyze_opacity(blob)
+        # Content we successfully expanded is by definition readable, whatever
+        # the compressed form scored.
+        if expanded and verdict["opaque"] and not verdict["compression"]:
+            verdict = dict(verdict, opaque=False, verdict="plaintext",
+                           original_verdict=verdict["verdict"])
+        segment["opacity"] = verdict
+        if verdict["opaque"]:
+            log(f"segment 0x{segment['offset']:08x} ({segment['label']}): "
+                f"{verdict['verdict']}, entropy {verdict['entropy']:.3f}", True)
+    return segments
+
+
+def opaque_segments(segments):
+    """Segments whose contents could not be enumerated, and why."""
+    return [s for s in segments
+            if (s.get("opacity") or {}).get("opaque")
+            or (s["content"] is None and s["kind"] not in ("filesystem",)
+                and not s.get("blank"))]
 
 
 def scan_rootfs_files(rootfs, min_str_len=6, verbose=False):
@@ -1330,10 +1438,16 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
     for i, segment in enumerate(segments or [], 1):
         detail = (f"{segment['kind']} at 0x{segment['offset']:x}, "
                   f"{segment['length']} bytes: {segment['label']}")
-        if segment.get("expanded"):
+        if segment.get("blank"):
+            detail += " (erased flash, no content)"
+        elif segment.get("expanded"):
             detail += f" (expanded to {len(segment['content'])} bytes)"
         elif segment["content"] is None and segment["kind"] != "filesystem":
             detail += " (not expanded)"
+        verdict = segment.get("opacity")
+        if verdict:
+            detail += (f" [verdict {verdict['verdict']}, entropy "
+                       f"{verdict['entropy']:.3f}]")
         for warning in segment.get("warnings", [])[:2]:
             detail += f" [{warning}]"
         fw_props.append({"name": f"fw2sbom:segment_{i}", "value": detail})
@@ -1632,7 +1746,59 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         })
         dep_refs.append(ref)
 
-    if opacity and opacity["opaque"] and payload is not None:
+    for index, segment in enumerate(opaque_segments(segments or []), 1):
+        verdict = segment.get("opacity") or {}
+        raw_length = segment["length"]
+        ref = f"opaque-segment-{index}"
+        reasons = list(verdict.get("reasons") or [])
+        if segment["content"] is None and not verdict:
+            reasons.append("this region could not be expanded, so its contents "
+                           "were never available to analyse")
+        for warning in segment.get("warnings", [])[:3]:
+            reasons.append(warning)
+        components.append({
+            "type": "firmware",
+            "bom-ref": ref,
+            "name": f"{fname}:{segment['label']}",
+            "description":
+                f"Unenumerable region at offset 0x{segment['offset']:x} "
+                f"({raw_length} bytes): {segment['label']}. Its contents are "
+                "encrypted, obfuscated or otherwise unavailable to static "
+                "analysis, so the components inside it are unknown. Request a "
+                "plaintext image or the vendor's own SBOM for this region.",
+            "evidence": {
+                "identity": [{
+                    "field": "name",
+                    "confidence": 0.0,
+                    "methods": [{"technique": "binary-analysis",
+                                 "confidence": 0.0, "value": reason}
+                                for reason in reasons[:MAX_EVIDENCE_PER_COMPONENT]]
+                              or [{"technique": "binary-analysis",
+                                   "confidence": 0.0,
+                                   "value": "region not expanded"}],
+                }],
+                "occurrences": [{
+                    "location": fname,
+                    "additionalContext":
+                        f"offset 0x{segment['offset']:x}, {raw_length} bytes",
+                }],
+            },
+            "properties": [
+                {"name": "fw2sbom:opaque", "value": "true"},
+                {"name": "fw2sbom:opacity_verdict",
+                 "value": verdict.get("verdict", "not expanded")},
+                {"name": "fw2sbom:segment_offset",
+                 "value": f"0x{segment['offset']:x}"},
+                {"name": "fw2sbom:segment_bytes", "value": str(raw_length)},
+                {"name": "fw2sbom:analysis_result",
+                 "value": "content not enumerable; vendor SBOM required"},
+            ] + ([{"name": "fw2sbom:payload_entropy_bits_per_byte",
+                   "value": str(verdict["entropy"])}] if verdict else []),
+        })
+        dep_refs.append(ref)
+
+    if (opacity and opacity["opaque"] and payload is not None
+            and not opaque_segments(segments or [])):
         ref = "firmware-payload-opaque"
         encrypted = not opacity["compression"]
         components.append({
@@ -1951,6 +2117,7 @@ def main(argv=None):
 
     # Components read out of the payload settle the opacity question, and a
     # package database is the most decisive evidence of all.
+    opacity = summarise_opacity(segments, opacity)
     opacity = reconcile_opacity(opacity, hits + packages, standards, args.verbose)
     bom = build_sbom(args.input, data, file_magic, arm_info, hits,
                      args.min_str_len, len(strings),
@@ -2026,7 +2193,14 @@ def main(argv=None):
 
     written = ([f"CycloneDX 1.6 -> {cdx_path}"] if want_cdx else []) + \
               ([f"SPDX 2.3 -> {spdx_path}"] if want_spdx else [])
-    print(f"[fw2sbom] {total} component(s) identified", file=sys.stderr)
+    unenumerable = opaque_segments(segments)
+    summary = f"{total} component(s) identified"
+    if unenumerable:
+        # Saying "0 components" without this reads as "there is nothing in
+        # this firmware", which is the opposite of what an opaque region means.
+        summary += (f"; {len(unenumerable)} region(s) could not be enumerated "
+                    f"and are recorded as opaque")
+    print(f"[fw2sbom] {summary}", file=sys.stderr)
     for line in written:
         print(f"[fw2sbom]   {line}", file=sys.stderr)
     for segment in segments:
@@ -2071,8 +2245,10 @@ def main(argv=None):
               "identification is not possible:", file=sys.stderr)
         for reason in opacity["reasons"]:
             print(f"[fw2sbom]   - {reason}", file=sys.stderr)
-        print("[fw2sbom] recorded as a single opaque component; obtain a plaintext "
-              "image or the vendor's SBOM to complete it", file=sys.stderr)
+        count = len(unenumerable) or 1
+        print(f"[fw2sbom] recorded as {count} opaque component(s); obtain a "
+              "plaintext image or the vendor's SBOM to complete the inventory",
+              file=sys.stderr)
     elif not total:
         print("[fw2sbom] no known components matched; SBOM contains metadata only",
               file=sys.stderr)

@@ -31,6 +31,73 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.10.0
+
+| | |
+|---|---|
+| Tag | `v1.10.0` |
+| Build 日期 | 2026-09-14 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 2(第四階段)**:分區段 opacity 判定。
+
+### 呢個版本修咗一個會令客戶收到錯誤結論嘅缺陷
+
+一份 64 MB 嘅 flash dump,入面得 3.6 MB 加密 kernel,其餘係抹除過嘅空白 flash。
+整份一齊量:熵值 **0.736**,判定 **plaintext**,SBOM 講「呢份韌體係明文,而且
+冇任何元件」。
+
+真相係佢唯一嘅內容區段**根本讀唔出嚟**(熵值 7.9999、最長同值 run 3、2083 個
+重複 16-byte 對齊區塊 —— ECB 模式特徵)。
+
+**將「讀唔到」報成「入面冇嘢」,正正係呢個工具存在嘅理由要防止嘅事。**
+
+| | v1.9.0 | v1.10.0 |
+|---|---|---|
+| 判定 | `plaintext`(熵值 0.736) | `opaque`(熵值 7.9999) |
+| Opaque 元件 | 0 | 1(帶 offset、大小、判定依據) |
+| 空白區段 | 「unidentified region」 | 認出係抹除過嘅 flash |
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,225,043 bytes |
+| SHA-256 | `0e46012b0d6f1cdd507e38acccbfa7b981852cca159e4ce97e4b83bc0f543ab1` |
+| 內容 | 53 個檔案 |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `ef730c62c5665640e76b3eb7768217a58551f47705f091123915bd022d6659ea` |
+| `service.py` | `23ee6e68287663b1a9b02cf5a76726fd954dc21d3e22dc760c1d93409821c802` |
+
+其餘檔案與 v1.9.0 相同。
+
+### 新增
+
+- **逐區段 opacity 判定** —— 每個區段用自己嘅位元組判定,唔再由整份映像一個
+  數字決定。
+- **抹除 flash 識別** —— ≥99% 係 0x00/0xFF 嘅區域認出係空白,唔計入判斷,
+  標籤由「unidentified region」改為「blank flash」。
+- **每個讀唔到嘅區段各自成為一個 opaque 元件** —— 帶 offset、大小、熵值、
+  判定依據,而唔係整份映像一個籠統標記。
+- **頭條判定由區段推導** —— 而且會寫明「整份一齊量會得到 X;嗰個數字被冇內容
+  嘅區域主導咗」,令讀報告嘅人知道點解天真嘅量法會出錯。
+- CLI 唔再淨係講「0 component(s) identified」;會補「N region(s) could not be
+  enumerated and are recorded as opaque」。
+
+### 測試
+
+113 個(由 106 增加)。新增 `SegmentOpacityTest` 七項,連同一個新嘅合成 fixture
+`encrypted_kernel.bin` —— 重現「細加密區 + 大空白尾」呢個缺陷類型,唔含任何
+客戶資料。
+
+---
+
 ## v1.9.0
 
 | | |

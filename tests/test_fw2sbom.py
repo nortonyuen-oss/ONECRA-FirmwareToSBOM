@@ -479,7 +479,8 @@ class SbomStructureTest(unittest.TestCase):
 
     ALL = ("cortexm_rtos.bin", "cortexm_utf16.bin", "mcs51_display.bin",
            "packet_front.bin", "packet_back.bin", "opaque_encrypted.bin",
-           "random_flat.bin", "router_uimage.bin", "bare_unknown.bin")
+           "random_flat.bin", "router_uimage.bin", "bare_unknown.bin",
+           "encrypted_kernel.bin")
 
     def test_is_valid_cyclonedx_16_json(self):
         for name in self.ALL:
@@ -663,6 +664,82 @@ class SquashFSTest(unittest.TestCase):
         self.assertLessEqual(squashfs.MAX_ENTRIES, 1_000_000)
         self.assertLessEqual(squashfs.MAX_TOTAL_READ, 1024 * 1024 * 1024)
 
+
+
+# --------------------------------------------------------------------------- #
+
+class SegmentOpacityTest(unittest.TestCase):
+    """A firmware image is not one substance, and must not be judged as one.
+
+    encrypted_kernel.bin is a flash dump: a small encrypted kernel followed by
+    megabytes of erased flash. Measured in one go the padding outvotes the
+    ciphertext and the image reads as low-entropy "plaintext" - so the SBOM
+    would say the firmware is plaintext and contains no components, when the
+    truth is that its one real region could not be read at all. Reporting
+    "nothing is in here" for "we could not open this" is the single failure
+    this tool exists to avoid.
+    """
+
+    FIXTURE = "encrypted_kernel.bin"
+
+    def segments(self):
+        return analyze(self.FIXTURE)["segments"]
+
+    def test_the_whole_image_measurement_would_say_plaintext(self):
+        """The premise of the test: the naive measurement is wrong here."""
+        whole = core.analyze_opacity(fixture(self.FIXTURE))
+        self.assertFalse(whole["opaque"])
+        self.assertLess(whole["entropy"], 4.0)
+
+    def test_the_encrypted_segment_is_judged_on_its_own_bytes(self):
+        kernel = next(s for s in self.segments() if s["kind"] == "kernel")
+        verdict = kernel["opacity"]
+        self.assertTrue(verdict["opaque"])
+        self.assertGreater(verdict["entropy"], core.OPACITY_STRONG)
+        self.assertLessEqual(verdict["longest_run"], core.OPACITY_MAX_RUN)
+
+    def test_erased_flash_is_recognised_as_holding_no_content(self):
+        """Padding is not a finding, and must not dilute one either."""
+        blank = [s for s in self.segments() if s.get("blank")]
+        self.assertTrue(blank, "the 0xFF tail was not recognised")
+        self.assertGreater(blank[0]["length"], 1024 * 1024)
+        self.assertIsNone(blank[0]["opacity"])
+
+    def test_repeated_blocks_are_reported_as_a_cipher_mode_signal(self):
+        """Identical ciphertext blocks say more than "high entropy" does."""
+        kernel = next(s for s in self.segments() if s["kind"] == "kernel")
+        self.assertGreater(kernel["opacity"]["duplicate_16b_blocks"], 100)
+        reasons = " ".join(kernel["opacity"]["reasons"])
+        self.assertIn("ECB", reasons)
+
+    def test_the_headline_verdict_comes_from_the_segments(self):
+        summary = core.summarise_opacity(
+            self.segments(), core.analyze_opacity(fixture(self.FIXTURE)))
+        self.assertTrue(summary["opaque"])
+        self.assertEqual(summary["whole_image_verdict"], "plaintext")
+        self.assertIn("dominated by regions that hold no content",
+                      " ".join(summary["reasons"]))
+
+    def test_the_unreadable_region_becomes_a_component(self):
+        """"Nothing found" and "could not look" must not produce the same SBOM."""
+        bom = analyze(self.FIXTURE)["bom"]
+        opaque = [c for c in bom["components"] if c["type"] == "firmware"]
+        self.assertEqual(len(opaque), 1)
+        props = {p["name"]: p["value"] for p in opaque[0]["properties"]}
+        self.assertEqual(props["fw2sbom:opaque"], "true")
+        self.assertEqual(props["fw2sbom:segment_offset"], "0x40")
+        self.assertGreater(int(props["fw2sbom:segment_bytes"]), 100000)
+        self.assertEqual(opaque[0]["evidence"]["identity"][0]["confidence"], 0.0)
+        self.assertIn("vendor", opaque[0]["description"].lower())
+
+    def test_a_flat_mcu_image_is_judged_exactly_as_before(self):
+        """One segment covering the payload must behave as it always did."""
+        for name, expected in [("cortexm_rtos.bin", False),
+                               ("opaque_encrypted.bin", True)]:
+            with self.subTest(fixture=name):
+                result = analyze(name)
+                self.assertEqual(len(result["segments"]), 1)
+                self.assertEqual(result["opacity"]["opaque"], expected)
 
 # --------------------------------------------------------------------------- #
 

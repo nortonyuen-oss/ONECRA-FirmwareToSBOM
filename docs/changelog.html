@@ -154,9 +154,52 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.9.0</span>
+        <span class="ver">1.10.0</span>
         <span class="date">2026-09-14</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>逐區段判定加密,不再讓空白區拉低整體判斷</h2>
+        <p>
+          一份韌體映像不是均質的。一個 64 MB 的 flash dump 可能只裝著 3.6 MB 的
+          加密 kernel,其餘全是抹除過的空白 flash。<strong>整份一起量,空白區會
+          壓過密文</strong> —— 熵值算出來只有 0.74,判定「明文」,SBOM 於是說這份
+          韌體是明文而且沒有任何元件。
+        </p>
+        <p>
+          真相是它唯一的內容區段根本讀不出來。
+          <strong>把「讀不到」報成「裡面沒有東西」,正是這個工具存在的理由要防止的
+          事。</strong>
+        </p>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            每個區段現在各自判定。同一份映像:kernel 熵值 7.9999、最長同值位元組
+            連續 3、2083 個重複的 16-byte 對齊區塊 —— 判定為加密,並產生一個標記
+            offset、大小與判定依據的 opaque 元件。空白區段被認出是抹除過的 flash,
+            不再計入判斷。
+          </p>
+          <p>
+            報告還會寫明:「整份一起量會得到『明文』(熵值 0.736);那個數字被沒有
+            內容的區域主導了。」讓讀的人知道為什麼天真的量法會出錯。
+          </p>
+        </div>
+        <ul>
+          <li><strong>重複區塊視為加密模式訊號</strong> —— 相同的明文區塊加密成相同的密文區塊,是 ECB 模式的特徵。這比「熵值很高」對讀報告的人有用得多。</li>
+          <li><strong>每個讀不出來的區段各自成為一個元件</strong> —— 帶 offset、大小、熵值與判定依據,而不是整份映像一個籠統的標記。</li>
+        </ul>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,225,043 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">0e46012b0d6f1cdd507e38acccbfa7b981852cca159e4ce97e4b83bc0f543ab1</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.9.0</span>
+        <span class="date">2026-09-14</span>
+        
       </div>
       <div>
         <h2>讀取根檔案系統裡的每一個檔案</h2>

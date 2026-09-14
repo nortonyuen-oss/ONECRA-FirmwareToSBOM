@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-14** · 版本 **v1.9.0**
+快照日期:**2026-09-14** · 版本 **v1.10.0**
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -47,6 +47,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | `v1.7.1` | 專有授權與第三方歸屬,隨套件交付 |
 | `v1.8.0` | **Phase 2 第二階段**:ELF reader、指令集識別、依賴圖、聲明授權與廠商 CPE、kernel module metadata |
 | `v1.9.0` | **Phase 2 第三階段**:逐檔簽章比對(冇套件資料庫嘅映像先有 rootfs 元件)、證據指向檔案路徑 |
+| `v1.10.0` | **Phase 2 第四階段**:分區段 opacity 判定、抹除 flash 識別、逐區段 opaque 元件 |
 | `v1.7.0` | **Phase 2 第一階段**:容器走訪、解壓、SquashFS 4.0 reader、opkg / dpkg / apk 套件資料庫、發行版識別、真實韌體 corpus 測試 |
 
 ### 工程現況
@@ -55,7 +56,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 |---|---|
 | 程式碼 | 約 7,300 行,7 個模組 + 6 個簽章包(36 個簽章) |
 | 依賴 | 無。Python 3.9+ 標準函式庫 |
-| 測試 | 106 個。9 個合成 fixture + 1 份真實廠商韌體 corpus |
+| 測試 | 113 個。10 個合成 fixture + 1 份真實廠商韌體 corpus |
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
@@ -77,6 +78,9 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 4. **打包腳本的 smoke test 會產生 `__pycache__`** —— `.pyc` 內嵌原始碼 mtime,
    會同時破壞可重現性並把 build cache 送給客戶。
 5. **`_SBOM_STORE` 無上限** —— 長期執行的服務會累積每一次分析的結果。
+6. **整份映像一起量 opacity,空白區壓過密文** —— 一個 64 MB flash dump 裡 3.6 MB
+   的加密 kernel 被判成「明文、無元件」。把「讀不到」報成「裡面沒有東西」,正是
+   這個工具存在的理由要防止的事。由真實 CCTV 韌體樣本揭發。
 
 ---
 
@@ -86,7 +90,6 @@ Phase 2 剩餘(擴闊 router / CCTV 覆蓋):
 
 - 更多容器格式:FIT、TRX、TP-Link / D-Link / HiSilicon 等廠商自訂檔頭
 - 更多檔案系統:JFFS2、UBI / UBIFS、CramFS
-- 分區段 opacity 判定
 - CCTV:廠商 SBOM 匯入與合併
 
 之後:Phase 3(HEX / SREC / UF2 / ELF 輸入、ESP32、RISC-V)、Phase 4(UEFI)。

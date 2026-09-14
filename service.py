@@ -412,6 +412,7 @@ def analyze_bytes(filename, data):
                for pair in segment.get("strings", [])]
     hits = core.merge_segment_hits(segments)
     packages = core.packages_to_components(rootfs)
+    opacity = core.summarise_opacity(segments, opacity)
     opacity = core.reconcile_opacity(opacity, hits + packages, standards)
     name = filename or "firmware.bin"
     stem = os.path.splitext(os.path.basename(name))[0]
