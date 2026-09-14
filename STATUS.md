@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-14** · 版本 **v1.10.0**
+快照日期:**2026-09-14** · 版本 **v1.11.0**
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -24,7 +24,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 |---|---|---|
 | **IoT / MCU**<br>ARM Cortex-M、8051 | 可用 | 架構識別、封包容器去框、加密映像誠實標記、內嵌標準資料(EDID / MCCS)。版本能拿的都拿了,拿不到的說明為什麼 |
 | **Router / Gateway**<br>Linux, MIPS / ARM | 可用(OpenWrt 類) | uImage + 壓縮 kernel + SquashFS + ELF。真實 GL.iNet router:**366 個元件、362 個帶精確版本、262 個帶授權、1268 條依賴邊**。FIT / TRX / 廠商自訂檔頭尚未支援 |
-| **CCTV / NVR**<br>Linux, 專有 SoC | 部分 | 用標準 uImage + SquashFS 的機型現在就能分析,**即使沒有套件資料庫也能從檔案本身取得元件**。廠商自訂容器要逐個加;整段加密的機型上限仍是 opaque |
+| **CCTV / NVR**<br>Linux, 專有 SoC | 部分 | 用標準 uImage + SquashFS 的機型現在就能分析,**即使沒有套件資料庫也能從檔案本身取得元件**。整段加密的機型上限是 opaque,但可以**匯入廠商 SBOM 並與映像比對**。廠商自訂容器要逐個加 |
 | **PC BIOS / UEFI**<br>x86, EDK2 | 未開始 | 獨立的問題域(Flash Descriptor / FV / FFS / GUID),與 Linux 那條路幾乎不共用程式碼 |
 
 ### 真實韌體實測
@@ -48,15 +48,16 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | `v1.8.0` | **Phase 2 第二階段**:ELF reader、指令集識別、依賴圖、聲明授權與廠商 CPE、kernel module metadata |
 | `v1.9.0` | **Phase 2 第三階段**:逐檔簽章比對(冇套件資料庫嘅映像先有 rootfs 元件)、證據指向檔案路徑 |
 | `v1.10.0` | **Phase 2 第四階段**:分區段 opacity 判定、抹除 flash 識別、逐區段 opaque 元件 |
+| `v1.11.0` | **Phase 2 完成**:廠商 SBOM 匯入與比對(來源保留、版本衝突偵測) |
 | `v1.7.0` | **Phase 2 第一階段**:容器走訪、解壓、SquashFS 4.0 reader、opkg / dpkg / apk 套件資料庫、發行版識別、真實韌體 corpus 測試 |
 
 ### 工程現況
 
 | 項目 | 狀態 |
 |---|---|
-| 程式碼 | 約 7,300 行,7 個模組 + 6 個簽章包(36 個簽章) |
+| 程式碼 | 約 8,200 行,8 個模組 + 6 個簽章包(36 個簽章) |
 | 依賴 | 無。Python 3.9+ 標準函式庫 |
-| 測試 | 113 個。10 個合成 fixture + 1 份真實廠商韌體 corpus |
+| 測試 | 122 個。10 個合成 fixture + 1 份真實廠商韌體 corpus |
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
@@ -86,11 +87,13 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 
 ## 下一步
 
-Phase 2 剩餘(擴闊 router / CCTV 覆蓋):
+**Phase 2 已完成。** 剩餘的擴充項目都需要我們手上沒有的韌體樣本:
 
 - 更多容器格式:FIT、TRX、TP-Link / D-Link / HiSilicon 等廠商自訂檔頭
 - 更多檔案系統:JFFS2、UBI / UBIFS、CramFS
-- CCTV:廠商 SBOM 匯入與合併
+
+這兩項沒有真實樣本就只能照規格書寫,驗證不到廠商實際的偏差 —— `gcc-arm-none-eabi`
+誤報那次已經示範過合成 fixture 看不出真實問題。
 
 之後:Phase 3(HEX / SREC / UF2 / ELF 輸入、ESP32、RISC-V)、Phase 4(UEFI)。
 

@@ -31,6 +31,67 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.11.0
+
+| | |
+|---|---|
+| Tag | `v1.11.0` |
+| Build 日期 | 2026-09-14 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 2 完成**:廠商 SBOM 匯入與比對。
+
+### 點解要有呢樣
+
+靜態分析有硬上限。映像加密,元件就喺密碼後面 —— 唯一出路係向供應商攞佢哋自己
+嘅 SBOM。v1.10.0 喺一部真實 CCTV 上示範咗呢個上限:kernel 熵值 7.9999,
+ECB 模式特徵,再落去冇嘢可以做。
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,230,514 bytes |
+| SHA-256 | `fa1a571814f800ee4cc0cc705acd617509f986fef9eaee7d0e7d94b2d353c1b6` |
+| 內容 | 54 個檔案(多咗 `vendor_sbom.py`) |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `9119096f908bd75c9a137be3958c7ec745449ac78d0dee16362496bbf73227a4` |
+| `vendor_sbom.py` | `3b92b6056bc3dcf54192402c6ead76e2ba3fd1fe9616c0cb09b65f62bdab6c10` |
+
+其餘檔案與 v1.10.0 相同。
+
+### 新增
+
+- **`--vendor-sbom FILE`**(可重複)—— 接受 CycloneDX 1.x 或 SPDX 2.x JSON,
+  因為廠商用邊套工具就出邊種格式。
+- **來源保留** —— 每個合併入嚟嘅元件標明出自邊份文件(檔名、格式、序號、產生
+  工具、時間),`evidence_class = vendor-sbom`,而且 **confidence 係 0.0**:
+  我哋冇觀察過佢,唔會安一個我哋冇嘅信心值上去。
+- **三種關係標記** —— `vendor_corroborated`(映像佐證到)、`vendor_conflict`
+  (同映像衝突)、`vendor_unverified`(未觀察到,既唔證實亦唔否定)。
+- **版本衝突獨立記錄** —— 廠商聲稱嘅版本同映像入面實際嘅唔同,會出現喺 CLI
+  輸出、SBOM metadata,同該元件嘅 property。呢個係一項發現,唔係一個要擺平嘅
+  分歧;工具冇資格決定邊個啱,只有資格指出兩者唔同。
+- 比對用**去版本嘅 purl** 做主鍵,冇 purl 先用名稱。
+
+### 測試
+
+122 個(由 113 增加)。新增 `VendorSbomTest` 九項:CycloneDX 與 SPDX 讀取、
+四種壞文件、版本衝突偵測、來源標記、多文件合併、合併後仍通過 schema。
+
+### 驗證
+
+同時合併一份 CycloneDX 同一份 SPDX 落真實 router 映像:371 個元件,
+CycloneDX 與 SPDX 輸出各自 **0 schema errors**。
+
+---
+
 ## v1.10.0
 
 | | |

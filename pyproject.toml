@@ -12,7 +12,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "fw2sbom"
-version = "1.10.0"
+version = "1.11.0"
 description = "Evidence-based CycloneDX SBOM generator for embedded firmware images"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -36,7 +36,7 @@ test = ["jsonschema>=4.0"]
 fw2sbom = "fw2sbom:main"
 
 [tool.setuptools]
-py-modules = ["fw2sbom", "container", "squashfs", "elf", "evidence_report", "spdx_report", "service"]
+py-modules = ["fw2sbom", "container", "squashfs", "elf", "vendor_sbom", "evidence_report", "spdx_report", "service"]
 
 [tool.setuptools.package-data]
 "*" = ["signatures/*.json"]

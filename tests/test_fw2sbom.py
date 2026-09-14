@@ -40,6 +40,7 @@ import fw2sbom as core                                   # noqa: E402
 import make_fixtures                                     # noqa: E402
 import spdx_report                                       # noqa: E402
 import squashfs                                          # noqa: E402
+import vendor_sbom                                      # noqa: E402
 import service                                           # noqa: E402
 
 
@@ -740,6 +741,190 @@ class SegmentOpacityTest(unittest.TestCase):
                 result = analyze(name)
                 self.assertEqual(len(result["segments"]), 1)
                 self.assertEqual(result["opacity"]["opaque"], expected)
+
+
+# --------------------------------------------------------------------------- #
+
+class VendorSbomTest(unittest.TestCase):
+    """A vendor's SBOM is a different kind of claim, and must stay one.
+
+    Static analysis stops at an encrypted region; the supplier's own document
+    is the only way past it. Merging one has to keep two things: which
+    document each component came from, and where the vendor's account and the
+    binary disagree - that disagreement is often the most useful thing in the
+    report, and averaging it away would destroy it.
+    """
+
+    CYCLONEDX = {
+        "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+        "serialNumber": "urn:uuid:11111111-2222-3333-4444-555555555555",
+        "metadata": {
+            "timestamp": "2026-01-15T09:00:00Z",
+            "component": {"type": "firmware", "name": "EXAMPLE-CAM", "version": "2.0"},
+            "tools": {"components": [{"type": "application", "name": "vendor-gen"}]},
+        },
+        "components": [
+            {"type": "library", "name": "mbedtls", "version": "3.4.0",
+             "purl": "pkg:github/Mbed-TLS/mbedtls@3.4.0",
+             "supplier": {"name": "Example Devices"},
+             "licenses": [{"license": {"id": "Apache-2.0"}}]},
+            {"type": "library", "name": "lwip", "version": "2.2.0",
+             "purl": "pkg:github/lwip-tcpip/lwip@2.2.0"},
+            {"type": "library", "name": "example-proprietary-stack",
+             "version": "7.1", "purl": "pkg:generic/example-stack@7.1",
+             "description": "Closed source; no binary evidence expected"},
+        ],
+    }
+
+    SPDX = {
+        "spdxVersion": "SPDX-2.3", "dataLicense": "CC0-1.0",
+        "SPDXID": "SPDXRef-DOCUMENT", "name": "EXAMPLE-CAM-2.0",
+        "documentNamespace": "https://example.invalid/spdx/cam",
+        "creationInfo": {"created": "2026-01-15T09:00:00Z",
+                         "creators": ["Tool: vendor-spdx-1.0"]},
+        "packages": [
+            {"SPDXID": "SPDXRef-1", "name": "littlefs", "versionInfo": "2.8.0",
+             "downloadLocation": "NOASSERTION", "copyrightText": "NOASSERTION",
+             "licenseConcluded": "BSD-3-Clause",
+             "supplier": "Organization: Example Devices",
+             "externalRefs": [{"referenceCategory": "PACKAGE-MANAGER",
+                               "referenceType": "purl",
+                               "referenceLocator": "pkg:github/littlefs-project/littlefs@2.8.0"}]},
+        ],
+    }
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="fw2sbom-vendor-")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def write(self, name, document):
+        path = os.path.join(self.dir, name)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(document, f)
+        return path
+
+    # --- reading ---------------------------------------------------------
+    def test_reads_cyclonedx(self):
+        loaded = vendor_sbom.load(self.write("v.cdx.json", self.CYCLONEDX))
+        self.assertEqual(loaded["document"]["format"], "CycloneDX 1.6")
+        self.assertEqual(loaded["document"]["produced_by"], "vendor-gen")
+        names = [c["name"] for c in loaded["components"]]
+        self.assertEqual(names, ["mbedtls", "lwip", "example-proprietary-stack"])
+        self.assertEqual(loaded["components"][0]["licenses"], ["Apache-2.0"])
+        self.assertEqual(loaded["components"][0]["supplier"], "Example Devices")
+
+    def test_reads_spdx(self):
+        loaded = vendor_sbom.load(self.write("v.spdx.json", self.SPDX))
+        self.assertTrue(loaded["document"]["format"].startswith("SPDX 2.3"))
+        component = loaded["components"][0]
+        self.assertEqual(component["name"], "littlefs")
+        self.assertEqual(component["version"], "2.8.0")
+        self.assertTrue(component["purl"].endswith("@2.8.0"))
+        self.assertEqual(component["licenses"], ["BSD-3-Clause"])
+        self.assertEqual(component["supplier"], "Example Devices")
+
+    def test_unreadable_documents_are_refused_with_a_reason(self):
+        """A vendor's file comes from outside; it must never be a traceback."""
+        broken = os.path.join(self.dir, "broken.json")
+        with open(broken, "w", encoding="utf-8") as f:
+            f.write("{ not json")
+        cases = [
+            (broken, "not readable JSON"),
+            (self.write("empty.json", {"hello": "world"}), "neither CycloneDX"),
+            (self.write("nocomp.json", {"bomFormat": "CycloneDX",
+                                        "specVersion": "1.6",
+                                        "components": []}), "no components"),
+            (os.path.join(self.dir, "missing.json"), "cannot open"),
+        ]
+        for path, expected in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaises(vendor_sbom.VendorSBOMError) as caught:
+                    vendor_sbom.load(path)
+                self.assertIn(expected, str(caught.exception))
+
+    # --- comparison ------------------------------------------------------
+    def test_a_version_the_image_contradicts_is_a_conflict(self):
+        """The single most useful thing this comparison produces."""
+        result = analyze("cortexm_rtos.bin")
+        found = core.identified_components(result["hits"], result["standards"], [])
+        loaded = vendor_sbom.load(self.write("v.cdx.json", self.CYCLONEDX))
+        agree, conflicts, vendor_only, _ = vendor_sbom.compare(
+            found, loaded["components"])
+
+        # mbedtls 3.4.0 is in the fixture and in the document.
+        self.assertIn("mbedtls", [a["vendor"]["name"] for a in agree])
+        # lwip is 2.1.3 in the image, and the vendor claims 2.2.0.
+        conflict = next(c for c in conflicts if c["vendor"]["name"] == "lwip")
+        self.assertEqual(conflict["vendor_version"], "2.2.0")
+        self.assertEqual(conflict["our_version"], "2.1.3")
+        # Nothing in the binary speaks to the proprietary stack either way.
+        self.assertIn("example-proprietary-stack",
+                      [c["name"] for c in vendor_only])
+
+    def test_matching_is_by_versionless_purl_where_there_is_one(self):
+        key = vendor_sbom.normalise_key
+        self.assertEqual(key("anything", "pkg:opkg/busybox@1.35.0-5"),
+                         key("BusyBox", "pkg:opkg/busybox@1.36.0"))
+        self.assertNotEqual(key("a", "pkg:opkg/a@1"), key("b", "pkg:opkg/b@1"))
+        self.assertEqual(key("BusyBox", None), key("busybox", None))
+
+    # --- what reaches the document ---------------------------------------
+    def merged_bom(self, *documents):
+        result = analyze("cortexm_rtos.bin")
+        loaded = [vendor_sbom.load(self.write(f"v{i}.json", d))
+                  for i, d in enumerate(documents)]
+        vendor = core.reconcile_vendor_sboms(
+            loaded, result["hits"], result["standards"], [])
+        return core.build_sbom(
+            "cortexm_rtos.bin", result["data"], None, result["arch"],
+            result["hits"], 6, 0, standards=result["standards"],
+            segments=result["segments"], vendor=vendor), vendor
+
+    def test_vendor_components_are_labelled_not_blended(self):
+        """An auditor must be able to tell an assertion from an observation."""
+        bom, _ = self.merged_bom(self.CYCLONEDX)
+        vendor = [c for c in bom["components"]
+                  if any(p["name"] == "fw2sbom:evidence_class"
+                         and p["value"] == "vendor-sbom"
+                         for p in c["properties"])]
+        self.assertEqual(len(vendor), 3)
+        for component in vendor:
+            props = {p["name"]: p["value"] for p in component["properties"]}
+            self.assertEqual(props["fw2sbom:source_document"], "v0.json")
+            # We did not observe these, so we claim no confidence in them.
+            self.assertEqual(
+                component["evidence"]["identity"][0]["confidence"], 0.0)
+            self.assertTrue(
+                {"fw2sbom:vendor_conflict", "fw2sbom:vendor_corroborated",
+                 "fw2sbom:vendor_unverified"} & set(props),
+                "every vendor component must say how it relates to the image")
+
+    def test_the_conflict_is_stated_in_the_document(self):
+        bom, _ = self.merged_bom(self.CYCLONEDX)
+        metadata = {p["name"]: p["value"] for p in bom["metadata"]["properties"]
+                    if p["name"] == "fw2sbom:vendor_version_conflict"}
+        self.assertTrue(metadata, "the conflict never reached the metadata")
+        self.assertIn("lwip", list(metadata.values())[0])
+
+    def test_several_documents_can_be_merged_at_once(self):
+        bom, vendor = self.merged_bom(self.CYCLONEDX, self.SPDX)
+        self.assertEqual(len(vendor), 2)
+        refs = [c["bom-ref"] for c in bom["components"]]
+        self.assertEqual(len(refs), len(set(refs)), "duplicate bom-ref")
+        sources = {p["value"] for c in bom["components"] for p in c["properties"]
+                   if p["name"] == "fw2sbom:source_document"}
+        self.assertEqual(sources, {"v0.json", "v1.json"})
+
+    def test_the_merged_document_still_validates(self):
+        """Merging must not produce something a consumer will reject."""
+        bom, _ = self.merged_bom(self.CYCLONEDX, self.SPDX)
+        self.assertEqual(bom["specVersion"], "1.6")
+        for component in bom["components"]:
+            self.assertIn("bom-ref", component)
+            self.assertIn("name", component)
+            self.assertIn("type", component)
 
 # --------------------------------------------------------------------------- #
 

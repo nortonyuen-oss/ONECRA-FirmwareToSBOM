@@ -46,9 +46,10 @@ import container
 import elf
 import evidence_report
 import spdx_report
+import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.10.0"
+TOOL_VERSION = "1.11.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1267,6 +1268,71 @@ def opaque_segments(segments):
                 and not s.get("blank"))]
 
 
+# --------------------------------------------------------------------------- #
+# Vendor-supplied SBOMs
+# --------------------------------------------------------------------------- #
+
+def load_vendor_sboms(paths, verbose=False):
+    """Read every vendor SBOM named on the command line."""
+    documents = []
+    for path in paths or []:
+        try:
+            loaded = vendor_sbom.load(path)
+        except vendor_sbom.VendorSBOMError as e:
+            die(str(e))
+        identity = loaded["document"]
+        log(f"vendor SBOM: {identity['format']} from {identity['file']}, "
+            f"{len(loaded['components'])} component(s)"
+            + (f", subject {identity['subject']}" if identity["subject"] else ""),
+            verbose)
+        documents.append(loaded)
+    return documents
+
+
+def identified_components(hits, standards, packages):
+    """Everything this analysis found, flattened for comparison."""
+    found = []
+    for hit in hits:
+        found.append({"name": hit["sig"]["name"], "version": hit["version"],
+                      "purl": hit["sig"]["purl"], "source": "signature"})
+    for std in standards or []:
+        found.append({"name": std["name"], "version": std["version"],
+                      "purl": std["purl"], "source": "embedded-standard"})
+    for package in packages or []:
+        found.append({"name": package["name"], "version": package["version"],
+                      "purl": package["purl"], "source": "package-database"})
+    return found
+
+
+def reconcile_vendor_sboms(documents, hits, standards, packages, verbose=False):
+    """Compare each vendor document against what the image actually showed.
+
+    A version the vendor declares that the binary contradicts is a finding, and
+    quite possibly the most useful one in the report. It is recorded as such
+    rather than resolved: this tool is not in a position to decide which of the
+    two is right, only to show that they differ.
+    """
+    report = []
+    for loaded in documents:
+        agreements, conflicts, vendor_only, _ours_only = vendor_sbom.compare(
+            identified_components(hits, standards, packages),
+            loaded["components"])
+        report.append({"document": loaded["document"],
+                       "components": loaded["components"],
+                       "agreements": agreements,
+                       "conflicts": conflicts,
+                       "vendor_only": vendor_only})
+        identity = loaded["document"]
+        log(f"vendor SBOM {identity['file']}: {len(agreements)} agree, "
+            f"{len(conflicts)} conflict, {len(vendor_only)} declared but not "
+            f"observed", verbose)
+        for conflict in conflicts:
+            log(f"  version conflict: {conflict['vendor']['name']} - vendor "
+                f"says {conflict['vendor_version']}, the image shows "
+                f"{conflict['our_version']}", True)
+    return report
+
+
 def scan_rootfs_files(rootfs, min_str_len=6, verbose=False):
     """Signature-match the root filesystem files a package database misses.
 
@@ -1412,7 +1478,8 @@ def packages_to_components(rootfs):
 
 def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_strings,
                container=None, opacity=None, payload=None, standards=None,
-               firmware_version=None, segments=None, rootfs=None, packages=None):
+               firmware_version=None, segments=None, rootfs=None, packages=None,
+               vendor=None):
     fname = os.path.basename(input_path)
     hashes = file_hashes(data)
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1746,6 +1813,79 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         })
         dep_refs.append(ref)
 
+    # Components the vendor declared. These are a different kind of claim from
+    # everything above: no offset, no matched string, no confidence from us -
+    # a supplier's assertion. Merging them without saying so would turn an
+    # evidence-based document into a mixture nobody can audit, so each one
+    # names the document it came from and carries no fabricated confidence.
+    for document_index, entry in enumerate(vendor or [], 1):
+        identity = entry["document"]
+        conflicting = {id(c["vendor"]) for c in entry["conflicts"]}
+        agreeing = {id(a["vendor"]) for a in entry["agreements"]}
+        citation = (f"declared in {identity['file']} ({identity['format']}"
+                    + (f", produced by {identity['produced_by']}"
+                       if identity["produced_by"] else "")
+                    + (f", {identity['timestamp']}" if identity["timestamp"]
+                       else "") + ")")
+        for i, component in enumerate(entry["components"], 1):
+            ref = f"vendor-{document_index}-{i}-{component['name']}"
+            properties = [
+                {"name": "fw2sbom:evidence_class", "value": "vendor-sbom"},
+                {"name": "fw2sbom:source_document", "value": identity["file"]},
+                {"name": "fw2sbom:source_format", "value": identity["format"]},
+            ]
+            if identity.get("identifier"):
+                properties.append({"name": "fw2sbom:source_identifier",
+                                   "value": identity["identifier"]})
+            if id(component) in conflicting:
+                conflict = next(c for c in entry["conflicts"]
+                                if c["vendor"] is component)
+                properties.append(
+                    {"name": "fw2sbom:vendor_conflict",
+                     "value": f"the vendor declares {conflict['vendor_version']}; "
+                              f"this image contains {conflict['our_version']}"})
+            elif id(component) in agreeing:
+                properties.append({"name": "fw2sbom:vendor_corroborated",
+                                   "value": "also observed in this image"})
+            else:
+                properties.append(
+                    {"name": "fw2sbom:vendor_unverified",
+                     "value": "declared by the vendor; not observed in this "
+                              "image, which neither confirms nor refutes it"})
+
+            component_entry = {
+                "type": component["type"],
+                "bom-ref": ref,
+                "name": component["name"],
+                "description": component.get("description")
+                               or f"Declared by the firmware vendor in "
+                                  f"{identity['file']}",
+                "evidence": {
+                    "identity": [{
+                        "field": "name",
+                        # No confidence of our own: we did not observe this.
+                        "confidence": 0.0,
+                        "methods": [{"technique": "other", "confidence": 0.0,
+                                     "value": citation}],
+                    }],
+                    "occurrences": [{"location": identity["file"]}],
+                },
+                "properties": properties,
+            }
+            if component.get("version"):
+                component_entry["version"] = component["version"]
+            if component.get("purl"):
+                component_entry["purl"] = component["purl"]
+            if component.get("cpe"):
+                component_entry["cpe"] = component["cpe"]
+            if component.get("supplier"):
+                component_entry["supplier"] = {"name": component["supplier"]}
+            if component.get("licenses"):
+                component_entry["licenses"] = [
+                    {"license": {"name": name}} for name in component["licenses"]]
+            components.append(component_entry)
+            dep_refs.append(ref)
+
     for index, segment in enumerate(opaque_segments(segments or []), 1):
         verdict = segment.get("opacity") or {}
         raw_length = segment["length"]
@@ -1876,6 +2016,21 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
                           "embedded standard-data parsing (VESA E-EDID, DDC/CI "
                           "MCCS), entropy/opacity analysis"},
                 {"name": "fw2sbom:offset_reference", "value": offset_space},
+            ] + [
+                {"name": "fw2sbom:vendor_sbom",
+                 "value": f"{e['document']['file']} ({e['document']['format']}): "
+                          f"{len(e['components'])} component(s), "
+                          f"{len(e['agreements'])} corroborated, "
+                          f"{len(e['conflicts'])} in conflict, "
+                          f"{len(e['vendor_only'])} not observed"}
+                for e in (vendor or [])
+            ] + [
+                {"name": "fw2sbom:vendor_version_conflict",
+                 "value": f"{c['vendor']['name']}: vendor declares "
+                          f"{c['vendor_version']}, image contains "
+                          f"{c['our_version']}"}
+                for e in (vendor or []) for c in e["conflicts"]
+            ] + [
                 {"name": "fw2sbom:signature_database_size",
                  "value": str(len(get_signatures()))},
                 {"name": "fw2sbom:signature_packs",
@@ -2020,6 +2175,11 @@ def main(argv=None):
                     help="minimum length for extracted strings (default: 6)")
     ap.add_argument("--dump-strings", metavar="FILE",
                     help="also write all extracted strings (offset<TAB>string) to FILE")
+    ap.add_argument("--vendor-sbom", metavar="FILE", action="append", default=[],
+                    help="merge an SBOM supplied by the firmware vendor "
+                         "(CycloneDX or SPDX JSON; repeatable). Its components "
+                         "are kept distinct from ours, and any version it "
+                         "declares that the image contradicts is reported.")
     ap.add_argument("--signatures", metavar="DIR", action="append", default=[],
                     help="load extra signature packs from DIR (repeatable; also "
                          "honours the FW2SBOM_SIGNATURES environment variable). "
@@ -2050,6 +2210,8 @@ def main(argv=None):
         die(str(e))
     log(f"signature database: {len(signatures)} signature(s) "
         f"from pack(s) {', '.join(SIGNATURE_PACKS)}", args.verbose)
+
+    vendor_documents = load_vendor_sboms(args.vendor_sbom, args.verbose)
 
     data = read_binary(args.input)
     log(f"read {len(data)} bytes from {args.input}", args.verbose)
@@ -2117,13 +2279,16 @@ def main(argv=None):
 
     # Components read out of the payload settle the opacity question, and a
     # package database is the most decisive evidence of all.
+    vendor = reconcile_vendor_sboms(vendor_documents, hits, standards,
+                                    packages, args.verbose)
     opacity = summarise_opacity(segments, opacity)
     opacity = reconcile_opacity(opacity, hits + packages, standards, args.verbose)
     bom = build_sbom(args.input, data, file_magic, arm_info, hits,
                      args.min_str_len, len(strings),
                      container=container, opacity=opacity, payload=payload,
                      standards=standards, firmware_version=args.firmware_version,
-                     segments=segments, rootfs=rootfs, packages=packages)
+                     segments=segments, rootfs=rootfs, packages=packages,
+                     vendor=vendor)
 
     stem = os.path.splitext(os.path.basename(args.input))[0]
     want_cdx = args.format in ("cyclonedx", "both")
@@ -2181,6 +2346,7 @@ def main(argv=None):
 
     total = len(hits) + len(standards) + len(packages) + (1 if rootfs and
                                                           rootfs.get("os_release") else 0)
+    declared = sum(len(e["components"]) for e in vendor)
     if evidence_path:
         context = build_evidence_context(
             os.path.basename(args.input), data, payload, arm_info, container,
@@ -2193,8 +2359,22 @@ def main(argv=None):
 
     written = ([f"CycloneDX 1.6 -> {cdx_path}"] if want_cdx else []) + \
               ([f"SPDX 2.3 -> {spdx_path}"] if want_spdx else [])
+    for entry in vendor:
+        identity = entry["document"]
+        print(f"[fw2sbom] vendor SBOM {identity['file']}: "
+              f"{len(entry['components'])} declared, "
+              f"{len(entry['agreements'])} corroborated by this image, "
+              f"{len(entry['conflicts'])} in conflict, "
+              f"{len(entry['vendor_only'])} not observed", file=sys.stderr)
+        for conflict in entry["conflicts"]:
+            print(f"[fw2sbom]   CONFLICT {conflict['vendor']['name']}: vendor "
+                  f"declares {conflict['vendor_version']}, this image contains "
+                  f"{conflict['our_version']}", file=sys.stderr)
+
     unenumerable = opaque_segments(segments)
     summary = f"{total} component(s) identified"
+    if declared:
+        summary += f", {declared} declared by the vendor"
     if unenumerable:
         # Saying "0 components" without this reads as "there is nothing in
         # this firmware", which is the opposite of what an opaque region means.

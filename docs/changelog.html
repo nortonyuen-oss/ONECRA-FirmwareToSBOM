@@ -154,9 +154,40 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.10.0</span>
+        <span class="ver">1.11.0</span>
         <span class="date">2026-09-14</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>匯入廠商 SBOM,並且比對</h2>
+        <p>
+          靜態分析有硬上限。映像加密了,元件就在密碼後面,再聰明的工具也讀不出來 ——
+          唯一的出路是向供應商索取他們自己的 SBOM,而 CRA 下製造商本來就有權這樣要求。
+        </p>
+        <p>
+          <code>--vendor-sbom</code> 接受 CycloneDX 或 SPDX,可以給多份。但合併不是
+          把兩份清單接起來,有兩件事必須留住:
+        </p>
+        <ul>
+          <li><strong>來源</strong> —— 我們從二進位檔讀出來的元件,與廠商聲稱的元件,是兩種不同性質的主張。前者有 offset、命中字串與信心值;後者是供應商的一句話。每個合併進來的元件都標明出自哪一份文件,而且**不會被安上我們沒有的信心值**。</li>
+          <li><strong>分歧</strong> —— 廠商說 OpenSSL 3.0.8,二進位檔裡是 3.0.2,這是一項發現,而且可能是整份報告裡最有價值的一項。悄悄選一邊、或折衷,就把它毀掉了。兩者都保留,衝突另外記錄。</li>
+        </ul>
+        <p>
+          每個廠商元件會標成三種之一:<strong>已由映像佐證</strong>、<strong>與映像衝突</strong>、
+          或<strong>未觀察到</strong>(例如閉源模組 —— 這既不證實也不否定它)。
+        </p>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,230,514 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">fa1a571814f800ee4cc0cc705acd617509f986fef9eaee7d0e7d94b2d353c1b6</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.10.0</span>
+        <span class="date">2026-09-14</span>
+        
       </div>
       <div>
         <h2>逐區段判定加密,不再讓空白區拉低整體判斷</h2>
