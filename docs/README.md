@@ -88,9 +88,7 @@ zip,線上那個下載按鈕會立刻 404 —— 它目前服務的就是那份�
 ```bash
 git rm -r --cached docs/downloads
 rm -rf docs/downloads
-printf '
-docs/downloads/
-' >> .gitignore
+echo "docs/downloads/" >> .gitignore
 ```
 
 然後把 `index.html` 按鈕的 `href` 直接寫成 release 的 URL
