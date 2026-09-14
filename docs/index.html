@@ -168,6 +168,24 @@
   .dl dd { margin: 0; font-family: var(--mono); font-size: 13px; color: var(--on-dark); }
   .dl .note { font-size: 13px; color: var(--on-dark-2); margin: 0; line-height: 1.55; }
 
+  /* The counter only appears once it has a real number to show. A download
+     page that displays "0" because a request failed is worse than one that
+     shows nothing. */
+  .dl .count { display: none; font-size: 13px; color: var(--on-dark-2); margin: 0; }
+  .dl .count.on { display: block; }
+  .dl .count b {
+    font-family: var(--mono); font-weight: 500; font-size: 15px;
+    color: var(--teal); font-variant-numeric: tabular-nums;
+  }
+
+  .masthead .links { margin-left: auto; display: flex; gap: 20px; align-items: baseline; }
+  .masthead .links a {
+    font-size: 13.5px; color: var(--on-dark-2); text-decoration: none;
+    border-bottom: 1px solid transparent;
+  }
+  .masthead .links a:hover { color: var(--on-dark); border-bottom-color: var(--on-dark-2); }
+  .masthead .links .ver { font-family: var(--mono); font-size: 13px; color: var(--on-dark-2); }
+
   .verify {
     background: transparent; border: 1px solid var(--on-dark-rule);
     padding: 22px; display: flex; flex-direction: column; gap: 12px;
@@ -289,7 +307,10 @@
     <img src="onecra_logo.png" alt="Onecra">
     <div class="sep"></div>
     <div class="product">fw2sbom</div>
-    <div class="ver">v1.8.0 · 2026-09-14</div>
+    <div class="links">
+      <a href="changelog.html">版本說明</a>
+      <span class="ver">v1.8.0 · 2026-09-14</span>
+    </div>
   </div>
 </header>
 
@@ -305,7 +326,7 @@
 
     <div class="getit">
       <div class="dl">
-        <a class="dl-btn" href="downloads/fw2sbom-portable-1.8.0.zip">
+        <a class="dl-btn" id="dl" href="downloads/fw2sbom-portable-1.8.0.zip">
           下載 Windows 版
           <span class="sub">fw2sbom-portable-1.8.0.zip · 10.7 MB</span>
         </a>
@@ -315,6 +336,7 @@
           <dt>內容</dt><dd>53 個檔案</dd>
           <dt>簽章</dt><dd>無 — 見右</dd>
         </dl>
+        <p class="count" id="count"></p>
         <p class="note">
           解壓後雙擊 <code class="inline">Start-fw2sbom.bat</code>,瀏覽器會自動開啟
           <code class="inline">127.0.0.1:8765</code>。macOS / Linux 請用
@@ -529,6 +551,7 @@ shasum -a 256 fw2sbom-portable-1.8.0.zip</pre>
   <div class="wrap">
     <strong>Onecra</strong>
     <span>fw2sbom v1.8.0 — 韌體 SBOM 產生器</span>
+    <a href="changelog.html" style="color:var(--on-dark);text-decoration:none;border-bottom:1px solid var(--on-dark-rule)">版本說明</a>
     <span class="right">SHA-256 5efad0a0…6d4b6eed</span>
     <span style="flex-basis:100%;font-size:12.5px;opacity:.75">
       © 2026 Onecra. 專有軟體,保留一切權利。套件內含 python.org 官方發佈的
@@ -536,3 +559,60 @@ shasum -a 256 fw2sbom-portable-1.8.0.zip</pre>
     </span>
   </div>
 </footer>
+
+<script>
+// Download counter.
+//
+// GitHub Pages serves static files and keeps no access log, so there is
+// nothing here that can count a download. The one real number available is
+// GitHub's own download_count on release assets, which its servers maintain.
+//
+// That only means something if the button actually serves the release asset,
+// so this does both together or neither: when a release publishes an asset
+// with exactly the filename this page advertises, the button is repointed at
+// it and the count is shown. Otherwise the button keeps serving the copy in
+// the repository and no number is displayed. A count that does not belong to
+// the file being downloaded would be worse than no count at all.
+//
+// Everything here is progressive: with no network, a rate-limited API or no
+// releases at all, the page works exactly as it does without JavaScript.
+(function () {
+  var REPO = "nortonyuen-oss/ONECRA-FirmwareToSBOM";
+  var ASSET = "fw2sbom-portable-1.8.0.zip";   // must match the hash above
+  var PREFIX = "fw2sbom-portable-";
+
+  var button = document.getElementById("dl");
+  var counter = document.getElementById("count");
+  if (!button || !counter || !window.fetch) { return; }
+
+  fetch("https://api.github.com/repos/" + REPO + "/releases?per_page=100", {
+    headers: { "Accept": "application/vnd.github+json" }
+  }).then(function (response) {
+    if (!response.ok) { throw new Error(response.status); }
+    return response.json();
+  }).then(function (releases) {
+    if (!Array.isArray(releases)) { throw new Error("unexpected response"); }
+
+    var total = 0;
+    var match = null;
+    releases.forEach(function (release) {
+      (release.assets || []).forEach(function (asset) {
+        if (asset.name && asset.name.indexOf(PREFIX) === 0) {
+          total += asset.download_count || 0;
+          if (asset.name === ASSET) { match = asset; }
+        }
+      });
+    });
+
+    // No asset for the version this page describes: leave the page alone.
+    if (!match) { return; }
+
+    button.href = match.browser_download_url;
+    counter.innerHTML = "已下載 <b>" + total.toLocaleString("en") +
+      "</b> 次(所有版本累計,由 GitHub 統計)";
+    counter.className = "count on";
+  }).catch(function () {
+    // Rate limited, offline, or the repository is private. Say nothing.
+  });
+})();
+</script>

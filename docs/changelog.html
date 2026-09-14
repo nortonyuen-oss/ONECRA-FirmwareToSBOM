@@ -1,0 +1,378 @@
+<title>fw2sbom 版本說明</title>
+<meta name="description" content="fw2sbom 每一版的變更、套件雜湊與對真實韌體的影響。">
+<link rel="icon" href="onecra_icon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&family=Noto+Sans+TC:wght@400;500;700&display=swap">
+<style>
+  :root {
+    --navy: #010D32;
+    --navy-2: #07104C;
+    --crimson: #E30040;
+    --teal: #009B93;
+    --teal-soft: #E0F2F1;
+    --paper: #F5F6F8;
+    --surface: #FFFFFF;
+    --surface-2: #ECEFF4;
+    --ink: #101528;
+    --ink-2: #47506B;
+    --ink-3: #78829C;
+    --rule: #D6DAE2;
+    --on-dark: #E9ECF4;
+    --on-dark-2: #9AA4C4;
+    --on-dark-rule: #26305F;
+    --display: "Archivo", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+    --sans: "IBM Plex Sans", "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #0A0F22; --surface: #111832; --surface-2: #19203F;
+      --ink: #E7EAF3; --ink-2: #AEB6CE; --ink-3: #7D87A4; --rule: #242C4C;
+      --teal-soft: #0C2E2C; --crimson: #FF3D68;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #0A0F22; --surface: #111832; --surface-2: #19203F;
+    --ink: #E7EAF3; --ink-2: #AEB6CE; --ink-3: #7D87A4; --rule: #242C4C;
+    --teal-soft: #0C2E2C; --crimson: #FF3D68;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--paper); color: var(--ink);
+    font-family: var(--sans); font-size: 16px; line-height: 1.7;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: inherit; }
+  :focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
+  .wrap { max-width: 860px; margin: 0 auto; padding: 0 28px; }
+
+  .masthead { background: var(--navy); border-bottom: 1px solid var(--on-dark-rule); }
+  .masthead .wrap { display: flex; align-items: center; gap: 18px; padding: 18px 28px; }
+  .masthead img { height: 26px; width: auto; display: block; }
+  .masthead .sep { width: 1px; height: 22px; background: var(--on-dark-rule); }
+  .masthead .product { font-family: var(--mono); font-size: 14px; color: var(--on-dark); }
+  .masthead .back {
+    margin-left: auto; font-size: 13.5px; color: var(--on-dark-2);
+    text-decoration: none; border-bottom: 1px solid transparent;
+  }
+  .masthead .back:hover { color: var(--on-dark); border-bottom-color: var(--on-dark-2); }
+
+  header.intro { padding: 52px 0 8px; }
+  h1 {
+    font-family: var(--display); font-weight: 700; font-size: clamp(28px, 4vw, 38px);
+    letter-spacing: -.02em; margin: 0 0 12px; text-wrap: balance;
+  }
+  .lede { color: var(--ink-2); max-width: 60ch; margin: 0 0 10px; text-wrap: pretty; }
+  .lede a { color: var(--ink); text-underline-offset: 3px; }
+
+  /* Each release is a row in a record, not a card: the spine carries the eye
+     down the sequence and the version sits in the margin like a date. */
+  .releases { padding: 26px 0 80px; }
+  .rel {
+    display: grid; grid-template-columns: 128px 1fr; gap: 0 28px;
+    padding: 30px 0; border-top: 1px solid var(--rule);
+  }
+  .rel:first-child { border-top: 2px solid var(--navy); }
+  @media (max-width: 700px) { .rel { grid-template-columns: 1fr; gap: 10px; } }
+
+  .rel .stamp { position: sticky; top: 20px; align-self: start; }
+  .rel .ver {
+    font-family: var(--display); font-weight: 700; font-size: 20px;
+    letter-spacing: -.01em; display: block;
+  }
+  .rel .date { font-family: var(--mono); font-size: 12.5px; color: var(--ink-3); }
+  .tag {
+    display: inline-block; margin-top: 8px; font-size: 11.5px; font-weight: 600;
+    letter-spacing: .04em; padding: 2px 8px; line-height: 1.7;
+    background: var(--teal-soft); color: var(--teal);
+  }
+  .tag.current { background: var(--crimson); color: #fff; }
+
+  .rel h2 {
+    font-family: var(--display); font-size: 18px; font-weight: 600;
+    margin: 0 0 10px; letter-spacing: -.005em; text-wrap: balance;
+  }
+  .rel p { margin: 0 0 12px; color: var(--ink-2); font-size: 15px; text-wrap: pretty; }
+  .rel ul { margin: 0 0 12px; padding-left: 20px; color: var(--ink-2); font-size: 15px; }
+  .rel li { margin-bottom: 6px; }
+  .rel li::marker { color: var(--ink-3); }
+  .rel strong { color: var(--ink); font-weight: 600; }
+  code {
+    font-family: var(--mono); font-size: .88em; background: var(--surface-2);
+    padding: 1px 5px; color: var(--ink);
+  }
+
+  .fixed { border-left: 2px solid var(--crimson); padding-left: 14px; margin: 14px 0; }
+  .fixed .h {
+    font-size: 11.5px; letter-spacing: .08em; text-transform: uppercase;
+    color: var(--crimson); font-weight: 600; margin-bottom: 4px;
+  }
+  .fixed p { margin: 0 0 8px; font-size: 14.5px; }
+  .fixed p:last-child { margin-bottom: 0; }
+
+  .pkg {
+    margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--rule);
+    font-family: var(--mono); font-size: 12px; color: var(--ink-3);
+    display: flex; flex-wrap: wrap; gap: 4px 18px;
+  }
+  .pkg .k { color: var(--ink-3); }
+  .pkg .v { color: var(--ink-2); word-break: break-all; }
+
+  .tw { overflow-x: auto; margin: 12px 0; border: 1px solid var(--rule); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--rule); }
+  th { font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); background: var(--surface-2); font-weight: 600; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td.n { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .up { color: var(--teal); font-weight: 600; }
+
+  footer { background: var(--navy); color: var(--on-dark-2); padding: 30px 0; font-size: 13.5px; }
+  footer .wrap { display: flex; flex-wrap: wrap; gap: 8px 24px; }
+  footer strong { color: var(--on-dark); font-weight: 500; }
+</style>
+
+<header class="masthead">
+  <div class="wrap">
+    <img src="onecra_logo.png" alt="Onecra">
+    <div class="sep"></div>
+    <div class="product">fw2sbom</div>
+    <a class="back" href="./">← 回下載頁</a>
+  </div>
+</header>
+
+<div class="wrap">
+  <header class="intro">
+    <h1>版本說明</h1>
+    <p class="lede">
+      每一版的變更、套件雜湊,以及對真實韌體的實際影響。完整的建置紀錄在倉庫的
+      <a href="https://github.com/nortonyuen-oss/ONECRA-FirmwareToSBOM/blob/master/RELEASE.md">RELEASE.md</a>。
+    </p>
+  </header>
+
+  <div class="releases">
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.8.0</span>
+        <span class="date">2026-09-14</span>
+        <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>讀取韌體裡的二進位檔</h2>
+        <p>
+          套件資料庫說明了安裝了什麼,但沒說這個映像是什麼架構、誰真的連結了誰,
+          而在完全沒有套件資料庫的裝置上,它什麼也沒說。新的 ELF reader 回答這三件事。
+        </p>
+        <div class="tw"><table>
+          <thead><tr><th>同一台 GL.iNet router</th><th>1.7.0</th><th>1.8.0</th></tr></thead>
+          <tbody>
+            <tr><td>指令集</td><td class="n">未識別</td><td class="n up">MIPS 32-bit LE</td></tr>
+            <tr><td>帶宣告授權的元件</td><td class="n">0</td><td class="n up">262</td></tr>
+            <tr><td>帶 CPE 的元件</td><td class="n">0</td><td class="n up">54</td></tr>
+            <tr><td>套件間依賴邊</td><td class="n">0</td><td class="n up">1,268</td></tr>
+          </tbody>
+        </table></div>
+        <ul>
+          <li><strong>指令集識別</strong> —— Linux 映像沒有向量表可以辨認,之前一律回報「未識別」;每個 ELF header 都寫明了。</li>
+          <li><strong>真正的依賴圖</strong> —— 兩個獨立來源:套件管理員宣告的 <code>Depends</code>(意圖),與 linker 寫進每個 binary 的 <code>DT_NEEDED</code>(實際連結的證據)。兩者都沒有的套件就沒有出邊,不會替它編一條。</li>
+          <li><strong>宣告的授權</strong> —— 359 個套件中 262 個帶 SPDX 授權識別碼,進入 CycloneDX 的 <code>licenses</code> 欄位。</li>
+          <li><strong>廠商宣告的 CPE</strong> —— OpenWrt 自己在套件記錄裡標註了 54 個 CPE,正好是與 CVE 最相關的那批。fw2sbom <em>讀取</em>這個宣告並標記來源 —— 這與猜一個 CPE 出來是兩回事。</li>
+          <li><strong>Kernel module 中繼資料</strong> —— 192 個模組的宣告版本與授權。</li>
+        </ul>
+        <p>
+          效能:讀 467 個 binary 原本要 12.0 秒,幾乎全部花在重複解壓同一批 SquashFS
+          fragment block(小檔案共用它們)。加了有上限的快取之後是 <strong>0.68 秒</strong>。
+        </p>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,221,328 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">5efad0a0e08992844c79e8f75b19b30b290f77e574f96baabac3ae4e6d4b6eed</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.7.1</span>
+        <span class="date">2026-09-11</span>
+      </div>
+      <div>
+        <h2>授權與第三方歸屬</h2>
+        <p>分析行為完全沒變,只是加了授權檔並讓它們隨套件一起交付。</p>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            套件裡本來只有一份授權檔,而且是 Python 的。客戶解壓後看到
+            <code>LICENSE.txt</code>(PSF)擺在我們的原始碼旁邊,沒有任何東西說明哪份
+            條款管哪些檔案 —— 這種歧義出現在一個做合規的產品身上特別說不過去。
+          </p>
+          <p>
+            兩份授權現在都會交付,我們那份刻意改名為 <code>LICENSE-fw2sbom.txt</code>,
+            <strong>不能蓋過直譯器自己那份</strong>。覆蓋掉你再散布的軟體的授權檔,
+            正是這個工具在別人韌體裡要抓的錯誤。打包流程也加了檢查:
+            <code>LICENSE.txt</code> 不見了就直接中止。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,212,984 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">0eff7d0d310e2d256b7209673acc1d4dffd9f6eab16df3e03b49a42879b6106b</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.7.0</span>
+        <span class="date">2026-09-11</span>
+      </div>
+      <div>
+        <h2>Linux 裝置韌體:從 0 個元件到 366 個</h2>
+        <p>
+          一台真實的 GL.iNet router 之前產生零個元件。判定是對的
+          ——「compressed」—— 而 SBOM 是空的,因為 Linux 裝置映像裡值得命名的東西
+          全都在壓縮區段內,掃描器只看到它的外殼。
+        </p>
+        <ul>
+          <li><strong>容器走訪</strong> —— U-Boot uImage 檔頭、任意位置的壓縮區段、SquashFS superblock,每個區段獨立分析。解壓支援 gzip / xz / lzma / bzip2。lzo / lz4 / zstd 沒有標準函式庫實作,會<strong>明確報告「未展開」並指名演算法</strong>,不會靜默跳過。</li>
+          <li><strong>SquashFS 4.0 reader</strong> —— 唯讀,純標準函式庫。真實 12 MB rootfs 走訪 3,274 個檔案用 0.02 秒。</li>
+          <li><strong>套件資料庫</strong>(opkg / dpkg / apk)—— Linux 韌體 SBOM 品質的主要來源:不是從二進位猜版本,而是套件管理員自己的安裝紀錄。359 個套件,全部帶精確版本。</li>
+        </ul>
+        <p>
+          找到的包括 OpenWrt 22.03.4、Linux 5.10.176、BusyBox 1.35.0、OpenSSL 1.1.1t、
+          dropbear 2022.82、curl 7.88.1、zlib 1.2.11。
+        </p>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            <code>gcc-arm-none-eabi</code> 這個簽章會在<strong>任何</strong> GCC 編譯的
+            映像上命中,包括 MIPS —— 它最高權重的比對樣式是通用的 GCC 版本字串,
+            與簽章的名字完全不符。在稽核文件裡寫「這台 MIPS router 用 arm-none-eabi
+            工具鏈」是一句錯的陳述。通用的那一半已拆成獨立的 <code>gcc</code> 簽章。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,209,894 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">736095fff98937ad8571b923d72e9b89759ef4d5a192c6f50fca5348449d8543</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.6.0</span>
+        <span class="date">2026-09-11</span>
+      </div>
+      <div>
+        <h2>SPDX 2.3 輸出,以及不再猜測版本</h2>
+        <ul>
+          <li><strong>SPDX 2.3 JSON</strong> —— 與 CycloneDX 由<strong>同一次分析</strong>產生,所以兩份文件不可能互相矛盾。兩者都通過各自規格的官方 schema 驗證。</li>
+          <li><strong><code>--firmware-version</code></strong> —— 產品自己的韌體版本寫入 SBOM 根 component。只有客戶知道這個值,而 CRA 場景需要跨版本追蹤同一個產品。</li>
+          <li>
+            <strong>版本策略</strong> —— 有些元件在剝除符號的映像裡<strong>結構上</strong>就沒有版本字串
+            (nrfx 與 nRF5 DFU 只留下 API 符號名,已對真實裝置映像確認)。為這些元件發明一個
+            比對樣式,正是這個工具拒絕做的猜測。改成:沒有版本樣式的簽章必須附上
+            <code>version_note</code> 說明為什麼不可能有,以及該去哪裡取得版本 —— 這個要求
+            假樣式滿足不了,讀的人也查得到。
+          </li>
+        </ul>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,196,490 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">a1e601f74fa8b6aec5e6c86c251062e2f902ad85f943d5ecc6a7486438354177</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.5.0</span>
+        <span class="date">2026-09-11</span>
+      </div>
+      <div>
+        <h2>測試安全網與簽章外部化</h2>
+        <p>
+          分析流程是一疊啟發式判斷,而啟發式的失敗是無聲的:一個不再命中的常數
+          只會產生比較小的 SBOM,不會產生錯誤,沒有人會發現,直到客戶的報告是錯的。
+        </p>
+        <ul>
+          <li><strong>56 個 regression 測試</strong>,涵蓋 9 份即時合成的韌體映像(固定 seed,byte-identical 可重現)。</li>
+          <li><strong>CycloneDX 1.6 schema 驗證</strong> —— 這個輸出<strong>之前從未驗證過</strong>。</li>
+          <li><strong>CI</strong> —— Ubuntu 與 Windows 雙平台;另一個 job 把套件建置兩次並比對雜湊,讓「可重現」由聲稱變成每次推送都驗證的事實。</li>
+          <li><strong>簽章外部化</strong> —— 移到 <code>signatures/*.json</code>,載入時驗證。<strong>完全找不到簽章包時工具直接結束</strong>,不會產生一份空的 SBOM:「資料庫沒送到」不可以長得像「這份韌體沒有元件」。</li>
+          <li><strong>UTF-16LE 字串萃取</strong> —— 之前只讀 ASCII。</li>
+        </ul>
+        <div class="fixed">
+          <div class="h">新測試揭發的兩個錯誤</div>
+          <p>
+            <strong>判定與元件清單自相矛盾。</strong>opacity 判定在簽章比對之前執行,
+            所以它可以一邊印「無法識別元件」,一邊列出 8 個帶精確版本的元件。
+            現在證據贏過統計。
+          </p>
+          <p>
+            <strong>UTF-16 字串會偷走前一個 ASCII 字串的最後一個字元</strong>
+            (NUL 結尾讓它看起來像 UTF-16 單元)。證據會逐字引用命中字串進稽核文件,
+            所以這不能留。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,191,000 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">f5a99f49a4f632e4994e490091e24accdb1048bea62855fbfb2b1387a628fe5e</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.4.1</span>
+        <span class="date">2026-09-11</span>
+      </div>
+      <div>
+        <h2>可重現的打包流程</h2>
+        <p>
+          套件現在由腳本產生,而且是<strong>可重現</strong>的:entry 排序、timestamp
+          與壓縮等級全部固定,所以同一個原始碼版本重新打包會得到位元組完全相同的檔案。
+          下載頁上那個雜湊因此不只是「我們那次建置的紀錄」,任何人都能自己算出來。
+        </p>
+        <p>
+          打包腳本會對照釘住的雜湊驗證官方 CPython,對不上就刪掉下載檔並中止 ——
+          一個產 SBOM 的工具沒有立場用未經驗證的位元組建置自己。
+        </p>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,185,077 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">32e43f46ae1e2857d207062b6d76482e3bc69c6ab198dceab9cc763145cbbe34</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.4.0</span>
+        <span class="date">2026-09-11</span>
+      </div>
+      <div>
+        <h2>起點</h2>
+        <p>第一個進入版本控制的版本。此前的開發沒有留下紀錄。</p>
+        <ul>
+          <li>CycloneDX 1.6 SBOM,每個 component 帶證據與 confidence</li>
+          <li>7 張工作表的 Excel 證據報告,同時記錄<strong>負面證據</strong> —— 掃描過但未命中的每一個簽章</li>
+          <li>通用的封包化 / ISP-dump 容器偵測與去框(不依賴任何廠商 magic)</li>
+          <li>Opacity 判定:加密映像會產生一個標記為 opaque 的元件,而不是空的 SBOM</li>
+          <li>架構識別:ARM Cortex-M 與 MCS-51 / 8051</li>
+          <li>內嵌標準資料:VESA E-EDID、DDC/CI MCCS</li>
+          <li>本機拖拉式網頁介面</li>
+        </ul>
+        <div class="pkg">
+          <span><span class="k">套件</span> <span class="v">早於建置紀錄,無雜湊留存</span></span>
+        </div>
+      </div>
+    </article>
+
+  </div>
+</div>
+
+<footer>
+  <div class="wrap">
+    <strong>Onecra</strong>
+    <span>fw2sbom — 韌體 SBOM 產生器</span>
+    <span>© 2026 Onecra. 專有軟體,保留一切權利。</span>
+  </div>
+</footer>
