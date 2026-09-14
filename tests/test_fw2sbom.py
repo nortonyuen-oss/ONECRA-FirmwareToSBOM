@@ -1279,12 +1279,58 @@ class ServiceTest(unittest.TestCase):
         self.assertIsNone(service._store_get("old"))
         self.assertNotIn("old", service._SBOM_STORE)
 
+    def test_an_unreadable_region_is_in_the_document_not_on_the_list(self):
+        """The distinction the whole tool rests on: "we could not read this" is
+        a finding worth recording, but it is not a component we identified."""
+        result = service.analyze_bytes("opaque_encrypted.bin",
+                                       fixture("opaque_encrypted.bin"))
+        recorded = json.loads(result["sbom_json"])["components"]
+        self.assertEqual(result["components"], [])
+        self.assertTrue(any(p["name"] == "fw2sbom:opaque"
+                            for c in recorded
+                            for p in c.get("properties", [])), recorded)
+
     def test_opaque_image_still_returns_a_usable_result(self):
         result = service.analyze_bytes("opaque_encrypted.bin",
                                        fixture("opaque_encrypted.bin"))
         self.assertTrue(result["opacity"]["opaque"])
         self.assertEqual(result["components"], [])
         self.assertGreater(len(json.loads(result["sbom_json"])["components"]), 0)
+
+    def test_the_screen_list_matches_the_document(self):
+        """A customer reads the list in the browser and hands the download to
+        an auditor. If the two disagree there is no way to tell which is wrong.
+
+        The screen list used to be assembled from the signature hits, the
+        embedded standards and the package database only, so every source added
+        after that - vendor SBOMs, os-release files, Espressif app descriptors -
+        appeared in the download and not on screen.
+        """
+        for name in ("esp32_flash.bin", "esp32_app.bin", "router_uimage.bin",
+                     "cortexm_rtos.bin", "mcs51_display.bin"):
+            with self.subTest(fixture=name):
+                result = service.analyze_bytes(name, fixture(name))
+                bom = json.loads(result["sbom_json"])
+                identified = [
+                    c for c in bom["components"]
+                    if not any(p["name"] == "fw2sbom:opaque"
+                               for p in c.get("properties", []))]
+                self.assertEqual(
+                    [(row["name"], row["version"])
+                     for row in result["components"]],
+                    [(c["name"], c.get("version")) for c in identified])
+
+    def test_every_component_says_how_it_was_found(self):
+        """evidence_class is what separates "we read this out of a package
+        database" from "a string matched a regex"."""
+        result = service.analyze_bytes("esp32_flash.bin",
+                                       fixture("esp32_flash.bin"))
+        classes = {row["evidence_class"] for row in result["components"]}
+        self.assertEqual(classes, {"signature", "esp-idf-app-descriptor"})
+        for row in result["components"]:
+            self.assertIsNotNone(row["confidence"])
+            self.assertIn(row["confidence_level"], ("high", "medium", "low"))
+
 
 
 # --------------------------------------------------------------------------- #
@@ -1536,6 +1582,24 @@ class EspressifTest(unittest.TestCase):
         self.assertEqual(properties["fw2sbom:architecture"], "Xtensa LX6 (ESP32)")
         self.assertEqual(properties["fw2sbom:espressif_application_elf_sha256"],
                          bytes(range(32)).hex())
+
+    def test_a_vendor_claim_about_esp_idf_is_compared_not_ignored(self):
+        """A vendor SBOM naming a different IDF version than the image declares
+        is exactly the finding this feature exists to surface. The comparison
+        used to look only at signature hits, standards and packages, so an
+        Espressif image agreed with every vendor document by default."""
+        image = esp32.parse_image(fixture("esp32_app.bin"))
+        ours = core.espressif_components([{"espressif": image}])
+        flattened = core.identified_components([], [], [], ours)
+        self.assertIn("esp-idf", [c["name"] for c in flattened])
+
+        vendor = [{"name": "esp-idf", "version": "v5.1.1",
+                   "purl": "pkg:github/espressif/esp-idf@v5.1.1",
+                   "supplier": None, "licenses": [], "bom_ref": "v1"}]
+        _agree, conflicts, _vendor_only, _ours_only = vendor_sbom.compare(
+            flattened, vendor)
+        self.assertEqual([c["vendor"]["name"] for c in conflicts], ["esp-idf"])
+        self.assertEqual(conflicts[0]["our_version"], "v5.1.2")
 
     def test_the_same_components_appear_in_the_spdx_rendering(self):
         """One analysis, two renderings: a customer choosing SPDX must not get

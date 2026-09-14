@@ -401,6 +401,40 @@ def parse_multipart(body, boundary):
     return fields
 
 
+def summarise(bom):
+    """The component list the browser shows, read out of the document itself.
+
+    It used to be assembled separately, from the signature hits, the embedded
+    standards and the package database - which meant every later source of
+    components (a vendor SBOM, an os-release file, an Espressif app descriptor)
+    was silently missing from the screen while being present in the download.
+    The list a customer reads first must not be shorter than the document they
+    hand to an auditor, and the only way to guarantee that is to derive one
+    from the other.
+
+    The one deliberate difference: a document also records the regions we could
+    not read, as components carrying `fw2sbom:opaque`. Those belong in an SBOM -
+    "we could not enumerate this" is a finding - but listing them on screen
+    beside the things we did identify would read as if we had identified them.
+    """
+    rows = []
+    for component in bom.get("components", []):
+        properties = {p["name"]: p["value"]
+                      for p in component.get("properties", [])}
+        if properties.get("fw2sbom:opaque") == "true":
+            continue
+        confidence = properties.get("fw2sbom:confidence")
+        rows.append({
+            "name": component["name"],
+            "version": component.get("version"),
+            "confidence": float(confidence) if confidence else None,
+            "confidence_level": properties.get("fw2sbom:confidence_level"),
+            "evidence_class": properties.get("fw2sbom:evidence_class",
+                                             "signature"),
+        })
+    return rows
+
+
 def analyze_bytes(filename, data):
     """Run the fw2sbom pipeline in-process on in-memory bytes."""
     delivered = data
@@ -438,25 +472,7 @@ def analyze_bytes(filename, data):
         hits, standards, sbom_filename)
     evidence = io.BytesIO()
     evidence_report.build_workbook(context, bom).save(evidence)
-    summary = [{
-        "name": h["sig"]["name"],
-        "version": h["version"] or None,
-        "confidence": h["confidence"],
-        "confidence_level": core.confidence_level(h["confidence"]),
-        "evidence_class": "signature",
-    } for h in hits] + [{
-        "name": s["name"],
-        "version": s["version"] or None,
-        "confidence": s["confidence"],
-        "confidence_level": core.confidence_level(s["confidence"]),
-        "evidence_class": "embedded-standard-data",
-    } for s in standards] + [{
-        "name": p["name"],
-        "version": p["version"],
-        "confidence": p["confidence"],
-        "confidence_level": core.confidence_level(p["confidence"]),
-        "evidence_class": "package-database",
-    } for p in packages]
+    summary = summarise(bom)
     return {
         "sbom_json": json.dumps(bom, indent=2),
         "sbom_filename": sbom_filename,

@@ -51,7 +51,7 @@ import spdx_report
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.13.0"
+TOOL_VERSION = "1.13.1"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1317,9 +1317,12 @@ def load_vendor_sboms(paths, verbose=False):
     return documents
 
 
-def identified_components(hits, standards, packages):
+def identified_components(hits, standards, packages, espressif=None):
     """Everything this analysis found, flattened for comparison."""
     found = []
+    for item in espressif or []:
+        found.append({"name": item["name"], "version": item["version"],
+                      "purl": item["purl"], "source": "app-descriptor"})
     for hit in hits:
         found.append({"name": hit["sig"]["name"], "version": hit["version"],
                       "purl": hit["sig"]["purl"], "source": "signature"})
@@ -1332,7 +1335,8 @@ def identified_components(hits, standards, packages):
     return found
 
 
-def reconcile_vendor_sboms(documents, hits, standards, packages, verbose=False):
+def reconcile_vendor_sboms(documents, hits, standards, packages,
+                           verbose=False, espressif=None):
     """Compare each vendor document against what the image actually showed.
 
     A version the vendor declares that the binary contradicts is a finding, and
@@ -1343,7 +1347,7 @@ def reconcile_vendor_sboms(documents, hits, standards, packages, verbose=False):
     report = []
     for loaded in documents:
         agreements, conflicts, vendor_only, _ours_only = vendor_sbom.compare(
-            identified_components(hits, standards, packages),
+            identified_components(hits, standards, packages, espressif),
             loaded["components"])
         report.append({"document": loaded["document"],
                        "components": loaded["components"],
@@ -1759,6 +1763,7 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             "properties": [
                 {"name": "fw2sbom:confidence", "value": str(conf)},
                 {"name": "fw2sbom:confidence_level", "value": confidence_level(conf)},
+                {"name": "fw2sbom:evidence_class", "value": "signature"},
                 {"name": "fw2sbom:matched_patterns", "value": str(len(hit["evidence"]))},
             ],
         }
@@ -2457,7 +2462,8 @@ def main(argv=None):
     # Components read out of the payload settle the opacity question, and a
     # package database is the most decisive evidence of all.
     vendor = reconcile_vendor_sboms(vendor_documents, hits, standards,
-                                    packages, args.verbose)
+                                    packages, args.verbose,
+                                    espressif_components(segments))
     opacity = summarise_opacity(segments, opacity)
     opacity = reconcile_opacity(opacity, hits + packages, standards, args.verbose)
     bom = build_sbom(args.input, delivered, file_magic, arm_info, hits,
