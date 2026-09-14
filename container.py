@@ -40,6 +40,7 @@ import struct
 import zlib
 
 import elf
+import esp32
 import squashfs
 
 # A decompressed region is capped so a crafted image cannot exhaust memory.
@@ -130,6 +131,68 @@ def _segment(kind, offset, length, label, content=None, **extra):
     return seg
 
 
+def _espressif_segments(data, detected, say):
+    """Turn an Espressif image or flash layout into segments.
+
+    An application image is header plus segments, each with its own load
+    address. A full flash image is a partition table naming several of those
+    alongside data areas; the partitions are the segmentation, because that is
+    what the device itself uses.
+    """
+    segments = []
+    image = detected["image"]
+    core = f" ({detected['core']})" if detected["core"] else ""
+    say(f"container: Espressif {detected['kind']} image, {detected['chip']}"
+        f"{core}, entry 0x{image['entry_point']:08x}")
+
+    application = image.get("app")
+    if application and application.get("idf_version"):
+        say(f"container:   ESP-IDF {application['idf_version']}"
+            + (f", project {application['project_name']}"
+               if application.get("project_name") else ""))
+
+    if detected["kind"] == "application":
+        segments.append(_segment(
+            "boot-header", 0, esp32.IMAGE_HEADER_SIZE,
+            f"Espressif image header ({detected['chip']})",
+            content=data[:esp32.IMAGE_HEADER_SIZE], espressif=image))
+        for entry in image["segments"]:
+            segments.append(_segment(
+                "esp-segment", entry["offset"], entry["length"],
+                f"ESP segment {entry['index']} @ 0x{entry['load_address']:08x}",
+                content=data[entry["offset"]:entry["offset"] + entry["length"]],
+                load_address=entry["load_address"]))
+        return segments
+
+    # A full flash image: the partition table is the map.
+    say(f"container: partition table with {len(detected['partitions'])} entries")
+    for partition in detected["partitions"]:
+        start = partition["address"]
+        end = min(len(data), start + partition["size"])
+        if start >= len(data):
+            continue
+        blob = data[start:end]
+        label = (f"partition {partition['name']} "
+                 f"({partition['type']}/{partition['subtype']})")
+        say(f"container:   {label} at 0x{start:06x}, "
+            f"{partition['size'] // 1024} KiB")
+        # An app partition holds a complete image; carry the parsed header so
+        # the framework version and chip reach the SBOM from here too.
+        parsed = next((i for i in detected.get("images") or []
+                       if i.get("partition") == partition["name"]), None)
+        segments.append(_segment(
+            "partition", start, end - start, label, content=blob,
+            partition=partition, **({"espressif": parsed} if parsed else {})))
+
+    if detected.get("bootloader"):
+        boot = detected["bootloader"]
+        segments.append(_segment(
+            "bootloader", boot["offset"], boot["end"] - boot["offset"],
+            f"second-stage bootloader ({detected['chip']})",
+            content=data[boot["offset"]:boot["end"]], espressif=boot))
+    return segments
+
+
 def walk(data, verbose=False, log=None):
     """Segment a firmware image. Returns (segments, warnings).
 
@@ -143,6 +206,13 @@ def walk(data, verbose=False, log=None):
 
     def claim(start, end):
         covered.append((start, end))
+
+    # --- 0. Espressif, which is neither a flat image nor a Linux one -------
+    espressif = esp32.detect(data)
+    if espressif:
+        segments = _espressif_segments(data, espressif, say)
+        segments.sort(key=lambda seg: seg["offset"])
+        return segments, warnings
 
     # --- 1. A boot header at offset 0 ---------------------------------------
     header = parse_uimage(data)

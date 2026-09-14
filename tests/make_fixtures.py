@@ -381,6 +381,120 @@ def build_bare_unknown():
     return filler(r, 0x2000) + text + b"\x00" * 0x1000 + filler(r, 0x2000)
 
 
+# --- Espressif ------------------------------------------------------------- #
+#
+# Real ESP32 images were used to confirm the layout (published Tasmota builds
+# for ESP32 and ESP32-C3), but nothing from them is copied here: the fixture is
+# generated, and it deliberately fills in every app-descriptor field, which the
+# real builds do not. That is the point of having both - the fixture proves the
+# fields are read correctly, and the real images prove we cope when they are
+# blank.
+
+ESP_APP_DESC_MAGIC = 0xABCD5432
+ESP_ENTRY = 0x400D0018          # inside the ESP32 IROM range
+ESP_CHIP_ID = 0x0000            # ESP32, Xtensa LX6
+
+
+def esp_app_descriptor():
+    """esp_app_desc_t, 256 bytes, every documented field populated."""
+    def text(value, width):
+        raw = value.encode("ascii")
+        return raw + b"\x00" * (width - len(raw))
+
+    desc = struct.pack("<II", ESP_APP_DESC_MAGIC, 1)    # magic, secure_version
+    desc += b"\x00" * 8                                  # reserv1[2]
+    desc += text("1.2.3", 32)                            # version
+    desc += text("fixture-app", 32)                      # project_name
+    desc += text("00:00:00", 16)                         # time
+    desc += text("Jan  1 2026", 16)                      # date
+    desc += text("v5.1.2", 32)                           # idf_ver
+    desc += bytes(range(32))                             # app_elf_sha256
+    desc += b"\x00" * (256 - len(desc))                  # reserv2[20]
+    return desc
+
+
+def esp_image(r, chip_id=ESP_CHIP_ID, entry=ESP_ENTRY, with_descriptor=True):
+    """A complete Espressif application image: header, segments, checksum."""
+    first = (esp_app_descriptor() if with_descriptor else b"") + filler(r, 0x400)
+    bodies = [(0x3F400020, first),
+              (0x3FFB0000, strings_blob(["littlefs", "fixture-app"])),
+              (0x400D0018, filler(r, 0x800))]
+
+    header = bytes([0xE9, len(bodies), 0x02, 0x20])
+    header += struct.pack("<I", entry)
+    header += bytes([0x00, 0xEE, 0x00, 0x00])            # wp_pin, spi_pin_drv
+    header += struct.pack("<H", chip_id)
+    header += bytes([0x00, 0x00, 0x00, 0x00, 0x00])      # chip revisions
+    header += b"\x00" * 4                                # reserved
+    header += b"\x00"                                    # hash_appended: no
+
+    out = bytearray(header)
+    for load_address, body in bodies:
+        out += struct.pack("<II", load_address, len(body)) + body
+
+    out += b"\x00" * (15 - (len(out) % 16))              # pad, then checksum
+    checksum = 0xEF
+    for _, body in bodies:
+        for byte in body:
+            checksum ^= byte
+    out.append(checksum)
+    return bytes(out)
+
+
+def esp_partition_table(entries):
+    """The 0xAA50 table the second-stage bootloader reads at 0x8000."""
+    table = bytearray()
+    for name, kind, subtype, address, size in entries:
+        table += b"\xaa\x50" + bytes([kind, subtype])
+        table += struct.pack("<II", address, size)
+        table += name.encode("ascii").ljust(16, b"\x00")
+        table += struct.pack("<I", 0)                    # flags
+    return bytes(table)
+
+
+@fixture("esp32_app.bin")
+def build_esp32_app():
+    """A bare ESP32 application image, as an OTA update would arrive.
+
+    The whole point of reading the header is that the chip - and therefore the
+    instruction set - is declared rather than guessed, and that ESP-IDF records
+    its own version in a struct instead of a banner string.
+    """
+    return esp_image(rng("esp32_app"))
+
+
+@fixture("esp32_flash.bin")
+def build_esp32_flash():
+    """A full 512 KiB flash image: bootloader, partition table, app, data.
+
+    Reading a flash dump as one blob is meaningless - the partition table is
+    the only thing that says which region is an application and which is
+    filesystem data, so it is the segmentation.
+    """
+    r = rng("esp32_flash")
+    partitions = [
+        ("nvs",     1, 0x02, 0x009000, 0x5000),
+        ("otadata", 1, 0x00, 0x00E000, 0x2000),
+        ("factory", 0, 0x00, 0x010000, 0x60000),
+        ("storage", 1, 0x83, 0x070000, 0x10000),
+    ]
+
+    flash = bytearray(b"\xff" * 0x80000)
+
+    bootloader = esp_image(rng("esp32_boot"), with_descriptor=False)
+    flash[0x1000:0x1000 + len(bootloader)] = bootloader
+
+    table = esp_partition_table(partitions)
+    flash[0x8000:0x8000 + len(table)] = table
+
+    app = esp_image(r)
+    flash[0x10000:0x10000 + len(app)] = app
+
+    data = strings_blob(["littlefs v2.8.1", "fixture data partition"])
+    flash[0x70000:0x70000 + len(data)] = data
+    return bytes(flash)
+
+
 # --------------------------------------------------------------------------- #
 
 def main(argv):

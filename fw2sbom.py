@@ -44,13 +44,14 @@ from datetime import datetime, timezone
 
 import container
 import elf
+import esp32
 import image_input
 import evidence_report
 import spdx_report
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.12.0"
+TOOL_VERSION = "1.13.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -380,15 +381,30 @@ def analyze_mcs51(data):
 def analyze_architecture(data):
     """Identify the instruction set of a raw firmware image, if we can.
 
-    Cortex-M is tested first: its vector table is a much stronger constraint, and
-    a Thumb image would otherwise be at some risk of matching the 8051 profile.
+    A declared answer beats a measured one, so an Espressif chip ID settles the
+    question outright. Failing that, Cortex-M is tested before MCS-51: its
+    vector table is a much stronger constraint, and a Thumb image would
+    otherwise be at some risk of matching the 8051 profile.
     """
     cortex = analyze_cortex_m(data)
     mcs51 = {"looks_like_mcs51": False, "details": [], "vectors": []}
     if not cortex["looks_like_cortex_m"]:
         mcs51 = analyze_mcs51(data)
 
-    if cortex["looks_like_cortex_m"]:
+    # An Espressif image states its chip, and so its instruction set, in its own
+    # header. That outranks any opcode statistic, and it is the only thing that
+    # reliably separates the Xtensa parts from the RISC-V ones.
+    espressif = esp32.detect(data)
+    declared = []
+    if espressif and espressif["core"]:
+        declared.append(
+            f"espressif: the image header declares chip {espressif['chip']}, "
+            f"{espressif['core']} - read from the image, not inferred from the "
+            "bytes")
+        architecture = ("xtensa" if espressif["core"].startswith("Xtensa")
+                        else "riscv")
+        label = f"{espressif['core']} ({espressif['chip']})"
+    elif cortex["looks_like_cortex_m"]:
         architecture, label = "arm-cortex-m", "ARM Cortex-M (Thumb)"
     elif mcs51["looks_like_mcs51"]:
         architecture, label = "mcs-51", "MCS-51 / 8051"
@@ -400,9 +416,11 @@ def analyze_architecture(data):
         "label": label,
         # kept flat for backwards compatibility with existing callers
         "looks_like_cortex_m": cortex["looks_like_cortex_m"],
-        # tag each line with the detector that produced it: the two ISAs are
-        # tested independently and their evidence must not read as one finding
-        "details": [f"cortex-m: {d}" for d in cortex["details"]]
+        "espressif": espressif,
+        # tag each line with the detector that produced it: the detectors run
+        # independently and their evidence must not read as one finding
+        "details": declared
+                   + [f"cortex-m: {d}" for d in cortex["details"]]
                    + [f"mcs-51: {d}" for d in mcs51["details"]],
         "cortex_m": cortex,
         "mcs51": mcs51,
@@ -1448,6 +1466,67 @@ def merge_hit_lists(primary, extra):
     return sorted(merged.values(), key=lambda h: -h["confidence"])
 
 
+def espressif_image(segments):
+    """The Espressif image that describes the firmware, or None.
+
+    A flash dump holds several: a bootloader at 0x1000 and one image per
+    application partition. The one carrying an app descriptor is the one that
+    describes the product, so it wins over whichever happens to sit lowest in
+    the flash - which is always the bootloader, and never has a descriptor.
+    """
+    images = [s["espressif"] for s in segments or [] if s.get("espressif")]
+    return next((i for i in images if i.get("app")),
+                images[0] if images else None)
+
+
+def espressif_components(segments):
+    """Components an Espressif image states about itself.
+
+    ESP-IDF writes its own version into esp_app_desc_t, and the header names
+    the chip. Both are structural fields rather than strings that happened to
+    match a pattern, so they carry the same confidence as a package database
+    entry - and neither is invented when the field is blank, which real builds
+    often leave it.
+    """
+    found = []
+    for segment in segments or []:
+        image = segment.get("espressif")
+        if not image:
+            continue
+        application = image.get("app") or {}
+        idf = application.get("idf_version")
+        if idf and not any(c["name"] == "esp-idf" for c in found):
+            found.append({
+                "name": "esp-idf",
+                "version": idf,
+                "purl": f"pkg:github/espressif/esp-idf@{idf}",
+                "supplier": "Espressif Systems",
+                "description": "ESP-IDF, the Espressif IoT Development "
+                               "Framework the image was built with",
+                "evidence": f"esp_app_desc_t at offset "
+                            f"0x{image['segments'][0]['offset']:x} declares "
+                            f"idf_ver {idf!r}",
+                "type": "framework",
+            })
+        name = application.get("project_name")
+        if name and not any(c["name"] == name for c in found):
+            found.append({
+                "name": name,
+                "version": application.get("app_version"),
+                "purl": f"pkg:generic/{name}"
+                        + (f"@{application['app_version']}"
+                           if application.get("app_version") else ""),
+                "supplier": None,
+                "description": "The application this image was built from, as "
+                               "named in its ESP-IDF app descriptor"
+                               + (f"; built {application['build_date']}"
+                                  if application.get("build_date") else ""),
+                "evidence": f"esp_app_desc_t declares project_name {name!r}",
+                "type": "application",
+            })
+    return found
+
+
 def packages_to_components(rootfs):
     """Turn an on-image package database into component records.
 
@@ -1539,6 +1618,22 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             "name": "fw2sbom:offset_basis",
             "value": "offsets in this document refer to the reassembled "
                      "image, not to byte positions in the delivered file"})
+    image = espressif_image(segments)
+    if image:
+        fw_props.append({"name": "fw2sbom:espressif_chip", "value": image["chip"]})
+        if image.get("core"):
+            fw_props.append({"name": "fw2sbom:espressif_core",
+                             "value": image["core"]})
+        fw_props.append({"name": "fw2sbom:espressif_entry_point",
+                         "value": f"0x{image['entry_point']:08x}"})
+        application = image.get("app") or {}
+        for key, label in (("build_date", "build_date"),
+                           ("build_time", "build_time"),
+                           ("elf_sha256", "application_elf_sha256")):
+            if application.get(key):
+                fw_props.append({"name": f"fw2sbom:espressif_{label}",
+                                 "value": application[key]})
+
     for i, segment in enumerate(segments or [], 1):
         detail = (f"{segment['kind']} at 0x{segment['offset']:x}, "
                   f"{segment['length']} bytes: {segment['label']}")
@@ -1848,6 +1943,40 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             ] + [{"name": f"fw2sbom:distribution_detail", "value": d}
                  for d in detail[:12]]),
         })
+        dep_refs.append(ref)
+
+    # What an Espressif image states about itself: the framework version and
+    # the application name come out of a struct, not a regex.
+    for index, item in enumerate(espressif_components(segments), 1):
+        ref = f"espressif-{index}-{item['name']}"
+        comp = {
+            "type": item["type"],
+            "bom-ref": ref,
+            "name": item["name"],
+            "description": item["description"],
+            "purl": item["purl"],
+            "evidence": {
+                "identity": [{
+                    "field": "name", "confidence": 0.97,
+                    "methods": [{"technique": "binary-analysis",
+                                 "confidence": 0.97, "value": item["evidence"]}],
+                }],
+                "occurrences": [{"location": fname}],
+            },
+            "properties": [
+                {"name": "fw2sbom:confidence", "value": "0.97"},
+                {"name": "fw2sbom:confidence_level", "value": "high"},
+                {"name": "fw2sbom:evidence_class",
+                 "value": "esp-idf-app-descriptor"},
+            ],
+        }
+        if item["supplier"]:
+            comp["supplier"] = {"name": item["supplier"]}
+        if item["version"]:
+            comp["version"] = item["version"]
+            comp["properties"].append({"name": "fw2sbom:version_source",
+                                       "value": "app-descriptor"})
+        components.append(comp)
         dep_refs.append(ref)
 
     # Components the vendor declared. These are a different kind of claim from
@@ -2392,6 +2521,12 @@ def main(argv=None):
                  if source["base_address"] is not None else ""),
               file=sys.stderr)
 
+    chip = espressif_image(segments)
+    if chip:
+        print(f"[fw2sbom] Espressif {chip['chip']}"
+              + (f" ({chip['core']})" if chip.get("core") else "")
+              + f", entry 0x{chip['entry_point']:08x}", file=sys.stderr)
+
     rootfs_arch = (rootfs or {}).get("binaries", {}).get("architecture")
     if arm_info["label"]:
         print(f"[fw2sbom] architecture: {arm_info['label']}", file=sys.stderr)
@@ -2402,6 +2537,7 @@ def main(argv=None):
     total = len(hits) + len(standards) + len(packages) + (1 if rootfs and
                                                           rootfs.get("os_release") else 0)
     declared = sum(len(e["components"]) for e in vendor)
+    total += len(espressif_components(segments))
     if evidence_path:
         context = build_evidence_context(
             os.path.basename(args.input), data, payload, arm_info, container,
@@ -2474,6 +2610,11 @@ def main(argv=None):
         print(f"[fw2sbom]   {std['name']:<22} version={v:<12} "
               f"confidence={std['confidence']} "
               f"({confidence_level(std['confidence'])}) [embedded standard data]",
+              file=sys.stderr)
+    for item in espressif_components(segments):
+        v = item["version"] or "?"
+        print(f"[fw2sbom]   {item['name']:<22} version={v:<12} "
+              f"confidence=0.97 (high) [declared in the image header]",
               file=sys.stderr)
     if opacity["opaque"]:
         print(f"[fw2sbom] payload is OPAQUE ({opacity['verdict']}) - static component "

@@ -37,6 +37,7 @@ sys.path.insert(0, HERE)
 import container                                        # noqa: E402
 import image_input                                      # noqa: E402
 import elf                                              # noqa: E402
+import esp32                                            # noqa: E402
 import evidence_report                                  # noqa: E402
 import fw2sbom as core                                   # noqa: E402
 import make_fixtures                                     # noqa: E402
@@ -491,7 +492,7 @@ class SbomStructureTest(unittest.TestCase):
     ALL = ("cortexm_rtos.bin", "cortexm_utf16.bin", "mcs51_display.bin",
            "packet_front.bin", "packet_back.bin", "opaque_encrypted.bin",
            "random_flat.bin", "router_uimage.bin", "bare_unknown.bin",
-           "encrypted_kernel.bin")
+           "encrypted_kernel.bin", "esp32_app.bin", "esp32_flash.bin")
 
     def test_is_valid_cyclonedx_16_json(self):
         for name in self.ALL:
@@ -1358,6 +1359,197 @@ class SchemaValidationTest(unittest.TestCase):
                 self.assertEqual(
                     [], [f"{list(e.path)}: {e.message}" for e in errors])
 
+
+
+# --------------------------------------------------------------------------- #
+
+class EspressifTest(unittest.TestCase):
+    """ESP32 parts are in a large share of the IoT devices a customer will send.
+
+    What makes them worth a reader of their own is not the file format: it is
+    that the image declares two things a scanner would otherwise have to guess.
+    The chip ID gives the instruction set - and nothing else reliably separates
+    the Xtensa parts from the RISC-V ones - while ESP-IDF writes its own version
+    into a struct, which is evidence of a different quality from a banner string
+    that happened to match a regex.
+
+    The fixtures fill in every app-descriptor field. Real builds do not; the
+    published Tasmota images fill in only idf_ver, which is why the blank cases
+    are pinned here too.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = fixture("esp32_app.bin")
+        cls.flash = fixture("esp32_flash.bin")
+
+    # --- the header -------------------------------------------------------- #
+
+    def test_the_chip_id_names_the_part_and_its_core(self):
+        image = esp32.parse_image(self.app)
+        self.assertEqual(image["chip"], "ESP32")
+        self.assertEqual(image["core"], "Xtensa LX6")
+        self.assertEqual(image["entry_point"], make_fixtures.ESP_ENTRY)
+        self.assertEqual(len(image["segments"]), 3)
+
+    def test_a_risc_v_part_is_not_reported_as_xtensa(self):
+        """The whole reason to read this field: an entropy or opcode heuristic
+        cannot tell the two cores apart, and a CVE feed cares which it is."""
+        patched = bytearray(self.app)
+        patched[12:14] = struct.pack("<H", 0x0005)       # ESP32-C3
+        image = esp32.parse_image(bytes(patched))
+        self.assertEqual(image["chip"], "ESP32-C3")
+        self.assertEqual(image["core"], "RISC-V")
+
+    def test_an_unknown_chip_id_is_reported_as_unknown(self):
+        """New parts ship faster than this table is updated; an unrecognised ID
+        must not become a wrong name."""
+        patched = bytearray(self.app)
+        patched[12:14] = struct.pack("<H", 0x00FE)
+        image = esp32.parse_image(bytes(patched))
+        self.assertIn("unknown", image["chip"])
+        self.assertIsNone(image["core"])
+
+    def test_a_stray_magic_byte_is_not_an_image(self):
+        """0xE9 occurs constantly inside compressed data. Without the entry
+        point and segment-table checks every such byte would start an image."""
+        noise = bytes([0xE9]) + bytes(range(256)) * 8
+        self.assertIsNone(esp32.parse_image(noise))
+        self.assertIsNone(esp32.detect(noise))
+
+    def test_a_truncated_image_is_refused_rather_than_raising(self):
+        """Firmware arrives half-uploaded; that is a None, not a traceback."""
+        for length in (0, 1, 8, esp32.IMAGE_HEADER_SIZE,
+                       esp32.IMAGE_HEADER_SIZE + 4, len(self.app) // 2):
+            with self.subTest(length=length):
+                self.assertIsNone(esp32.parse_image(self.app[:length]))
+
+    # --- the app descriptor ------------------------------------------------ #
+
+    def test_the_app_descriptor_is_read_field_by_field(self):
+        app = esp32.parse_image(self.app)["app"]
+        self.assertEqual(app["idf_version"], "v5.1.2")
+        self.assertEqual(app["project_name"], "fixture-app")
+        self.assertEqual(app["app_version"], "1.2.3")
+        self.assertEqual(app["build_date"], "Jan  1 2026")
+        self.assertEqual(app["build_time"], "00:00:00")
+        self.assertEqual(app["elf_sha256"], bytes(range(32)).hex())
+
+    def test_a_blank_field_is_absent_rather_than_an_empty_version(self):
+        """Tasmota leaves version, project_name and date empty. An empty string
+        reported as a version would be a component versioned as the empty
+        string - worse than no component, because a CVE feed would take it
+        seriously."""
+        blanked = bytearray(self.app)
+        start = esp32.parse_image(self.app)["segments"][0]["offset"]
+        for offset, width in ((16, 32), (48, 32), (80, 16), (96, 16)):
+            blanked[start + offset:start + offset + width] = bytes(width)
+        app = esp32.parse_image(bytes(blanked))["app"]
+        self.assertIsNone(app["app_version"])
+        self.assertIsNone(app["project_name"])
+        self.assertIsNone(app["build_date"])
+        self.assertEqual(app["idf_version"], "v5.1.2")
+
+    def test_an_image_without_a_descriptor_invents_nothing(self):
+        """A second-stage bootloader has no esp_app_desc_t, and neither has a
+        plain binary blob flashed by hand."""
+        image = esp32.parse_image(
+            make_fixtures.esp_image(make_fixtures.rng("no-desc"),
+                                    with_descriptor=False))
+        self.assertIsNone(image["app"])
+        self.assertEqual(core.espressif_components([{"espressif": image}]), [])
+
+    # --- the flash layout -------------------------------------------------- #
+
+    def test_the_partition_table_is_the_segmentation(self):
+        found = esp32.detect(self.flash)
+        self.assertEqual(found["kind"], "flash")
+        self.assertEqual([p["name"] for p in found["partitions"]],
+                         ["nvs", "otadata", "factory", "storage"])
+        factory = found["partitions"][2]
+        self.assertEqual((factory["type"], factory["subtype"]), ("app", "factory"))
+        self.assertEqual(found["partitions"][3]["subtype"], "littlefs")
+        self.assertTrue(found["bootloader"])
+        self.assertEqual([i["partition"] for i in found["images"]], ["factory"])
+
+    def test_an_ota_subtype_is_numbered_not_guessed(self):
+        """ota_0 .. ota_15 are a range, not a lookup; an off-by-one here would
+        mislabel which slot an image was found in."""
+        self.assertEqual(esp32._subtype_name(0, 0x10), "ota_0")
+        self.assertEqual(esp32._subtype_name(0, 0x1F), "ota_15")
+        self.assertEqual(esp32._subtype_name(0, 0x00), "factory")
+
+    def test_the_segments_follow_the_partitions(self):
+        segments, _warnings = container.walk(self.flash)
+        labels = [s["label"] for s in segments]
+        self.assertTrue(any("bootloader" in label for label in labels), labels)
+        for name in ("nvs", "otadata", "factory", "storage"):
+            self.assertTrue(any(name in label for label in labels),
+                            f"{name} missing from {labels}")
+        factory = next(s for s in segments if "factory" in s["label"])
+        self.assertEqual(factory["offset"], 0x10000)
+
+    def test_the_app_partition_describes_the_firmware_not_the_bootloader(self):
+        """The bootloader sits lowest in the flash and has no descriptor. Taking
+        the first image found would report the bootloader's entry point and lose
+        the IDF version entirely."""
+        segments, _warnings = container.walk(self.flash)
+        image = core.espressif_image(segments)
+        self.assertIsNotNone(image["app"])
+        self.assertEqual(image["app"]["idf_version"], "v5.1.2")
+
+    # --- what reaches the document ----------------------------------------- #
+
+    def test_the_declared_chip_settles_the_architecture(self):
+        arch = core.analyze_architecture(self.app)
+        self.assertEqual(arch["architecture"], "xtensa")
+        self.assertIn("ESP32", arch["label"])
+        self.assertTrue(any("declares chip" in d for d in arch["details"]),
+                        arch["details"])
+
+    def test_esp_idf_is_a_component_carrying_its_evidence(self):
+        bom = analyze("esp32_app.bin")["bom"]
+        idf = next(c for c in bom["components"] if c["name"] == "esp-idf")
+        self.assertEqual(idf["version"], "v5.1.2")
+        self.assertEqual(idf["type"], "framework")
+        self.assertEqual(idf["purl"], "pkg:github/espressif/esp-idf@v5.1.2")
+        properties = {p["name"]: p["value"] for p in idf["properties"]}
+        self.assertEqual(properties["fw2sbom:confidence"], "0.97")
+        self.assertEqual(properties["fw2sbom:evidence_class"],
+                         "esp-idf-app-descriptor")
+        method = idf["evidence"]["identity"][0]["methods"][0]
+        self.assertIn("esp_app_desc_t", method["value"])
+
+    def test_the_application_the_image_names_becomes_a_component(self):
+        bom = analyze("esp32_app.bin")["bom"]
+        app = next(c for c in bom["components"] if c["name"] == "fixture-app")
+        self.assertEqual(app["version"], "1.2.3")
+        self.assertEqual(app["type"], "application")
+
+    def test_the_document_records_the_chip_and_the_build(self):
+        bom = analyze("esp32_flash.bin")["bom"]
+        properties = {p["name"]: p["value"]
+                      for p in bom["metadata"]["component"]["properties"]}
+        self.assertEqual(properties["fw2sbom:espressif_chip"], "ESP32")
+        self.assertEqual(properties["fw2sbom:espressif_core"], "Xtensa LX6")
+        self.assertEqual(properties["fw2sbom:espressif_build_date"], "Jan  1 2026")
+        self.assertEqual(properties["fw2sbom:architecture"], "Xtensa LX6 (ESP32)")
+        self.assertEqual(properties["fw2sbom:espressif_application_elf_sha256"],
+                         bytes(range(32)).hex())
+
+    def test_the_same_components_appear_in_the_spdx_rendering(self):
+        """One analysis, two renderings: a customer choosing SPDX must not get
+        a smaller inventory than one choosing CycloneDX."""
+        spdx = analyze("esp32_app.bin")["spdx"]
+        names = {package["name"] for package in spdx["packages"]}
+        self.assertIn("esp-idf", names)
+        self.assertIn("fixture-app", names)
+
+    def test_declared_components_are_not_called_unanalysable(self):
+        """An image we read the IDF version out of has been analysed, whatever
+        the entropy of its code segments says."""
+        result = analyze("esp32_app.bin")
+        self.assertFalse(result["opacity"]["opaque"], result["opacity"])
 
 
 # --------------------------------------------------------------------------- #

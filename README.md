@@ -2,7 +2,8 @@
 
 Evidence-based **CycloneDX 1.6 / SPDX 2.3** SBOM generator for embedded firmware images
 (`.bin`):Linux 裝置(router / gateway / NVR:uImage + 壓縮 kernel + SquashFS
-rootfs)、ARM Cortex-M 映像、MCS-51(8051)映像(顯示控制器 / monitor scaler
+rootfs)、**Espressif ESP32 系列**(application image 與整顆 flash dump)、
+ARM Cortex-M 映像、MCS-51(8051)映像(顯示控制器 / monitor scaler
 韌體),以及廠商 **packetized / ISP-dump** 格式(自動去框)。
 Designed to run out-of-the-box on Kali Linux (Python 3.9+, stdlib only — no pip
 dependencies).
@@ -19,7 +20,10 @@ dependencies).
      vector 是否設 Thumb bit、slots 2–15 是否為合理 exception vectors
    - **MCS-51 (8051)**:0x0000 與 0x03+8k 的 LJMP 中斷向量表,加上核心 opcode
      佔比(LCALL / LJMP / MOV DPTR / MOVX / RET;均勻隨機只會佔 2.3%)
-   - 兩者互斥判定,Cortex-M 先測(其向量表約束較強)
+   - **Espressif**:image header 裡的 chip ID 直接寫明是哪顆晶片,所以指令集
+     是**讀出來的**,不是猜的;Xtensa 與 RISC-V 兩系也只有這個欄位分得開
+   - 判定互斥:Espressif 的宣告最優先,其次 Cortex-M(其向量表約束較強),
+     最後才是 MCS-51
 2. **Strings 萃取** — 可列印 ASCII 與 UTF-16LE 字串(含檔案 offset)
 3. **Embedded standard data** — 結構化偵測(解析並驗證結構,非字串比對):
    VESA E-EDID 區塊(128 bytes、magic + checksum、PnP ID、EDID 版本、monitor
@@ -318,6 +322,48 @@ Excel 報告的工作表:
 
 fw2sbom 以中斷向量表 + opcode 佔比正面識別 MCS-51;**一旦指令集被正面識別,
 opacity 判定即直接定為 plaintext**,不再依賴熵值門檻。
+
+## ESP32 / Espressif 韌體
+
+ESP32 系列佔 IoT 裝置很大一塊,而它的韌體既不是平坦的 MCU 映像,也不是 Linux
+映像。把整個檔案當一團 blob 掃,結果跟拿 router 韌體這樣掃一樣差。
+
+**兩種輸入都認得:**
+
+| 輸入 | 結構 | 切法 |
+|---|---|---|
+| Application image(OTA 檔) | 24-byte header + 各自帶載入位址的 segment | header 與每個 segment 各自一段 |
+| 整顆 flash dump / factory 檔 | 0x1000 的 second-stage bootloader + 0x8000 的 partition table | **依 partition table 切**——那張表才是裝置自己用的地圖 |
+
+**兩件事的證據品質跟別的不一樣——它們是宣告出來的,不是比對出來的:**
+
+- **晶片型號**:header 的 chip ID 欄位直接寫明 ESP32 / S2 / S3 / C2 / C3 /
+  C5 / C6 / H2 / P4,連帶指令集(Xtensa LX6 / LX7 或 RISC-V)。沒有任何熵值或
+  opcode 統計分得開 Xtensa 跟 RISC-V,但這個欄位分得開。表上沒有的新型號會照實
+  報 `unknown chip 0xNNNN`,不會硬湊一個名字。
+- **ESP-IDF 版本**:ESP-IDF 會把 `esp_app_desc_t` 寫在第一個 segment 開頭,裡面
+  有 IDF 版本、專案名稱、應用版本、build 日期時間、以及原始 ELF 的 SHA-256。
+  這是結構欄位,不是剛好命中 regex 的字串,所以 confidence 跟套件資料庫同級
+  (0.97),`fw2sbom:evidence_class = esp-idf-app-descriptor`。
+
+**空欄位就是空欄位。** 真實的 build 常常只填一部分——公開的 Tasmota 映像就只填
+`idf_ver`,`version` / `project_name` / `date` 全部留空。留空的欄位一律當作「沒有
+這項資訊」,不會變成一個版本是空字串的元件(那比沒有元件更糟,因為 CVE 比對會
+當真)。
+
+驗證用的不是只有合成 fixture:ESP32 與 ESP32-C3 的公開 Tasmota 映像、以及一份
+完整的 factory flash 映像都實際跑過。也因此才發現真實的 partition 佈局不一定照
+教科書走(Tasmota 用 `safeboot` 而不是 `factory`)。
+
+```
+[fw2sbom] Espressif ESP32-C3 (RISC-V), entry 0x40381650
+[fw2sbom] architecture: RISC-V (ESP32-C3)
+[fw2sbom]   esp-idf   version=5.5.4.260407  confidence=0.97 (high) [declared in the image header]
+```
+
+> ESP-IDF 本身帶了 mbedTLS、lwIP、FreeRTOS 等元件,但**版本不會憑 IDF 版本推導
+> 出來**。如果映像裡沒有這些元件自己的字串(release build 常常被剝掉),SBOM 就
+> 不會有它們——這是「沒讀到」,不是「不存在」。
 
 ## 內嵌標準資料 (Embedded standard data)
 
@@ -627,6 +673,10 @@ fw2sbom/
 ├── spdx_report.py          # SPDX 2.3 JSON 輸出(由 CycloneDX 文件轉換)
 ├── container.py            # 容器走訪、解壓、套件資料庫解析
 ├── squashfs.py             # 唯讀 SquashFS 4.0 reader(stdlib only)
+├── elf.py                  # 精簡 ELF reader(DT_NEEDED / SONAME / .comment)
+├── esp32.py                # Espressif image、app descriptor、partition table
+├── image_input.py          # ELF / Intel HEX / S-record / UF2 讀入成平坦映像
+├── vendor_sbom.py          # 讀入廠商 SBOM 並與分析結果對帳
 ├── service.py              # 拖拉式本機網頁服務(localhost drag-and-drop UI)
 ├── onecra_logo.png         # 頁首品牌 logo(service.py 內嵌用)
 ├── onecra_icon.png         # 瀏覽器分頁 favicon(service.py 內嵌用)

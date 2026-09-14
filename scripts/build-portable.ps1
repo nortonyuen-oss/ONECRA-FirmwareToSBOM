@@ -73,6 +73,7 @@ $PayloadFromRoot = @(
     'spdx_report.py',
     'vendor_sbom.py',
     'image_input.py',
+    'esp32.py',
     'onecra_logo.png',
     'onecra_icon.png'
 )
