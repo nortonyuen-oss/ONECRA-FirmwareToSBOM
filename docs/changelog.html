@@ -154,9 +154,47 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.13.0</span>
+        <span class="ver">1.13.1</span>
         <span class="date">2026-09-14</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            <strong>網頁畫面上的元件清單,和你下載到的 SBOM 不一致。</strong>
+            畫面那份是另外組出來的,只看得到簽章比對、內嵌標準資料與套件資料庫,
+            所以後來新增的每一種來源 —— 廠商 SBOM、os-release、ESP32 的 app
+            descriptor —— 都是「文件裡有、畫面上沒有」。一份 ESP32 韌體畫面顯示
+            1 個元件,下載到的文件裡有 3 個。
+          </p>
+          <p>
+            你先看畫面,再把檔案交給稽核。兩者不一致的時候,沒有任何東西分得出
+            哪一份才對。<strong>畫面那份現在直接從文件推導出來</strong>,不可能
+            再各走各路。
+          </p>
+          <p>
+            唯一保留的差異也寫明了:讀不出來的區段仍然會記進 SBOM(「這一段列舉
+            不到」本身就是一項發現),但不會擺到畫面上和已經識別出來的元件排在
+            一起 —— 那樣看起來會像是我們識別出了它。
+          </p>
+          <p>
+            廠商 SBOM 比對有同一個盲點,只是在另一邊:拿去和廠商文件對帳的清單
+            漏掉了 ESP32 的元件,所以 ESP32 韌體和任何廠商 SBOM 都會「完全一致」。
+            廠商聲稱的 ESP-IDF 版本與映像自己宣告的不同,正是這個功能存在的理由。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,242,539 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">16cdaada6a7f1cb3816e3723597a1350cd2e305cff1eeed489535482bfd89a10</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.13.0</span>
+        <span class="date">2026-09-14</span>
       </div>
       <div>
         <h2>ESP32 韌體:晶片與 ESP-IDF 版本是讀出來的</h2>

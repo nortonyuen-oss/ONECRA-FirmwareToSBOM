@@ -31,6 +31,57 @@ PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
 
 ---
 
+## v1.13.1
+
+| | |
+|---|---|
+| Tag | `v1.13.1` |
+| 程式碼 commit | `93d202b2ab84c3db09e30994db54be07b15bd9e7` |
+| Build 日期 | 2026-09-14 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+### Portable 版(免簽章,推薦交付)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,242,539 bytes |
+| SHA-256 | `16cdaada6a7f1cb3816e3723597a1350cd2e305cff1eeed489535482bfd89a10` |
+| 內容 | 56 個檔案 |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `ff65ecd77989c7f5f49aca1eb1c1f07c9388c7fde1f3a9517a32e7432e665ae6` |
+| `service.py` | `ba96f63a2a74ff9d2facdd19873b4a351e7fb961bbd3ff85c1f46654d31969eb` |
+
+其餘檔案與 v1.13.0 相同。
+
+### 修正
+
+- **瀏覽器畫面上嘅元件清單同下載到嘅文件唔一致。** 畫面嗰份係另外砌嘅(只睇
+  signature、embedded standard、套件資料庫),所以之後加嘅每一種來源
+  ——廠商 SBOM、os-release、Espressif app descriptor——都係文件入面有、畫面上冇。
+  一份 ESP32 韌體畫面顯示 1 個元件,下載到嘅文件有 3 個。客戶先睇畫面、再把
+  檔案交畀稽核,兩者唔一致就冇嘢分得出邊份啱。
+  **畫面嗰份而家由文件本身推出嚟**,冇得再各行各路。
+- **唯一保留嘅差異已經寫明:**讀唔到嘅區段會以 `fw2sbom:opaque` 記錄喺 SBOM 入面
+  (「呢度列舉唔到」本身就係一項發現),但唔會擺上畫面同已識別嘅元件排埋一齊
+  ——噉樣睇落好似我哋識別咗佢。
+- **Signature 元件而家一樣帶 `fw2sbom:evidence_class`**(其餘幾種本來就有)。
+  呢個欄位就係「由套件資料庫讀出」同「有條字串啱啱命中 regex」之間嘅分別。
+- **廠商 SBOM 比對有同一個盲點,只係喺另一邊:**攞嚟同廠商文件對帳嗰份平面清單
+  漏咗 Espressif 元件,所以 ESP32 韌體同任何廠商 SBOM 都「完全一致」。廠商聲稱
+  嘅 IDF 版本同映像自己宣告嘅唔同,正正就係呢個功能存在嘅理由。
+
+### 測試
+
+155 個(由 151 增加)。
+
+---
+
 ## v1.13.0
 
 | | |

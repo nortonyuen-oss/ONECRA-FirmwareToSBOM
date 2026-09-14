@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-14** · 版本 **v1.13.0**
+快照日期:**2026-09-14** · 版本 **v1.13.1**
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -52,6 +52,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | `v1.11.0` | **Phase 2 完成**:廠商 SBOM 匯入與比對(來源保留、版本衝突偵測) |
 | `v1.12.0` | **Phase 3 第一階段**:直接讀 ELF / Intel HEX / S-record / UF2 |
 | `v1.13.0` | **Phase 3 第二階段**:Espressif ESP32 系列(image / partition table / app descriptor、宣告式指令集) |
+| `v1.13.1` | 修正:畫面上的元件清單改由 SBOM 文件推導,不再與下載到的文件不一致 |
 | `v1.7.0` | **Phase 2 第一階段**:容器走訪、解壓、SquashFS 4.0 reader、opkg / dpkg / apk 套件資料庫、發行版識別、真實韌體 corpus 測試 |
 
 ### 工程現況
@@ -60,7 +61,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 |---|---|
 | 程式碼 | 約 9,100 行(含測試),10 個模組 + 6 個簽章包(36 個簽章) |
 | 依賴 | 無。Python 3.9+ 標準函式庫 |
-| 測試 | 151 個。12 個合成 fixture + 真實廠商韌體 corpus(1 份 router、3 份 ESP32) |
+| 測試 | 155 個。12 個合成 fixture + 真實廠商韌體 corpus(1 份 router、3 份 ESP32) |
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
@@ -88,6 +89,11 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 7. **整份映像一起量 opacity,空白區壓過密文** —— 一個 64 MB flash dump 裡 3.6 MB
    的加密 kernel 被判成「明文、無元件」。把「讀不到」報成「裡面沒有東西」,正是
    這個工具存在的理由要防止的事。由真實 CCTV 韌體樣本揭發。
+8. **網頁畫面的元件清單與下載到的文件不一致** — 畫面那份是另外組出來的,
+   每一種後來新增的元件來源都只進了文件、沒進畫面。客戶先看畫面、再把檔案交給
+   稽核,兩者不一致就沒有東西分得出哪一份才對。現在畫面由文件推導。
+9. **廠商 SBOM 比對漏掉 Espressif 元件** — ESP32 韌體因此與任何廠商 SBOM 都
+   「完全一致」,而版本衝突正是這個功能存在的理由。
 
 ---
 
