@@ -120,6 +120,11 @@ build 常常把這些元件的字串剝掉(Tasmota 就是),所以唯一的出路
 
 **已取消的範圍:** CPE 2.3 產生、上傳到平台 —— 兩者都由另一個系統負責。
 
+**已取消的交付形式:** PyInstaller 單檔 `.exe`(2026-09-16)。沒有數位簽章,
+Windows SmartScreen 會跳「未知發行者」;portable 版存在的理由就是繞開這件事,
+同時維護兩種等於維護一個比較差的。`fw2sbom-service.spec` 已從倉庫移除,歷史
+release 的 exe 紀錄保留在 RELEASE.md。
+
 ---
 
 ## 下載站
@@ -139,7 +144,6 @@ zip,雜湊與頁面公佈的一致;解壓後用套件內的直譯器跑真實 ro
 
 | 項目 | 說明 |
 |---|---|
-| 重建 PyInstaller exe | `dist/fw2sbom-service.exe` 仍是 1.4.0。重建**必須**用 `pyinstaller fw2sbom-service.spec`,裸 `--onefile` 不會帶 `signatures/` |
 | CPython hash pin | `scripts/python-embed.sha256` 仍為空。下次有網時跑 `build-portable.ps1 -PinHash` 並對照 python.org |
 | 真實 CCTV 韌體樣本 | 有樣本才能決定 Phase 2 剩餘項目的優先次序 |
 | 真實客戶 ESP32 韌體 | 目前只用公開的 Tasmota 映像驗證過。客戶的 build 多半會填滿 app descriptor(專案名稱、應用版本),那條路徑值得用真檔跑一次 |

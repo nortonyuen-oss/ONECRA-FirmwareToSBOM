@@ -1,13 +1,9 @@
-# Build artifacts (regenerate via README's PyInstaller / embeddable-Python instructions)
+# Build artifacts (regenerate with scripts/build-portable.ps1)
 __pycache__/
 *.pyc
 build/
 dist/
 dist-portable/
-
-# fw2sbom-service.spec IS tracked: it is not the file PyInstaller generates by
-# default, it carries the signature packs in `datas`, and a frozen build
-# without them finds nothing in every firmware it is given.
 
 # Local Claude Code settings (machine/user-specific)
 .claude/settings.local.json

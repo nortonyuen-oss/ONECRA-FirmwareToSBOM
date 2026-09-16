@@ -75,10 +75,12 @@ def _store_get(sbom_id):
 
 
 def resource_path(name):
-    """Resolve a bundled asset both when run as a script and when frozen
-    by PyInstaller (--add-data extracts assets next to sys._MEIPASS)."""
-    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
-    return os.path.join(base, name)
+    """Resolve a bundled asset, in a checkout or in the portable package.
+
+    Both keep the assets beside this module; the portable package ships sources
+    next to an official interpreter rather than a frozen binary.
+    """
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), name)
 
 
 def _data_uri(filename, mime="image/png"):

@@ -308,8 +308,8 @@ Excel 報告的工作表:
 ### Excel 是用 stdlib 寫的
 
 `.xlsx` 本質是一包 XML 的 zip,所以 `evidence_report.py` 用 `zipfile` 直接產生,
-**不需要 openpyxl 或任何 pip 套件**。這保住了 fw2sbom「零依賴」的特性,PyInstaller
-打包出來的單一 exe 也不會因此變大或需要額外 hidden-import。
+**不需要 openpyxl 或任何 pip 套件**。這保住了 fw2sbom「零依賴」的特性,portable
+套件也不會因此變大或需要額外附帶什麼。
 
 ## 8-bit MCU 韌體 (MCS-51 / 8051)
 
@@ -454,56 +454,18 @@ level),並提供**兩個下載連結**:CycloneDX JSON 與 Excel 證據報告,與
 檔案內容不會寫入磁碟、也不會送到本機以外的地方。
 
 服務若偵測到指定的 port 已被其他程式佔用,會直接報錯結束(exit code 1)而不是
-靜默地啟動一個不會有人連到的實例——對雙擊執行的 exe 來說,這種沉默是最糟的失敗
-方式。用 `FW2SBOM_PORT=<port>` 換 port。
+靜默地啟動一個不會有人連到的實例——對雙擊 `.bat` 啟動的客戶來說,這種沉默是最糟
+的失敗方式。用 `FW2SBOM_PORT=<port>` 換 port。
 
-### 打包成單一執行檔(給客戶用)
+### Portable 版(唯一的交付形式)
 
-不想讓客戶自己裝 Python,可以用 [PyInstaller](https://pyinstaller.org/) 把
-`service.py`(連同 `fw2sbom.py`)打包成一個獨立 `.exe`,客戶下載後雙擊就能跑,
-不需要安裝 Python 或任何套件:
+客戶不需要自己裝 Python,我們也不交付任何自己編譯出來的執行檔:發布的是
+「隨附官方 Python 直譯器的資料夾」。
 
-```bash
-pip install pyinstaller
-pyinstaller fw2sbom-service.spec
-# 產出: dist/fw2sbom-service.exe
-```
-
-倉庫裡的 `fw2sbom-service.spec` **不是** PyInstaller 預設產生的那份,請用它而不要
-自己下 `pyinstaller --onefile service.py` —— 它的 `datas` 帶了三樣必須一起進 exe
-的東西:
-
-| 檔案 | 少了會怎樣 |
-|---|---|
-| `signatures/` | exe 正常啟動,然後對每一份韌體都回報「找不到元件」 |
-| `onecra_logo.png` | 頁首品牌圖不見 |
-| `onecra_icon.png` | 瀏覽器分頁 favicon 不見 |
-
-兩個 PNG 是執行時讀取後轉 base64 內嵌進 HTML 的;signature 包則由
-`fw2sbom._resource_dir()` 從 `sys._MEIPASS` 讀回來。兩者都已處理好「一般執行」與
-「PyInstaller 凍結後」兩種路徑。
-
-簽章包缺席是最糟的失敗模式,因為它看起來像分析成功。要驗證打包結果:
-
-```bash
-dist/fw2sbom-service.exe --version    # 啟動時會印出載入了幾個簽章
-```
-
-- `--console` 保留終端機視窗,客戶可以看到「listening on http://127.0.0.1:8765/」
-  這類訊息,關閉視窗(或 Ctrl+C)就會停止服務 —— 對資安工具而言,這種可見性
-  比完全隱藏背景執行更值得信任。
-- 執行檔啟動後會自動開啟瀏覽器到 `http://127.0.0.1:8765/`,行為與 `python
-  service.py` 完全相同,一樣只綁定 `127.0.0.1`、分析全在本機記憶體完成。
-- 只需把 `dist/fw2sbom-service.exe` 這一個檔案交給客戶即可;`build/` 目錄和
-  `.spec` 檔是建置產物,不用一起發布。
-- PyInstaller 打包出的執行檔是平台相依的(在 Windows 上打包只能給 Windows
-  用戶);若客戶用 macOS/Linux,需要在對應平台上重新執行上述指令。
-
-### 免簽章的 Portable 版(不用打包 exe)
-
-PyInstaller 的 `.exe` 沒有數位簽章,客戶電腦的 Windows SmartScreen / 防毒軟體
-可能直接攔下或跳警告,要真的解決得買 EV 程式碼簽章憑證。如果想避開這件事,
-可以改發布「隨附 Python 直譯器的資料夾」,一樣不需要客戶自己裝 Python。
+> **曾經有過 PyInstaller 單檔 `.exe`,已經取消。**它沒有數位簽章,Windows
+> SmartScreen / 防毒軟體會攔下或跳「未知發行者」警告,而要真的解決得買 EV
+> 程式碼簽章憑證。Portable 版存在的理由正正就是繞開這件事 —— 同時維護兩種交付
+> 形式,等於維護一個比替代品差的東西。歷史紀錄留在 [RELEASE.md](RELEASE.md)。
 
 **這件事已經腳本化了**,不用手動做:
 
@@ -545,7 +507,7 @@ zip 是用 `scripts/make_deterministic_zip.py` 寫的(entry 排序、timestamp�
 - 整個資料夾(python.exe + 一堆 .pyd/.dll + 我們的 4 個 .py/.png + `.bat`)大約
   20 MB,壓縮成 zip 給客戶,解壓縮後雙擊 `.bat` 就是「one click」——不會有
   SmartScreen「未知發行者」警告,因為裡面沒有我們自己編譯/連結出的 exe。
-- 行為與 `python service.py` 和 PyInstaller 版完全一致:只綁定
+- 行為與 `python service.py` 完全一致:只綁定
   `127.0.0.1`、自動開瀏覽器、`--console` 式保留視窗可見分析過程、
   port 被佔用時會明確報錯而不是靜默失敗。
 - 這個 embeddable Python 是官方從 python.org 發佈、可自由重新散布的版本,不含
@@ -697,7 +659,6 @@ fw2sbom/
 │   ├── fetch-corpus.py           # 下載 corpus 測試用的真實廠商韌體
 │   └── python-embed.sha256       # 釘住的官方 CPython embeddable hash
 ├── .github/workflows/ci.yml      # Linux + Windows 測試、schema 驗證、可重現打包
-├── fw2sbom-service.spec    # PyInstaller 設定(datas 帶 signatures/ 與 PNG)
 ├── pyproject.toml
 ├── RELEASE.md              # 每個交付 build 的 hash / commit / CPython 版本紀錄
 ├── STATUS.md               # 單頁專案狀態快照

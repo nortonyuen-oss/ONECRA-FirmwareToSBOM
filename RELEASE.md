@@ -26,8 +26,11 @@ Portable zip 係 **reproducible** 嘅:`scripts/build-portable.ps1` 用
 都會出到同一個 SHA-256。所以下面嗰個 hash 唔單止係「我哋嗰次 build 嘅紀錄」,
 而係可以獨立重現嘅。
 
-PyInstaller 嘅 `.exe` **唔係** reproducible(PyInstaller 會 embed build path
-同 timestamp),所以 exe 嘅 hash 只係「嗰一次 build 嘅紀錄」,rebuild 會唔同。
+**PyInstaller 單檔 `.exe` 已經取消**(2026-09-16),往後唔會再有。佢冇數位簽章,
+Windows SmartScreen 會跳「未知發行者」,而 portable 版存在嘅理由就係繞開呢件事 ——
+同時維護兩種交付形式等於維護一個較差嘅。另外 PyInstaller 會 embed build path 同
+timestamp,所以嗰啲 exe 嘅 hash 從來只係「嗰一次 build 嘅紀錄」,rebuild 會唔同。
+下面 v1.7.1 之前嘅 release 仲有 exe 嘅紀錄,保留返 —— 嗰啲係當時真係交付過嘅嘢。
 
 ---
 

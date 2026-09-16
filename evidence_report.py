@@ -14,8 +14,8 @@ raw magic hits were rejected as false positives. For a CRA-style supply-chain
 file, "we looked for BusyBox and it is not there" is a finding; silence is not.
 
 The .xlsx is written with the standard library only (an xlsx is a zip of XML
-parts), so fw2sbom keeps its no-pip-dependencies property and stays packageable
-with PyInstaller as a single self-contained executable.
+parts), so fw2sbom keeps its no-pip-dependencies property and the portable
+package needs nothing beyond an official Python interpreter.
 """
 
 import collections

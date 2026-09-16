@@ -84,10 +84,11 @@ _VALID_TYPES = {"application", "library", "framework", "operating-system",
 def _resource_dir():
     """Directory holding bundled data files.
 
-    PyInstaller extracts --add-data payloads next to sys._MEIPASS; a normal
-    checkout keeps them beside this module.
+    Both a checkout and the portable package keep them beside this module - the
+    portable package is a folder of sources next to an official interpreter, not
+    a frozen binary, which is the whole reason it needs no code signature.
     """
-    return getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.dirname(os.path.abspath(__file__))
 
 
 def _validate_signature(sig, source):
