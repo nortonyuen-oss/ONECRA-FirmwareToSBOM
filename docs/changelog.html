@@ -154,9 +154,86 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.14.0</span>
+        <span class="ver">1.15.0</span>
         <span class="date">2026-09-16</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>PC BIOS:123 個模組,而字串比對一個都找不到</h2>
+        <p>
+          BIOS 是唯一一類<strong>字串比對幾乎找不到任何東西</strong>的韌體。一份
+          公開的 EDK2 映像,整整 4 MB,我們資料庫裡 36 個簽章<strong>一個都沒有
+          命中</strong> —— 沒有 OpenSSL banner、沒有版本字串、什麼都沒有。
+        </p>
+        <p>
+          但它有另一樣東西:build 系統自己寫進去的清單。每個模組都帶著自己的名字,
+          名字被剝掉的還有 GUID 精確指認。同一份映像跑出 <strong>123 個模組,
+          119 個有名字</strong>。
+        </p>
+        <div class="tw"><table>
+          <thead><tr><th>來源</th><th>內容</th><th>Confidence</th></tr></thead>
+          <tbody>
+            <tr><td>USER_INTERFACE section</td><td>模組名稱,build 當時怎麼叫它就是什麼</td><td class="n">0.97</td></tr>
+            <tr><td>檔案 GUID</td><td>名稱被剝掉時仍然精確指認</td><td class="n">0.90</td></tr>
+            <tr><td>PE 檔頭</td><td>指令集(x86-64 / IA-32 / AArch64 / RISC-V)</td><td class="n">宣告值</td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          <strong>而絕大部分都藏在一層壓縮後面。</strong>實測:1.4 MB 解開變成
+          16 MB,123 個模組裡有 112 個在裡面。不解壓縮的工具看到十幾個模組,就當
+          自己讀完了一份 BIOS。解開的內容也會照樣跑字串比對 —— 那份映像唯一命中的
+          元件(OpenSSL)就只在解壓後找得到。
+        </p>
+        <p>
+          <strong>Management Engine 不會被當成韌體的一部分。</strong>你從 PC 上
+          dump 出來的通常是整顆 SPI flash,裡面除了 BIOS 還有 Intel ME —— 簽章過的
+          Intel 程式碼,Intel 以外沒有人讀得懂。把整個檔案一起量,等於把兩件不同的
+          東西平均起來,結果哪一件都不描述。現在依 descriptor 切開,ME 照實報成
+          「無法列舉」。
+        </p>
+        <p>
+          三件事是<strong>刻意不做</strong>的:不為 UEFI 模組生 purl(它不是任何
+          生態系裡的套件,硬生一個等於餵給 CVE 比對一個世上不存在的識別碼);模組的
+          VERSION section 會標明那是模組自己的版本、不是函式庫版本(EDK2 幾乎永遠
+          寫 1.0);EFI/Tiano 壓縮認得但解不開,這類區段會<strong>明確報告讀不到</strong>
+          而不是略過 —— 略過會讓清單靜靜變短。
+        </p>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            <strong>只是「切出來」的區段被標成「已解開」。</strong>那個旗標的意思是
+            「無論熵值多高,這一段我們讀得懂」。但 ESP32 的 partition 與 UEFI 的
+            flash region 只是從檔案裡切一段出來,不是解壓出來的。後果是<strong>加密
+            的 ESP32 partition、或 Intel ME 區,會因為「我們有它的 bytes」而被判成
+            明文</strong>。ESP32 那條路徑同樣受影響,一起修了。
+          </p>
+          <p>
+            <strong>剛列完 123 個模組,標題卻寫「無法靜態識別元件」。</strong>
+            調和那個矛盾的函式只看得到簽章命中與套件資料庫,看不到由結構讀出來的
+            元件。現在兩者都算。
+          </p>
+        </div>
+        <div class="fixed">
+          <div class="h">真實韌體教的兩件事</div>
+          <p>
+            合成測試檔是照規格寫的,這兩個缺陷它們一個都看不出來:<strong>pad file
+            的 GUID 是全 0xFF,和抹除過的 flash 一模一樣</strong> —— 用 GUID 判斷
+            volume 結尾,會在第一個 pad 停下來,真實映像裡整個 PEI volume 的模組
+            就這樣消失了。還有<strong>存放 UEFI 變數的 NVRAM 區與模組區共用檔頭</strong>,
+            當成模組區來讀會憑空「生」出一個不存在的模組 —— 真實映像第一次跑就生了。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,256,788 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">2b9ab85e31e10d8afbd7075c7dc12f1eca02261b4381df9fda6a9c1a29f43e3f</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.14.0</span>
+        <span class="date">2026-09-16</span>
       </div>
       <div>
         <h2>加密的韌體:在介面裡直接比對廠商 SBOM</h2>

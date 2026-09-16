@@ -34,6 +34,93 @@ timestamp,所以嗰啲 exe 嘅 hash 從來只係「嗰一次 build 嘅紀錄」,
 
 ---
 
+## v1.15.0
+
+| | |
+|---|---|
+| Tag | `v1.15.0` |
+| 程式碼 commit | `8b00a2db8fa89e580360f9c1100633564d093bd2` |
+| Build 日期 | 2026-09-16 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+Roadmap **Phase 4**:UEFI / PC BIOS。
+
+### Portable 版(唯一交付形式)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,256,788 bytes |
+| SHA-256 | `2b9ab85e31e10d8afbd7075c7dc12f1eca02261b4381df9fda6a9c1a29f43e3f` |
+| 內容 | 57 個檔案(多咗 `uefi.py`) |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `aeaf35926d00db0cf01e88495b55961e6a8d41c804d701477075ed4262adfb3d` |
+| `container.py` | `9366132ebeac6b27f92a1dfd3f6ff064b2dc101d707fb4cddb0fa3c11e9d5564` |
+| `uefi.py` | `1d4e31601ee9c48a6d2f97f2a7fc927f4dadef606915ff20b70401ed9695d52b` |
+
+其餘檔案與 v1.14.0 相同。
+
+### 新增:`uefi.py`
+
+BIOS 係唯一一類**字串比對乜都搵唔到**嘅韌體。一份 EDK2 release build 入面冇任何
+函式庫 banner ——實測公開 OVMF 映像,成 4 MB,我哋**全部 36 個簽章一個都冇命中**。
+
+但佢有另一樣嘢:**build 系統自己寫低嘅清單**。
+
+- **每個模組都帶住自己個名**(`USER_INTERFACE` section),名被剝咗仲有 GUID 精確
+  指認。同一份 OVMF:**123 個模組,119 個有名**。
+- **結構就係切法**:flash descriptor → BIOS region → firmware volume → file →
+  section,而其中一個 section 通常係 LZMA,入面先係真正嘅嘢。實測
+  **1.4 MB 解開變 16 MB,123 個模組有 112 個喺入面**。唔解壓縮嘅工具見到十幾個
+  模組就當讀完咗一份 BIOS。
+- **解開嘅內容照樣跑字串比對** —— 嗰份 OVMF 唯一命中嘅元件(OpenSSL,得符號冇
+  版本)就只有喺解壓後嘅 volume 先搵得到。
+- **Management Engine 唔會當成韌體一部分**:客戶 dump 通常係成顆 SPI flash,ME
+  係簽章過嘅 Intel 程式碼,Intel 以外冇人讀得明。依 descriptor 切開,ME 照實報
+  opaque、未列舉。
+- **指令集由 PE 檔頭讀出**(x86-64 / IA-32 / AArch64 / RISC-V),唔使估。
+
+### 三個刻意嘅限制
+
+- **唔發 purl。** UEFI 模組唔係任何生態系裡嘅套件,硬生一個 `pkg:generic/DxeCore`
+  等於餵畀 CVE 比對系統一個世上冇嘅識別碼 —— 比留空更糟。身分用 GUID。
+- **`VERSION` section 唔係函式庫版本。** EDK2 實務上幾乎永遠係 `1.0`,照報並附
+  一句講明佢描述嘅係模組本身。
+- **EFI/Tiano 壓縮認得但解唔開**,呢類 section 會**明確報告讀唔到**,而唔係略過
+  ——略過會令清單靜靜變短。
+
+### 修正(兩個係跑真檔先揭發到)
+
+- **Pad file 嘅 GUID 係全 0xFF,同抹除 flash 一模一樣。** 用 GUID 判斷 volume
+  結尾,會喺第一個 pad 度停 —— 真實 OVMF 入面**成個 PEI volume 嘅模組就係咁冇咗**。
+- **Variable store 同模組 volume 共用檔頭。** 當 FFS 咁行會由 NVRAM 內容「生」出
+  一個唔存在嘅模組。真實映像第一次跑就生咗一個。
+- **只係切出嚟嘅區段被標成「已解開」。** `expanded` 嘅意思係「無論熵值幾高我哋都
+  讀得明呢段」。但 ESP32 partition 同 UEFI flash region 只係由檔案切一段出嚟。
+  後果:**加密嘅 ESP32 partition 或者 Intel ME 區會因為「我哋有佢啲 bytes」而被
+  判成明文**。ESP32 嗰條路徑一樣受影響,一齊修咗。
+- **Opacity 調和睇唔到結構性元件。** 啱啱列完 123 個 BIOS 模組,標題寫住「無法
+  靜態識別元件」。調和函式而家連 UEFI / Espressif 元件一齊計。
+
+### 測試
+
+192 個(由 164 增加)。新增 `UefiTest` 二十項、`RealBiosTest` 八項(對住真實 OVMF
+映像),連兩個合成 fixture(`uefi_volume.bin`、`uefi_flash.bin`)。CI 多咗一個
+真實 BIOS 端到端 job。
+
+### 驗證狀態
+
+firmware volume / file / section / LZMA 呢條路係對住公開 EDK2 OVMF build 開發同
+驗證嘅。**Intel flash descriptor 嗰段係照公開規格寫,未跑過真實廠商 dump** ——
+手上仲未有客戶嘅 BIOS 樣本。
+
+---
+
 ## v1.14.0
 
 | | |
