@@ -154,9 +154,80 @@
 
     <article class="rel">
       <div class="stamp">
+        <span class="ver">1.14.0</span>
+        <span class="date">2026-09-16</span>
+        <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>加密的韌體:在介面裡直接比對廠商 SBOM</h2>
+        <p>
+          映像一旦加密,裡面的元件就在密碼後面,<strong>再聰明的靜態工具都讀不出來</strong>
+          —— 這不是我們的限制,是所有同類工具的限制。唯一的出路是向供應商索取他們
+          自己的 SBOM,而 CRA 下製造商本來就有權這樣要求。
+        </p>
+        <p>
+          這個功能一直都在,但只有命令列版有 —— 而最需要它的那批客戶(CCTV、專有
+          SoC 裝置),正好就是最不會碰命令列的那批。現在拖拉頁面的下載區下方就有
+          「廠商 SBOM(選用)」,拖 CycloneDX 或 SPDX JSON 進去即可,<strong>可以
+          同時放多份</strong>:一個產品往往不止一個供應商,把它們合併成一份就分不出
+          哪一句是誰講的。
+        </p>
+        <p>但匯入不是把兩份清單接起來,而是逐項比對:</p>
+        <div class="tw"><table>
+          <thead><tr><th>結果</th><th>意思</th></tr></thead>
+          <tbody>
+            <tr><td>獲映像佐證</td><td>廠商說有,映像裡也找得到</td></tr>
+            <tr><td><strong>版本衝突</strong></td><td>廠商聲明的版本,與映像裡實際編進去的不同</td></tr>
+            <tr><td>未觀察到</td><td>廠商說有,但映像裡找不到 —— <strong>這不代表不存在</strong></td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          衝突排在最前面並用紅色標出。廠商聲明的版本與映像裡編進去的不同,是整個
+          比對功能存在的理由 —— 把它埋在一堆「一致」的統計數字下面就浪費了。
+        </p>
+        <p>
+          讀不到的廠商檔案會單獨列出原因,不會靜靜略過:<strong>「0 個衝突」與
+          「我們根本打不開你供應商那份檔案」在畫面上看起來一模一樣</strong>,除非
+          後者講出來。而且它不會連累你本來要做的韌體分析。
+        </p>
+        <p>
+          上傳的廠商 SBOM 與韌體一樣只存在於記憶體裡,不寫入磁碟、不離開這台機器。
+        </p>
+        <p>
+          順帶補上頁面文案:輸入格式其實早就支援 <code>.hex</code>、<code>.s19</code>、
+          <code>.uf2</code>、<code>.elf</code>、ESP32 映像與整顆 flash dump,但頁面
+          一直只寫著 <code>.bin</code>。
+        </p>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            <strong>沒有 purl 的廠商 SBOM 比對不到任何東西。</strong>比對只用 purl
+            當識別鍵,但供應商自己產生的 SPDX 很常沒有 purl。結果是整份文件都被歸成
+            「聲明了但未觀察到」—— 看起來像一切正常,實際上是根本沒比對成功。現在
+            purl 與名稱都會用來配對。如果你之前匯入過廠商 SBOM 而結果是「全部未觀察
+            到」,值得用這一版重跑一次。
+          </p>
+        </div>
+        <div class="fixed">
+          <div class="h">已取消的交付形式</div>
+          <p>
+            PyInstaller 打包的單檔 <code>.exe</code> 已經停止提供。它沒有數位簽章,
+            Windows SmartScreen 會跳「未知發行者」警告 —— 而 portable 版存在的理由
+            正是繞開這件事。同時維護兩種交付形式,等於維護一個比替代品差的東西。
+            <strong>本頁的 portable zip 是唯一的交付形式</strong>,功能完全相同。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,246,254 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">b25f09724d59e1d96b8358601c5e77b178734f9ab548dc881ef252cba82a1776</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
         <span class="ver">1.13.1</span>
         <span class="date">2026-09-14</span>
-        <span class="tag current">目前版本</span>
       </div>
       <div>
         <div class="fixed">
