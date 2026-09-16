@@ -68,6 +68,26 @@ def normalise_key(name, purl=None):
     return (name or "").strip().lower()
 
 
+def _keys(name, purl=None):
+    """Every key a component may legitimately be found under.
+
+    Plenty of real vendor SBOMs carry no purl at all - supplier-generated SPDX
+    especially - and ours almost always do. Keying only on the purl meant those
+    documents matched nothing and were reported as "declared but not observed"
+    in full, which reads as a clean bill of health when it is really a failure
+    to compare. So a component is indexed under its purl *and* its name, and
+    the name is what rescues those documents.
+    """
+    keys = []
+    base = _base_purl(purl)
+    if base:
+        keys.append(base.lower())
+    plain = (name or "").strip().lower()
+    if plain and plain not in keys:
+        keys.append(plain)
+    return keys
+
+
 # --------------------------------------------------------------------------- #
 # Readers
 # --------------------------------------------------------------------------- #
@@ -172,7 +192,7 @@ def _document_identity(doc, path):
 
 
 def load(path):
-    """Read a vendor SBOM. Returns {document, components}, or raises."""
+    """Read a vendor SBOM from a file. Returns {document, components}."""
     try:
         size = os.path.getsize(path)
     except OSError as e:
@@ -181,12 +201,29 @@ def load(path):
         raise VendorSBOMError(
             f"{path} is {size} bytes; refusing to read an SBOM that large")
     try:
-        with open(path, encoding="utf-8") as f:
-            doc = json.load(f)
-    except (OSError, ValueError) as e:
-        raise VendorSBOMError(f"{path} is not readable JSON: {e}")
+        with open(path, "rb") as f:
+            blob = f.read()
+    except OSError as e:
+        raise VendorSBOMError(f"cannot open {path}: {e}")
+    return loads(blob, path)
+
+
+def loads(blob, label):
+    """Read a vendor SBOM from bytes. `label` names it in every message.
+
+    The drag-and-drop service holds uploads in memory and never writes them to
+    disk - a promise printed on its own page - so it needs a way in that does
+    not go through a filename.
+    """
+    if len(blob) > MAX_DOCUMENT_BYTES:
+        raise VendorSBOMError(
+            f"{label} is {len(blob)} bytes; refusing to read an SBOM that large")
+    try:
+        doc = json.loads(blob.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as e:
+        raise VendorSBOMError(f"{label} is not readable JSON: {e}")
     if not isinstance(doc, dict):
-        raise VendorSBOMError(f"{path} does not contain an SBOM document")
+        raise VendorSBOMError(f"{label} does not contain an SBOM document")
 
     if doc.get("bomFormat") == "CycloneDX":
         components = _read_cyclonedx(doc)
@@ -194,18 +231,18 @@ def load(path):
         components = _read_spdx(doc)
     else:
         raise VendorSBOMError(
-            f"{path} is neither CycloneDX (no bomFormat) nor SPDX "
+            f"{label} is neither CycloneDX (no bomFormat) nor SPDX "
             "(no spdxVersion); those are the two formats we can read")
 
     if len(components) > MAX_COMPONENTS:
         raise VendorSBOMError(
-            f"{path} declares {len(components)} components; refusing to merge")
+            f"{label} declares {len(components)} components; refusing to merge")
     if not components:
         raise VendorSBOMError(
-            f"{path} parsed as {_document_identity(doc, path)['format']} but "
+            f"{label} parsed as {_document_identity(doc, label)['format']} but "
             "lists no components - check it is the right file")
 
-    return {"document": _document_identity(doc, path),
+    return {"document": _document_identity(doc, label),
             "components": components}
 
 
@@ -226,20 +263,22 @@ def compare(found, vendor_components):
     """
     ours = {}
     for item in found:
-        key = normalise_key(item.get("name"), item.get("purl"))
-        if key:
+        for key in _keys(item.get("name"), item.get("purl")):
             ours.setdefault(key, item)
 
     agreements, conflicts, vendor_only = [], [], []
-    matched_keys = set()
+    matched = []
 
     for entry in vendor_components:
-        key = normalise_key(entry.get("name"), entry.get("purl"))
-        mine = ours.get(key)
+        mine = None
+        for key in _keys(entry.get("name"), entry.get("purl")):
+            mine = ours.get(key)
+            if mine is not None:
+                break
         if mine is None:
             vendor_only.append(entry)
             continue
-        matched_keys.add(key)
+        matched.append(mine)
         theirs_version = entry.get("version")
         mine_version = mine.get("version")
         if not theirs_version or not mine_version:
@@ -254,5 +293,13 @@ def compare(found, vendor_components):
                               "vendor_version": theirs_version,
                               "our_version": mine_version})
 
-    ours_only = [item for key, item in ours.items() if key not in matched_keys]
+    # One component is indexed under several keys, so "what did the vendor not
+    # mention" is asked of the components themselves, not of the index.
+    ours_only = []
+    for item in found:
+        if any(item is m for m in matched):
+            continue
+        if any(item is already for already in ours_only):
+            continue
+        ours_only.append(item)
     return agreements, conflicts, vendor_only, ours_only

@@ -51,7 +51,7 @@ import spdx_report
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.13.1"
+TOOL_VERSION = "1.14.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component

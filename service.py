@@ -32,6 +32,7 @@ import evidence_report
 import fw2sbom as core
 import image_input
 import spdx_report
+import vendor_sbom
 
 HOST = "127.0.0.1"
 PORT = int(os.environ.get("FW2SBOM_PORT", "8765"))
@@ -196,6 +197,38 @@ PAGE_TEMPLATE = """<!doctype html>
   .notice b { color: var(--heading); }
   .notice ul { margin: .5rem 0 0; padding-left: 1.1rem; color: var(--muted); }
   .notice li { margin: .15rem 0; }
+  #vendor-zone {
+    margin-top: .75rem; border: 1px dashed var(--border); border-radius: 12px;
+    padding: .9rem 1rem; background: var(--card); font-size: .85rem;
+  }
+  #vendor-zone.drag { border-color: var(--accent); background: var(--accent-soft); }
+  #vendor-zone .row { display: flex; align-items: baseline; gap: .6rem; flex-wrap: wrap; }
+  #vendor-zone b { color: var(--heading); font-size: .85rem; }
+  #vendor-zone .why { color: var(--muted); margin: .35rem 0 0; line-height: 1.5; }
+  #vendor-pick {
+    color: var(--accent); cursor: pointer; text-decoration: underline;
+    text-underline-offset: 2px; background: none; border: none; padding: 0;
+    font: inherit;
+  }
+  #vendor-input { display: none; }
+  #vendor-list { margin: .5rem 0 0; display: flex; flex-wrap: wrap; gap: .4rem; }
+  .chip {
+    display: inline-flex; align-items: center; gap: .4rem; padding: .2rem .5rem;
+    border-radius: 999px; font-size: .78rem; background: var(--accent-soft);
+    color: var(--accent);
+  }
+  .chip button { background: none; border: none; color: inherit; cursor: pointer; font: inherit; padding: 0; }
+  .vendor-doc { border-top: 1px solid var(--border); padding-top: .8rem; margin-top: .8rem; }
+  .vendor-doc:first-child { border-top: none; padding-top: 0; margin-top: 0; }
+  .vendor-doc h3 { margin: 0 0 .3rem; font-size: .9rem; color: var(--heading); }
+  .vendor-doc .counts { color: var(--muted); font-size: .8rem; margin: 0 0 .5rem; }
+  .conflict {
+    border-left: 3px solid var(--err); padding: .4rem .7rem; margin: .4rem 0;
+    background: color-mix(in srgb, var(--err) 8%, transparent); border-radius: 0 6px 6px 0;
+  }
+  .conflict b { color: var(--heading); }
+  .conflict .v { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
+  .not-observed { color: var(--muted); font-size: .82rem; margin: .4rem 0 0; line-height: 1.6; }
   .disclaimer { margin-top: 1.5rem; font-size: .78rem; color: var(--muted); line-height: 1.5; }
   footer { margin-top: 2rem; font-size: .78rem; color: var(--muted); }
 </style>
@@ -205,14 +238,31 @@ PAGE_TEMPLATE = """<!doctype html>
   <header>
     <img class="brand-logo" src="__LOGO_DATA_URI__" alt="Onecra">
     <p class="tagline">fw2sbom &middot; Firmware SBOM Generator &middot; v__TOOL_VERSION__</p>
-    <p class="sub">拖曳 firmware 映像到下方，產生 evidence-based CycloneDX 1.6 SBOM。支援 raw <code>.bin</code> 與廠商封包格式（自動去框）</p>
+    <p class="sub">拖曳 firmware 到下方，產生 evidence-based CycloneDX 1.6 或 SPDX 2.3 SBOM。<br>
+      收 raw <code>.bin</code>、<code>.hex</code>、<code>.s19</code>、<code>.uf2</code>、<code>.elf</code>、
+      ESP32 映像與整顆 flash dump，以及廠商封包格式（自動去框）</p>
   </header>
 
   <div class="wrap">
     <div id="drop">
       <p><strong>拖曳 firmware 檔案到這裡</strong></p>
-      <p class="hint">任何副檔名皆可（本機分析，檔案不會外傳）</p>
+      <p class="hint">任何副檔名皆可（本機分析，檔案不會寫入磁碟、也不會外傳）</p>
       <input type="file" id="file-input" accept="*/*">
+    </div>
+
+    <div id="vendor-zone">
+      <div class="row">
+        <b>廠商 SBOM（選用）</b>
+        <button type="button" id="vendor-pick">選擇或拖曳 CycloneDX / SPDX JSON</button>
+      </div>
+      <p class="why">
+        映像加密就讀不到裡面的元件，任何靜態工具都一樣 —— 這時唯一的出路是向供應商
+        索取他們自己的 SBOM（CRA 下製造商本來就有權要求）。放進來之後不是把兩份清單
+        接起來，而是<strong>逐項比對</strong>：哪些獲映像佐證、哪些版本對不上、哪些
+        只有廠商說有。可同時放多份（不同供應商）。
+      </p>
+      <input type="file" id="vendor-input" accept=".json,application/json" multiple>
+      <div id="vendor-list"></div>
     </div>
     <div id="status"></div>
 
@@ -223,6 +273,8 @@ PAGE_TEMPLATE = """<!doctype html>
         <thead><tr><th>Component</th><th>Version</th><th>Confidence</th><th>Level</th></tr></thead>
         <tbody id="tbody"></tbody>
       </table>
+      <div class="notice" id="vendor-notice"></div>
+      <div id="vendor-report"></div>
       <div class="actions">
         <a id="download" href="#">下載 SBOM (CycloneDX JSON)</a>
         <a id="download-spdx" href="#">下載 SBOM (SPDX 2.3 JSON)</a>
@@ -246,6 +298,49 @@ const tbody = document.getElementById('tbody');
 const download = document.getElementById('download');
 const spdxLink = document.getElementById('download-spdx');
 const evidenceLink = document.getElementById('download-evidence');
+const vendorZone = document.getElementById('vendor-zone');
+const vendorInput = document.getElementById('vendor-input');
+const vendorList = document.getElementById('vendor-list');
+const vendorReport = document.getElementById('vendor-report');
+const vendorNotice = document.getElementById('vendor-notice');
+
+// Vendor documents are held here, not uploaded on their own: they only mean
+// something next to an image to compare them against.
+let vendorFiles = [];
+let lastFirmware = null;
+
+function escapeHtml(text) {
+  return String(text == null ? '' : text).replace(/[&<>"']/g, function (ch) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+  });
+}
+
+function renderVendorList() {
+  vendorList.innerHTML = '';
+  vendorFiles.forEach(function (file, index) {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.innerHTML = escapeHtml(file.name) + ' <button type="button" title="移除">&times;</button>';
+    chip.querySelector('button').addEventListener('click', function () {
+      vendorFiles.splice(index, 1);
+      renderVendorList();
+      // The comparison is part of the result, so changing the inputs has to
+      // change the result rather than leave a stale one on screen.
+      if (lastFirmware) { handleFile(lastFirmware); }
+    });
+    vendorList.appendChild(chip);
+  });
+}
+
+function addVendorFiles(files) {
+  for (const file of files) {
+    if (!vendorFiles.some(function (f) { return f.name === file.name && f.size === file.size; })) {
+      vendorFiles.push(file);
+    }
+  }
+  renderVendorList();
+  if (lastFirmware) { handleFile(lastFirmware); }
+}
 
 function setStatus(msg, isErr) {
   status.textContent = msg || '';
@@ -261,8 +356,12 @@ async function handleFile(file) {
   setStatus('分析中: ' + file.name + ' ...');
   card.classList.remove('show');
 
+  lastFirmware = file;
   const fd = new FormData();
   fd.append('file', file, file.name);
+  for (const vendorFile of vendorFiles) {
+    fd.append('vendor', vendorFile, vendorFile.name);
+  }
 
   let res;
   try {
@@ -320,16 +419,29 @@ async function handleFile(file) {
   } else {
     for (const c of data.components) {
       const tr = document.createElement('tr');
+      // A vendor's assertion and our observation are both components, but they
+      // are not the same kind of claim; the table has to keep them apart.
+      const tag =
+        c.evidence_class === 'embedded-standard-data' ? '標準資料' :
+        c.evidence_class === 'vendor-sbom' ? '廠商聲明' :
+        c.evidence_class === 'esp-idf-app-descriptor' ? '映像自述' :
+        c.evidence_class === 'package-database' ? '套件資料庫' : '';
       tr.innerHTML =
-        '<td>' + c.name +
-          (c.evidence_class === 'embedded-standard-data'
-            ? ' <span class="tag">標準資料</span>' : '') + '</td>' +
-        '<td>' + (c.version || '?') + '</td>' +
-        '<td>' + c.confidence + '</td>' +
-        '<td><span class="lvl ' + levelClass(c.confidence_level) + '">' + c.confidence_level + '</span></td>';
+        '<td>' + escapeHtml(c.name) +
+          (tag ? ' <span class="tag">' + tag + '</span>' : '') + '</td>' +
+        '<td>' + escapeHtml(c.version || '?') + '</td>' +
+        '<td>' + (c.confidence === null || c.confidence === undefined
+                    ? '<span class="empty">未觀察到</span>'
+                    : c.confidence) + '</td>' +
+        '<td>' + (c.confidence_level
+                    ? '<span class="lvl ' + levelClass(c.confidence_level) + '">' +
+                      escapeHtml(c.confidence_level) + '</span>'
+                    : '') + '</td>';
       tbody.appendChild(tr);
     }
   }
+
+  renderVendor(data);
 
   download.href = data.download_url;
   download.download = data.download_filename;
@@ -339,6 +451,66 @@ async function handleFile(file) {
   evidenceLink.download = data.evidence_filename;
   card.classList.add('show');
 }
+
+function renderVendor(data) {
+  vendorNotice.classList.remove('show');
+  vendorNotice.innerHTML = '';
+  vendorReport.innerHTML = '';
+
+  // A document we could not read must never look like a document that agreed
+  // with us: "0 conflicts" and "we never opened it" are opposite findings.
+  if (data.vendor_errors && data.vendor_errors.length) {
+    vendorNotice.innerHTML = '<b>有廠商 SBOM 讀不到，未列入比對</b><ul>' +
+      data.vendor_errors.map(function (e) {
+        return '<li>' + escapeHtml(e) + '</li>';
+      }).join('') + '</ul>';
+    vendorNotice.classList.add('show');
+  }
+
+  if (!data.vendor || !data.vendor.length) { return; }
+
+  vendorReport.innerHTML = data.vendor.map(function (doc) {
+    const conflicts = doc.conflicts.map(function (c) {
+      return '<div class="conflict"><b>' + escapeHtml(c.name) + '</b>：廠商聲明 ' +
+        '<span class="v">' + escapeHtml(c.vendor_version) + '</span>，映像裡是 ' +
+        '<span class="v">' + escapeHtml(c.our_version) + '</span></div>';
+    }).join('');
+    const notObserved = doc.not_observed.length
+      ? '<p class="not-observed"><b>廠商聲明但映像中未觀察到（' +
+        doc.not_observed.length + '）：</b>' +
+        doc.not_observed.map(function (c) {
+          return escapeHtml(c.name) + (c.version ? ' ' + escapeHtml(c.version) : '');
+        }).join('、') +
+        '<br>這不代表它們不存在 —— 讀不到與不存在是兩件事，兩者都已寫進 SBOM。</p>'
+      : '';
+    return '<div class="vendor-doc">' +
+      '<h3>' + escapeHtml(doc.file) +
+        ' <span class="tag">' + escapeHtml(doc.format) + '</span></h3>' +
+      '<p class="counts">聲明 ' + doc.declared + ' 項 · 獲映像佐證 ' + doc.corroborated +
+        ' · 版本衝突 ' + doc.conflicts.length +
+        ' · 未觀察到 ' + doc.not_observed.length +
+        (doc.subject ? ' · 對象 ' + escapeHtml(doc.subject) : '') + '</p>' +
+      conflicts + notObserved +
+      '</div>';
+  }).join('');
+}
+
+document.getElementById('vendor-pick').addEventListener('click', () => vendorInput.click());
+vendorInput.addEventListener('change', (e) => addVendorFiles(e.target.files));
+
+['dragenter', 'dragover'].forEach(evt =>
+  vendorZone.addEventListener(evt, (e) => {
+    e.preventDefault(); e.stopPropagation(); vendorZone.classList.add('drag');
+  }));
+['dragleave', 'drop'].forEach(evt =>
+  vendorZone.addEventListener(evt, (e) => {
+    e.preventDefault(); e.stopPropagation(); vendorZone.classList.remove('drag');
+  }));
+vendorZone.addEventListener('drop', (e) => {
+  if (e.dataTransfer.files && e.dataTransfer.files.length) {
+    addVendorFiles(e.dataTransfer.files);
+  }
+});
 
 drop.addEventListener('click', () => input.click());
 input.addEventListener('change', (e) => handleFile(e.target.files[0]));
@@ -365,8 +537,10 @@ PAGE = (PAGE_TEMPLATE
 def parse_multipart(body, boundary):
     """Minimal multipart/form-data parser (stdlib only, no cgi module).
 
-    Returns {field_name: str} for text fields and
-    {field_name: (filename, bytes)} for file fields.
+    Returns {field_name: [value, ...]} - a list because a field can legitimately
+    repeat: a customer may hold SBOMs from several suppliers for one product,
+    and dropping them one at a time would compare each against nothing. Text
+    fields give str values, file fields (filename, bytes) tuples.
     """
     delimiter = b"--" + boundary
     fields = {}
@@ -397,9 +571,10 @@ def parse_multipart(body, boundary):
         if not name:
             continue
         if "filename" in params:
-            fields[name] = (params["filename"], content)
+            fields.setdefault(name, []).append((params["filename"], content))
         else:
-            fields[name] = content.decode("utf-8", errors="replace")
+            fields.setdefault(name, []).append(
+                content.decode("utf-8", errors="replace"))
     return fields
 
 
@@ -437,7 +612,53 @@ def summarise(bom):
     return rows
 
 
-def analyze_bytes(filename, data):
+def read_vendor_sboms(uploads):
+    """Parse uploaded vendor SBOMs. Returns (documents, errors).
+
+    An unreadable vendor file must not cost the customer the firmware analysis
+    they actually came for: it is reported beside the result, not raised. What
+    it must never do is pass silently, because "no conflicts found" and "we
+    could not read your supplier's document" look identical on screen.
+    """
+    documents, errors = [], []
+    for name, blob in uploads or []:
+        try:
+            documents.append(vendor_sbom.loads(blob, name or "vendor SBOM"))
+        except vendor_sbom.VendorSBOMError as e:
+            errors.append(str(e))
+    return documents, errors
+
+
+def vendor_findings(report):
+    """Flatten the reconciliation for the browser.
+
+    Conflicts come first in every list this produces. A vendor declaring a
+    different version from the one compiled into the image is the most useful
+    thing the comparison can say, and burying it under a count of agreements
+    would waste it.
+    """
+    findings = []
+    for entry in report:
+        identity = entry["document"]
+        findings.append({
+            "file": identity["file"],
+            "format": identity["format"],
+            "subject": identity["subject"],
+            "declared": len(entry["components"]),
+            "corroborated": len(entry["agreements"]),
+            "conflicts": [{
+                "name": c["vendor"]["name"],
+                "vendor_version": c["vendor_version"],
+                "our_version": c["our_version"],
+            } for c in entry["conflicts"]],
+            "not_observed": [{
+                "name": c["name"], "version": c.get("version"),
+            } for c in entry["vendor_only"]],
+        })
+    return findings
+
+
+def analyze_bytes(filename, data, vendor_uploads=None):
     """Run the fw2sbom pipeline in-process on in-memory bytes."""
     delivered = data
     try:
@@ -459,13 +680,19 @@ def analyze_bytes(filename, data):
     packages = core.packages_to_components(rootfs)
     opacity = core.summarise_opacity(segments, opacity)
     opacity = core.reconcile_opacity(opacity, hits + packages, standards)
+
+    vendor_documents, vendor_errors = read_vendor_sboms(vendor_uploads)
+    vendor = core.reconcile_vendor_sboms(
+        vendor_documents, hits, standards, packages, False,
+        core.espressif_components(segments))
+
     name = filename or "firmware.bin"
     stem = os.path.splitext(os.path.basename(name))[0]
     bom = core.build_sbom(name, delivered, None, arm_info, hits, 6,
                           len(strings), container=container, opacity=opacity,
                           payload=payload, standards=standards,
                           segments=segments, rootfs=rootfs, packages=packages,
-                          source=source)
+                          vendor=vendor, source=source)
 
     spdx = spdx_report.build_spdx(bom, name, core.TOOL_NAME, core.TOOL_VERSION)
     sbom_filename = stem + "_SBOM.cdx.json"
@@ -491,6 +718,8 @@ def analyze_bytes(filename, data):
         "reassembled": source["converted"],
         "container": container,
         "opacity": opacity,
+        "vendor": vendor_findings(vendor),
+        "vendor_errors": vendor_errors,
     }
 
 
@@ -572,11 +801,13 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": f"malformed upload: {e}"}, 400)
             return
 
-        file_field = fields.get("file")
-        if not file_field or not isinstance(file_field, tuple):
+        uploaded = fields.get("file") or []
+        if not uploaded or not isinstance(uploaded[0], tuple):
             self._send_json({"error": "no file field in upload"}, 400)
             return
-        filename, data = file_field
+        filename, data = uploaded[0]
+        vendor_uploads = [item for item in fields.get("vendor") or []
+                          if isinstance(item, tuple)]
         if not data:
             self._send_json({"error": "empty file"}, 400)
             return
@@ -585,7 +816,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = analyze_bytes(filename, data)
+            result = analyze_bytes(filename, data, vendor_uploads)
         except Exception as e:
             self._send_json({"error": f"analysis failed: {e}"}, 500)
             return
@@ -607,6 +838,8 @@ class Handler(BaseHTTPRequestHandler):
             "file_size_bytes": result["file_size_bytes"],
             "container": result["container"],
             "opacity": result["opacity"],
+            "vendor": result["vendor"],
+            "vendor_errors": result["vendor_errors"],
             "download_url": f"/download/{sbom_id}",
             "download_filename": out_filename,
             "spdx_url": f"/spdx/{sbom_id}",

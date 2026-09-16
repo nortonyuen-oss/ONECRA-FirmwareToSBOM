@@ -946,6 +946,36 @@ class VendorSbomTest(unittest.TestCase):
                    if p["name"] == "fw2sbom:source_document"}
         self.assertEqual(sources, {"v0.json", "v1.json"})
 
+    def test_a_vendor_document_without_purls_still_matches(self):
+        """Plenty of supplier SBOMs carry no purl at all - supplier-generated
+        SPDX especially. Keying only on the purl meant those documents matched
+        nothing and every component came back "declared but not observed",
+        which reads as a clean bill of health when it is really a failure to
+        compare."""
+        ours = [{"name": "mbedtls", "version": "3.4.0",
+                 "purl": "pkg:github/Mbed-TLS/mbedtls@3.4.0"}]
+        vendor = [{"name": "mbedtls", "version": "3.4.1", "purl": None,
+                   "supplier": None, "licenses": [], "bom_ref": "v1"}]
+        agreements, conflicts, vendor_only, ours_only = vendor_sbom.compare(
+            ours, vendor)
+        self.assertEqual(conflicts[0]["our_version"], "3.4.0")
+        self.assertEqual([], vendor_only)
+        self.assertEqual([], ours_only)
+        self.assertEqual([], agreements)
+
+    def test_a_component_matched_once_is_not_also_reported_as_unmentioned(self):
+        """It is indexed under both its purl and its name; asking the index
+        what went unmatched would count it twice."""
+        ours = [{"name": "lwip", "version": "2.1.3",
+                 "purl": "pkg:github/lwip-tcpip/lwip@2.1.3"},
+                {"name": "zephyr", "version": "3.5.0",
+                 "purl": "pkg:github/zephyrproject-rtos/zephyr@3.5.0"}]
+        vendor = [{"name": "lwip", "version": "2.1.3", "purl": None,
+                   "supplier": None, "licenses": [], "bom_ref": "v1"}]
+        _agree, _conflicts, _vendor_only, ours_only = vendor_sbom.compare(
+            ours, vendor)
+        self.assertEqual([c["name"] for c in ours_only], ["zephyr"])
+
     def test_the_merged_document_still_validates(self):
         """Merging must not produce something a consumer will reject."""
         bom, _ = self.merged_bom(self.CYCLONEDX, self.SPDX)
@@ -1296,6 +1326,107 @@ class ServiceTest(unittest.TestCase):
         self.assertTrue(result["opacity"]["opaque"])
         self.assertEqual(result["components"], [])
         self.assertGreater(len(json.loads(result["sbom_json"])["components"]), 0)
+
+    # --- vendor SBOMs through the browser ---------------------------------- #
+
+    VENDOR_DOC = {
+        "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+        "metadata": {"component": {"type": "firmware", "name": "ACME sensor"}},
+        "components": [
+            {"type": "library", "name": "mbedtls", "version": "3.4.1"},
+            {"type": "library", "name": "lwip", "version": "2.1.3"},
+            {"type": "library", "name": "wolfssl", "version": "5.6.0"},
+        ],
+    }
+
+    def _with_vendor(self, extra=()):
+        blob = json.dumps(self.VENDOR_DOC).encode("utf-8")
+        uploads = [("supplier-a.cdx.json", blob)] + list(extra)
+        return service.analyze_bytes("cortexm_rtos.bin",
+                                     fixture("cortexm_rtos.bin"), uploads)
+
+    def test_a_vendor_sbom_can_arrive_with_the_firmware(self):
+        """The reconciliation was CLI-only until now, which left it out of
+        reach of exactly the customers who need it most: an encrypted image
+        cannot be read at all, and the supplier's own document is the only way
+        to say anything about it."""
+        result = self._with_vendor()
+        self.assertEqual(len(result["vendor"]), 1)
+        doc = result["vendor"][0]
+        self.assertEqual(doc["file"], "supplier-a.cdx.json")
+        self.assertEqual(doc["format"], "CycloneDX 1.6")
+        self.assertEqual(doc["subject"], "ACME sensor")
+        self.assertEqual(doc["declared"], 3)
+
+    def test_a_version_the_image_contradicts_is_reported(self):
+        """The most useful thing the comparison produces. The fixture contains
+        mbed TLS 3.4.0; the vendor claims 3.4.1."""
+        doc = self._with_vendor()["vendor"][0]
+        self.assertEqual([c["name"] for c in doc["conflicts"]], ["mbedtls"])
+        self.assertEqual(doc["conflicts"][0]["vendor_version"], "3.4.1")
+        self.assertEqual(doc["conflicts"][0]["our_version"], "3.4.0")
+        self.assertEqual([c["name"] for c in doc["not_observed"]], ["wolfssl"])
+        self.assertEqual(doc["corroborated"], 1)          # lwip 2.1.3 agrees
+
+    def test_an_unreadable_vendor_document_is_named_not_swallowed(self):
+        """"No conflicts found" and "we could not open your supplier's file"
+        look identical on screen unless the second one says so."""
+        result = self._with_vendor([("broken.json", b"{not json")])
+        self.assertEqual(len(result["vendor"]), 1)
+        self.assertEqual(len(result["vendor_errors"]), 1)
+        self.assertIn("broken.json", result["vendor_errors"][0])
+        # and the analysis the customer actually came for still happened
+        self.assertTrue(result["components"])
+
+    def test_vendor_components_reach_the_document_labelled(self):
+        result = self._with_vendor()
+        bom = json.loads(result["sbom_json"])
+        declared = [c for c in bom["components"]
+                    if any(p["name"] == "fw2sbom:evidence_class"
+                           and p["value"] == "vendor-sbom"
+                           for p in c.get("properties", []))]
+        self.assertEqual({c["name"] for c in declared},
+                         {"mbedtls", "lwip", "wolfssl"})
+        # and the screen shows exactly what the document contains
+        self.assertEqual(len(result["components"]), len(bom["components"]))
+
+    def test_no_vendor_document_means_no_vendor_section(self):
+        result = service.analyze_bytes("cortexm_rtos.bin",
+                                       fixture("cortexm_rtos.bin"))
+        self.assertEqual(result["vendor"], [])
+        self.assertEqual(result["vendor_errors"], [])
+
+    def test_several_suppliers_are_compared_separately(self):
+        """One product can have several suppliers, and merging their documents
+        into one would lose which of them made which claim."""
+        second = dict(self.VENDOR_DOC,
+                      components=[{"type": "library", "name": "zephyr",
+                                   "version": "3.5.99-ncs1"}])
+        result = self._with_vendor(
+            [("supplier-b.spdx.json", json.dumps(second).encode("utf-8"))])
+        self.assertEqual([d["file"] for d in result["vendor"]],
+                         ["supplier-a.cdx.json", "supplier-b.spdx.json"])
+        self.assertEqual(result["vendor"][1]["corroborated"], 1)
+
+    def test_multipart_keeps_every_value_of_a_repeated_field(self):
+        """A dict keyed by field name silently kept only the last vendor file."""
+        boundary = b"----fw2sbomtest"
+        parts = []
+        for name, filename, content in (
+                ("file", "firmware.bin", b"\x00\x01"),
+                ("vendor", "a.json", b"{}"),
+                ("vendor", "b.json", b"[]")):
+            parts.append(
+                b"--" + boundary + b"\r\n"
+                b'Content-Disposition: form-data; name="' + name.encode() +
+                b'"; filename="' + filename.encode() + b'"\r\n\r\n' +
+                content + b"\r\n")
+        body = b"".join(parts) + b"--" + boundary + b"--\r\n"
+
+        fields = service.parse_multipart(body, boundary)
+        self.assertEqual([f[0] for f in fields["file"]], ["firmware.bin"])
+        self.assertEqual([f[0] for f in fields["vendor"]], ["a.json", "b.json"])
+        self.assertEqual(fields["vendor"][1][1], b"[]")
 
     def test_the_screen_list_matches_the_document(self):
         """A customer reads the list in the browser and hands the download to
