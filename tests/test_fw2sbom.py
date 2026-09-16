@@ -43,6 +43,7 @@ import fw2sbom as core                                   # noqa: E402
 import make_fixtures                                     # noqa: E402
 import spdx_report                                       # noqa: E402
 import squashfs                                          # noqa: E402
+import uefi                                             # noqa: E402
 import vendor_sbom                                      # noqa: E402
 import service                                           # noqa: E402
 
@@ -98,7 +99,9 @@ def _analyze_uncached(name):
     hits = core.merge_hit_lists(hits, core.scan_rootfs_files(rootfs, 6))
     packages = core.packages_to_components(rootfs)
     opacity = core.summarise_opacity(segments, opacity)
-    opacity = core.reconcile_opacity(opacity, hits + packages, standards)
+    opacity = core.reconcile_opacity(
+        opacity, hits + packages + core.structural_components(segments),
+        standards)
     bom = core.build_sbom(name, data, None, arch, hits, 6, len(strings),
                           container=container, opacity=opacity,
                           payload=payload, standards=standards,
@@ -492,7 +495,8 @@ class SbomStructureTest(unittest.TestCase):
     ALL = ("cortexm_rtos.bin", "cortexm_utf16.bin", "mcs51_display.bin",
            "packet_front.bin", "packet_back.bin", "opaque_encrypted.bin",
            "random_flat.bin", "router_uimage.bin", "bare_unknown.bin",
-           "encrypted_kernel.bin", "esp32_app.bin", "esp32_flash.bin")
+           "encrypted_kernel.bin", "esp32_app.bin", "esp32_flash.bin",
+           "uefi_volume.bin", "uefi_flash.bin")
 
     def test_is_valid_cyclonedx_16_json(self):
         for name in self.ALL:
@@ -1749,6 +1753,203 @@ class EspressifTest(unittest.TestCase):
 
 # --------------------------------------------------------------------------- #
 
+class UefiTest(unittest.TestCase):
+    """A PC BIOS is the one firmware class where string matching finds nothing.
+
+    A published EDK2 release build contains no library banners at all - not one
+    signature in the database matches it. What it does contain is an inventory
+    the build system wrote down: every module carries its own name, and a GUID
+    that identifies it exactly when the name was stripped.
+
+    Most of that inventory is behind an LZMA section. On a real OVMF image 1.4
+    MB expands to 16 MB and 112 of the 123 modules are inside it, so a reader
+    that does not decompress reports a handful of modules and calls it a BIOS.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.volume = fixture("uefi_volume.bin")
+        cls.flash = fixture("uefi_flash.bin")
+
+    # --- the volume header ------------------------------------------------- #
+
+    def test_a_volume_is_recognised_by_its_checksum_not_its_signature(self):
+        """"_FVH" occurs by chance inside compiled code - four times in a 4 MB
+        OVMF image. Every UINT16 of a real header sums to zero; code does not."""
+        header = uefi.parse_volume_header(self.volume, 0)
+        self.assertIsNotNone(header)
+        self.assertEqual(header["filesystem"], "FFS2")
+        self.assertEqual(header["revision"], 2)
+        self.assertEqual(header["length"], len(self.volume))
+
+        broken = bytearray(self.volume)
+        broken[60] ^= 0x01                      # one bit, inside the block map
+        self.assertIsNone(uefi.parse_volume_header(bytes(broken), 0))
+
+    def test_a_stray_signature_in_code_is_not_a_volume(self):
+        noise = bytes(range(256)) * 4
+        planted = noise[:40] + b"_FVH" + noise[44:]
+        self.assertIsNone(uefi.parse_volume_header(planted, 0))
+        self.assertEqual([], uefi.find_volumes(planted))
+
+    def test_a_truncated_image_is_refused_rather_than_raising(self):
+        for length in (0, 1, 40, 44, 55, 71, len(self.volume) // 2):
+            with self.subTest(length=length):
+                self.assertIsNone(uefi.parse_volume_header(
+                    self.volume[:length], 0))
+
+    # --- files ------------------------------------------------------------- #
+
+    def test_a_pad_file_is_not_the_end_of_the_volume(self):
+        """A pad file's GUID is all 0xFF, which is exactly what erased flash
+        looks like. Reading the GUID alone to find the end of a volume stops at
+        the first pad - on a published OVMF image that hid every PEI module in
+        the firmware, because the PEI volume's second file is a pad."""
+        found = uefi.read_modules(self.volume)
+        names = [m["name"] for m in found["modules"] if m["name"]]
+        self.assertIn("DxeCore", names)
+        self.assertIn("PciBusDxe", names)       # sits after a pad file
+
+    def test_the_variable_store_is_not_read_as_modules(self):
+        """It shares the volume header with the module volumes but holds UEFI
+        variables. Walking it as FFS invents a module out of whatever the NVRAM
+        happened to contain - which a real image promptly did."""
+        found = uefi.read_modules(self.flash)
+        self.assertEqual([v["filesystem"] for v in found["data_volumes"]],
+                         ["NVRAM store"])
+        self.assertTrue(all(m["volume"] != "0x200000"
+                            for m in found["modules"]), found["modules"])
+
+    def test_a_module_without_a_name_keeps_its_guid(self):
+        found = uefi.read_modules(self.volume)
+        unnamed = [m for m in found["modules"] if not m["name"]]
+        self.assertTrue(unnamed)
+        for module in unnamed:
+            self.assertRegex(module["guid"],
+                             r"^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-"
+                             r"[0-9A-F]{4}-[0-9A-F]{12}$")
+
+    # --- compression ------------------------------------------------------- #
+
+    def test_the_compressed_volume_is_expanded(self):
+        """Where a BIOS keeps almost everything."""
+        found = uefi.read_modules(self.volume)
+        names = [m["name"] for m in found["modules"] if m["name"]]
+        self.assertIn("PeiCore", names)          # only inside the LZMA section
+        self.assertIn("PlatformPei", names)
+        self.assertGreater(found["expanded_bytes"], 0)
+        self.assertTrue(found["expansions"])
+
+    def test_a_compression_we_cannot_expand_is_reported_not_skipped(self):
+        """Skipping it shrinks the inventory silently, which is the one thing
+        this tool must never do: the modules behind it exist."""
+        found = uefi.read_modules(self.volume)
+        self.assertTrue(any("Tiano" in note for note in found["unreadable"]),
+                        found["unreadable"])
+
+    def test_an_lzma_section_claiming_an_absurd_size_is_refused(self):
+        """A decompression bomb is a plausible thing to be handed."""
+        walk = uefi._Walk()
+        payload = b"\x5d\x00\x00\x00\x01" + (2 ** 60).to_bytes(8, "little")
+        out, reason = uefi._lzma(payload + b"\x00" * 64, walk)
+        self.assertIsNone(out)
+        self.assertIn("expansion limit", reason)
+
+    # --- the flash layout -------------------------------------------------- #
+
+    def test_the_descriptor_names_the_regions(self):
+        found = uefi.detect(self.flash)
+        self.assertEqual(found["kind"], "flash-descriptor")
+        regions = {r["name"]: r for r in found["descriptor"]["regions"]}
+        self.assertEqual(set(regions),
+                         {"descriptor", "bios", "management-engine"})
+        self.assertEqual(regions["bios"]["offset"], 0x200000)
+
+    def test_the_management_engine_is_reported_as_unreadable(self):
+        """Signed Intel code nobody outside Intel can read. Averaging it into a
+        verdict about the firmware describes neither - and calling it plaintext
+        because we copied the bytes out of the file would be worse."""
+        result = analyze("uefi_flash.bin")
+        me = next(s for s in result["segments"]
+                  if "management-engine" in s["label"])
+        self.assertFalse(me["expanded"], "a slice of the file is not an expansion")
+        self.assertTrue(me["opacity"]["opaque"], me["opacity"])
+
+    def test_an_unreadable_region_does_not_deny_the_modules_beside_it(self):
+        """The contradiction this whole class of bug produces: "static
+        component identification is not possible" printed above an inventory of
+        modules we just identified."""
+        result = analyze("uefi_flash.bin")
+        self.assertTrue(result["bom"]["components"])
+        self.assertFalse(result["opacity"]["opaque"], result["opacity"])
+
+    # --- what reaches the document ----------------------------------------- #
+
+    def test_the_pe_headers_settle_the_architecture(self):
+        arch = core.analyze_architecture(self.volume)
+        self.assertEqual(arch["architecture"], "x86-64")
+        self.assertTrue(any("PE headers" in d for d in arch["details"]),
+                        arch["details"])
+
+    def test_a_bios_is_not_mistaken_for_a_cortex_m_image(self):
+        """A vector-table heuristic has no business claiming a BIOS."""
+        arch = core.analyze_architecture(self.flash)
+        self.assertNotEqual(arch["architecture"], "arm-cortex-m")
+        self.assertNotEqual(arch["architecture"], "mcs-51")
+
+    def test_every_module_becomes_a_component_carrying_its_guid(self):
+        bom = analyze("uefi_volume.bin")["bom"]
+        dxe = next(c for c in bom["components"] if c["name"] == "DxeCore")
+        properties = {p["name"]: p["value"] for p in dxe["properties"]}
+        self.assertEqual(properties["fw2sbom:evidence_class"], "uefi-module")
+        self.assertEqual(properties["fw2sbom:uefi_module_type"], "dxe-core")
+        self.assertRegex(properties["fw2sbom:uefi_guid"], r"^[0-9A-F-]{36}$")
+        self.assertEqual(dxe["version"], "1.0")
+
+    def test_no_purl_is_invented_for_a_uefi_module(self):
+        """A UEFI module is not a package in any ecosystem. Emitting
+        pkg:generic/DxeCore would hand a CVE matcher an identity that does not
+        exist anywhere, which is worse than leaving the field out."""
+        bom = analyze("uefi_volume.bin")["bom"]
+        modules = [c for c in bom["components"]
+                   if any(p["name"] == "fw2sbom:evidence_class"
+                          and p["value"] == "uefi-module"
+                          for p in c.get("properties", []))]
+        self.assertTrue(modules)
+        for component in modules:
+            self.assertNotIn("purl", component)
+
+    def test_the_module_version_is_labelled_as_the_module_s_own(self):
+        """EDK2 leaves it at 1.0 almost always. Left unexplained it looks like
+        a library version somebody should match against a CVE feed."""
+        bom = analyze("uefi_volume.bin")["bom"]
+        dxe = next(c for c in bom["components"] if c["name"] == "DxeCore")
+        note = next(p["value"] for p in dxe["properties"]
+                    if p["name"] == "fw2sbom:version_note")
+        self.assertIn("not any library inside it", note)
+
+    def test_the_document_records_what_was_not_read(self):
+        bom = analyze("uefi_volume.bin")["bom"]
+        properties = [p["value"] for p in bom["metadata"]["component"]["properties"]
+                      if p["name"] == "fw2sbom:uefi_not_expanded"]
+        self.assertTrue(any("Tiano" in value for value in properties), properties)
+
+    def test_the_inventory_survives_the_spdx_rendering(self):
+        spdx = analyze("uefi_volume.bin")["spdx"]
+        names = {package["name"] for package in spdx["packages"]}
+        self.assertIn("DxeCore", names)
+        self.assertIn("PeiCore", names)
+
+    def test_a_bios_is_analysed_in_reasonable_time(self):
+        """A customer waits for this in a browser, and a real BIOS expands to
+        sixteen times its own size."""
+        start = time.perf_counter()
+        uefi.read_modules(self.flash)
+        self.assertLess(time.perf_counter() - start, 30)
+
+
+# --------------------------------------------------------------------------- #
+
 class SpdxTest(unittest.TestCase):
     """SPDX 2.3 is a second rendering of one analysis, not a second analysis."""
 
@@ -1948,6 +2149,81 @@ class ElfReaderTest(unittest.TestCase):
     def test_machine_names_cover_the_targets_we_claim(self):
         for machine_id in (8, 40, 183, 62, 243):
             self.assertNotIn("machine-", elf.EM_NAMES[machine_id])
+
+
+class RealBiosTest(unittest.TestCase):
+    """The whole pipeline over a published EDK2 build.
+
+    The synthetic fixtures were written from the specifications; this image is
+    what the specifications turn into once a real build system has been at it.
+    Two defects came straight out of running it: a pad file's all-0xFF GUID
+    read as the end of a volume (which hid every PEI module), and the variable
+    store walked as if it held modules (which invented one).
+    """
+
+    IMAGE = os.path.join(ROOT, "corpus", "uefi", "edk2-ovmf-x64.fd")
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.exists(cls.IMAGE):
+            raise unittest.SkipTest(
+                "corpus image missing; run python scripts/fetch-corpus.py")
+        with open(cls.IMAGE, "rb") as f:
+            cls.data = f.read()
+        cls.found = uefi.detect(cls.data)
+        cls.inventory = uefi.read_modules(cls.data, cls.found["volumes"])
+
+    def test_the_volumes_are_found_and_the_false_ones_are_not(self):
+        """Four of the seven "_FVH" strings in this image are inside compiled
+        code."""
+        self.assertEqual(len(self.found["volumes"]), 3)
+        self.assertEqual([v["filesystem"] for v in self.found["volumes"]],
+                         ["NVRAM store", "FFS2", "FFS2"])
+
+    def test_the_inventory_is_most_of_a_hundred_modules(self):
+        modules = self.inventory["modules"]
+        named = [m for m in modules if m["name"]]
+        self.assertGreater(len(modules), 100)
+        self.assertGreater(len(named), 100)
+        names = {m["name"] for m in named}
+        for expected in ("DxeCore", "PeiCore", "PciBusDxe", "SecMain"):
+            self.assertIn(expected, names)
+
+    def test_the_pei_modules_are_behind_a_pad_file(self):
+        """The specific shape that broke the first version: the PEI volume's
+        second file is a pad, so a GUID-based end-of-volume test loses the lot."""
+        pei = [m["name"] for m in self.inventory["modules"]
+               if m["type"] in ("peim", "pei-core") and m["name"]]
+        self.assertGreater(len(pei), 5, pei)
+
+    def test_the_variable_store_yields_no_modules(self):
+        self.assertEqual([v["filesystem"]
+                          for v in self.inventory["data_volumes"]],
+                         ["NVRAM store"])
+
+    def test_the_architecture_comes_from_the_pe_headers(self):
+        arch = core.analyze_architecture(self.data)
+        self.assertEqual(arch["architecture"], "x86-64")
+
+    def test_string_matching_alone_would_have_found_nothing(self):
+        """The finding that justifies the whole module: this image contains no
+        library banner any signature matches. Everything in its SBOM comes from
+        structure - except one OpenSSL symbol, which is only reachable because
+        the compressed volume was expanded."""
+        plain = core.match_signatures(core.extract_strings(self.data, 6), False)
+        self.assertEqual([], plain)
+
+    def test_expanding_the_volume_is_what_finds_the_library(self):
+        expansions = self.inventory["expansions"]
+        self.assertTrue(expansions)
+        found = core.match_signatures(
+            core.extract_strings(expansions[0]["data"], 6), False)
+        self.assertIn("openssl", {h["sig"]["name"] for h in found})
+
+    def test_a_real_bios_is_analysed_in_reasonable_time(self):
+        start = time.perf_counter()
+        core.analyze_segments(self.data, 6)
+        self.assertLess(time.perf_counter() - start, 60)
 
 
 class RealFirmwareTest(unittest.TestCase):

@@ -48,10 +48,11 @@ import esp32
 import image_input
 import evidence_report
 import spdx_report
+import uefi
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.14.0"
+TOOL_VERSION = "1.15.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -382,22 +383,30 @@ def analyze_mcs51(data):
 def analyze_architecture(data):
     """Identify the instruction set of a raw firmware image, if we can.
 
-    A declared answer beats a measured one, so an Espressif chip ID settles the
-    question outright. Failing that, Cortex-M is tested before MCS-51: its
-    vector table is a much stronger constraint, and a Thumb image would
-    otherwise be at some risk of matching the 8051 profile.
+    A declared answer beats a measured one, so a UEFI PE header or an Espressif
+    chip ID settles the question outright. Failing that, Cortex-M is tested
+    before MCS-51: its vector table is a much stronger constraint, and a Thumb
+    image would otherwise be at some risk of matching the 8051 profile.
     """
     cortex = analyze_cortex_m(data)
     mcs51 = {"looks_like_mcs51": False, "details": [], "vectors": []}
     if not cortex["looks_like_cortex_m"]:
         mcs51 = analyze_mcs51(data)
 
-    # An Espressif image states its chip, and so its instruction set, in its own
-    # header. That outranks any opcode statistic, and it is the only thing that
-    # reliably separates the Xtensa parts from the RISC-V ones.
+    # Two formats write their instruction set down. A PC BIOS carries it in the
+    # PE header of every module it contains; an Espressif image carries a chip
+    # ID, which is the only thing that reliably separates the Xtensa parts from
+    # the RISC-V ones. Either outranks an opcode statistic.
+    firmware = uefi.detect(data)
+    machine = (firmware or {}).get("machine")
     espressif = esp32.detect(data)
     declared = []
-    if espressif and espressif["core"]:
+    if machine:
+        declared.append(
+            f"uefi: the PE headers of the firmware modules declare "
+            f"{machine['label']}")
+        architecture, label = machine["architecture"], machine["label"]
+    elif espressif and espressif["core"]:
         declared.append(
             f"espressif: the image header declares chip {espressif['chip']}, "
             f"{espressif['core']} - read from the image, not inferred from the "
@@ -405,6 +414,11 @@ def analyze_architecture(data):
         architecture = ("xtensa" if espressif["core"].startswith("Xtensa")
                         else "riscv")
         label = f"{espressif['core']} ({espressif['chip']})"
+    elif firmware:
+        # A BIOS whose modules we could not reach: still not a Cortex-M image,
+        # and letting a vector-table heuristic claim it would be worse than
+        # saying nothing.
+        architecture, label = None, None
     elif cortex["looks_like_cortex_m"]:
         architecture, label = "arm-cortex-m", "ARM Cortex-M (Thumb)"
     elif mcs51["looks_like_mcs51"]:
@@ -418,6 +432,7 @@ def analyze_architecture(data):
         # kept flat for backwards compatibility with existing callers
         "looks_like_cortex_m": cortex["looks_like_cortex_m"],
         "espressif": espressif,
+        "uefi": firmware,
         # tag each line with the detector that produced it: the detectors run
         # independently and their evidence must not read as one finding
         "details": declared
@@ -1044,6 +1059,17 @@ def summarise_opacity(segments, whole_image):
     return summary
 
 
+def structural_components(segments):
+    """Components read from a format's own structures rather than from strings.
+
+    These arrive after the opacity measurement, like signature hits do, and
+    they settle the same contradiction: a BIOS whose 123 modules we just listed
+    is not an image where "static component identification is not possible",
+    whatever the entropy of the Management Engine sitting beside them said.
+    """
+    return uefi_components(segments) + espressif_components(segments)
+
+
 def reconcile_opacity(opacity, hits, standards, verbose=False):
     """Settle a contradiction between the opacity verdict and what was found.
 
@@ -1471,6 +1497,72 @@ def merge_hit_lists(primary, extra):
     return sorted(merged.values(), key=lambda h: -h["confidence"])
 
 
+def uefi_inventory(segments):
+    """The UEFI module inventory carried on the segments, or None."""
+    for segment in segments or []:
+        if segment.get("uefi"):
+            return segment["uefi"]
+    return None
+
+
+def uefi_components(segments):
+    """The modules a PC BIOS is built from.
+
+    This is the whole answer for a BIOS. A release build of EDK2 contains no
+    library banners at all - not one signature in our database matches a
+    published OVMF image - but every module carries the name its build system
+    gave it, and a GUID that identifies it exactly even when the name section
+    was stripped. Those names are declared by the firmware, not inferred from
+    it, which is why they carry package-database confidence.
+
+    The version is whatever the module's own VERSION section says. In EDK2
+    practice that is almost always "1.0" and it describes the module, not any
+    library inside it - so it is reported when present and never promoted into
+    something a CVE feed should match on.
+    """
+    inventory = uefi_inventory(segments)
+    if not inventory:
+        return []
+
+    found = []
+    for module in inventory["modules"]:
+        named = bool(module["name"])
+        name = module["name"] or f"UEFI module {module['guid']}"
+        evidence = (f"firmware file {module['guid']} of type "
+                    f"{module['type']} in firmware volume {module['volume']}")
+        if named:
+            evidence += "; name declared in its USER_INTERFACE section"
+        else:
+            evidence += ("; no USER_INTERFACE section, so the GUID is the only "
+                         "identity the image gives it")
+        found.append({
+            "name": name,
+            "version": module["version"],
+            "guid": module["guid"],
+            "module_type": module["type"],
+            "volume": module["volume"],
+            "size": module["size"],
+            "named": named,
+            "confidence": 0.97 if named else 0.9,
+            "evidence": evidence,
+        })
+    return found
+
+
+def uefi_component_type(module_type):
+    """Map a firmware file type onto a CycloneDX component type."""
+    if module_type in ("driver", "peim", "smm", "combined-peim-driver",
+                       "combined-smm-dxe", "mm-standalone"):
+        return "device-driver"
+    if module_type == "application":
+        return "application"
+    if module_type == "firmware-volume-image":
+        return "container"
+    if module_type in ("raw", "freeform"):
+        return "data"
+    return "firmware"
+
+
 def espressif_image(segments):
     """The Espressif image that describes the firmware, or None.
 
@@ -1623,6 +1715,29 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             "name": "fw2sbom:offset_basis",
             "value": "offsets in this document refer to the reassembled "
                      "image, not to byte positions in the delivered file"})
+    inventory = uefi_inventory(segments)
+    if inventory:
+        named = sum(1 for m in inventory["modules"] if m["name"])
+        fw_props.append({"name": "fw2sbom:uefi_firmware_volumes",
+                         "value": str(inventory["volumes"])})
+        fw_props.append({"name": "fw2sbom:uefi_modules",
+                         "value": str(len(inventory["modules"]))})
+        fw_props.append({"name": "fw2sbom:uefi_modules_named",
+                         "value": str(named)})
+        if inventory["expanded_bytes"]:
+            fw_props.append({"name": "fw2sbom:uefi_expanded_bytes",
+                             "value": str(inventory["expanded_bytes"])})
+        for note in inventory["unreadable"][:MAX_EVIDENCE_PER_COMPONENT]:
+            # A section we could not expand hides modules. Saying so is the
+            # difference between an incomplete inventory and a wrong one.
+            fw_props.append({"name": "fw2sbom:uefi_not_expanded", "value": note})
+        for volume in inventory["data_volumes"]:
+            fw_props.append({
+                "name": "fw2sbom:uefi_data_volume",
+                "value": f"{volume['filesystem']} at 0x{volume['offset']:x}, "
+                         f"{volume['length']} bytes: holds UEFI variables "
+                         "rather than modules and was not enumerated"})
+
     image = espressif_image(segments)
     if image:
         fw_props.append({"name": "fw2sbom:espressif_chip", "value": image["chip"]})
@@ -1949,6 +2064,49 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             ] + [{"name": f"fw2sbom:distribution_detail", "value": d}
                  for d in detail[:12]]),
         })
+        dep_refs.append(ref)
+
+    # A BIOS is an inventory of modules, and the image names them itself.
+    # No purl is emitted: a UEFI module is not a package in any ecosystem, and
+    # inventing pkg:generic/<name> would hand a CVE matcher an identity that
+    # does not exist. The GUID is the identity, and it is exact.
+    for index, item in enumerate(uefi_components(segments), 1):
+        ref = f"uefi-{index}-{item['guid']}"
+        comp = {
+            "type": uefi_component_type(item["module_type"]),
+            "bom-ref": ref,
+            "name": item["name"],
+            "description": (f"UEFI firmware module of type "
+                            f"{item['module_type']}, {item['size']} bytes"),
+            "evidence": {
+                "identity": [{
+                    "field": "name", "confidence": item["confidence"],
+                    "methods": [{"technique": "binary-analysis",
+                                 "confidence": item["confidence"],
+                                 "value": item["evidence"]}],
+                }],
+                "occurrences": [{"location": fname}],
+            },
+            "properties": [
+                {"name": "fw2sbom:confidence", "value": str(item["confidence"])},
+                {"name": "fw2sbom:confidence_level",
+                 "value": confidence_level(item["confidence"])},
+                {"name": "fw2sbom:evidence_class", "value": "uefi-module"},
+                {"name": "fw2sbom:uefi_guid", "value": item["guid"]},
+                {"name": "fw2sbom:uefi_module_type", "value": item["module_type"]},
+                {"name": "fw2sbom:uefi_volume", "value": item["volume"]},
+            ],
+        }
+        if item["version"]:
+            comp["version"] = item["version"]
+            comp["properties"].append(
+                {"name": "fw2sbom:version_source", "value": "uefi-version-section"})
+            comp["properties"].append(
+                {"name": "fw2sbom:version_note",
+                 "value": "the module's own VERSION section, which describes "
+                          "the module and not any library inside it; EDK2 "
+                          "builds almost always leave it at 1.0"})
+        components.append(comp)
         dep_refs.append(ref)
 
     # What an Espressif image states about itself: the framework version and
@@ -2466,7 +2624,9 @@ def main(argv=None):
                                     packages, args.verbose,
                                     espressif_components(segments))
     opacity = summarise_opacity(segments, opacity)
-    opacity = reconcile_opacity(opacity, hits + packages, standards, args.verbose)
+    opacity = reconcile_opacity(opacity, hits + packages
+                                + structural_components(segments),
+                                standards, args.verbose)
     bom = build_sbom(args.input, delivered, file_magic, arm_info, hits,
                      args.min_str_len, len(strings),
                      container=container, opacity=opacity, payload=payload,
@@ -2545,6 +2705,7 @@ def main(argv=None):
                                                           rootfs.get("os_release") else 0)
     declared = sum(len(e["components"]) for e in vendor)
     total += len(espressif_components(segments))
+    total += len(uefi_components(segments))
     if evidence_path:
         context = build_evidence_context(
             os.path.basename(args.input), data, payload, arm_info, container,
@@ -2592,6 +2753,22 @@ def main(argv=None):
     if rootfs and rootfs.get("os_release"):
         release = rootfs["os_release"]
         print(f"[fw2sbom] distribution: {release['description']}", file=sys.stderr)
+    inventory = uefi_inventory(segments)
+    if inventory:
+        named = sum(1 for m in inventory["modules"] if m["name"])
+        print(f"[fw2sbom] {len(inventory['modules'])} UEFI module(s) in "
+              f"{inventory['volumes']} firmware volume(s), {named} named by "
+              f"the image itself", file=sys.stderr)
+        if inventory["expanded_bytes"]:
+            print(f"[fw2sbom] {inventory['expanded_bytes']} bytes expanded "
+                  "from compressed firmware volumes", file=sys.stderr)
+        for note in inventory["unreadable"]:
+            print(f"[fw2sbom] not expanded: {note}", file=sys.stderr)
+        for volume in inventory["data_volumes"]:
+            print(f"[fw2sbom] {volume['filesystem']} at "
+                  f"0x{volume['offset']:x} holds UEFI variables, not modules; "
+                  "not enumerated", file=sys.stderr)
+
     if packages:
         database = rootfs["packages"]
         versioned = sum(1 for p in packages if p["version"])

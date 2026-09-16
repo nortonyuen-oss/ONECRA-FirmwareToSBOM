@@ -42,6 +42,7 @@ import zlib
 import elf
 import esp32
 import squashfs
+import uefi
 
 # A decompressed region is capped so a crafted image cannot exhaust memory.
 MAX_EXPANDED = 256 * 1024 * 1024
@@ -123,6 +124,11 @@ def parse_uimage(data, offset=0):
     }
 
 
+# Carrying a segment's bytes and having *expanded* them are different claims.
+# `expanded` tells the opacity judgement "whatever this scored, we read it", so
+# a region that is merely a slice of the input must not set it: an encrypted
+# ESP32 partition or an Intel ME region would otherwise be handed back as
+# plaintext on the strength of having been copied out of the file.
 def _segment(kind, offset, length, label, content=None, **extra):
     seg = {"kind": kind, "offset": offset, "length": length, "label": label,
            "content": content, "expanded": content is not None,
@@ -155,13 +161,14 @@ def _espressif_segments(data, detected, say):
         segments.append(_segment(
             "boot-header", 0, esp32.IMAGE_HEADER_SIZE,
             f"Espressif image header ({detected['chip']})",
-            content=data[:esp32.IMAGE_HEADER_SIZE], espressif=image))
+            content=data[:esp32.IMAGE_HEADER_SIZE], expanded=False,
+            espressif=image))
         for entry in image["segments"]:
             segments.append(_segment(
                 "esp-segment", entry["offset"], entry["length"],
                 f"ESP segment {entry['index']} @ 0x{entry['load_address']:08x}",
                 content=data[entry["offset"]:entry["offset"] + entry["length"]],
-                load_address=entry["load_address"]))
+                expanded=False, load_address=entry["load_address"]))
         return segments
 
     # A full flash image: the partition table is the map.
@@ -182,14 +189,71 @@ def _espressif_segments(data, detected, say):
                        if i.get("partition") == partition["name"]), None)
         segments.append(_segment(
             "partition", start, end - start, label, content=blob,
-            partition=partition, **({"espressif": parsed} if parsed else {})))
+            expanded=False, partition=partition,
+            **({"espressif": parsed} if parsed else {})))
 
     if detected.get("bootloader"):
         boot = detected["bootloader"]
         segments.append(_segment(
             "bootloader", boot["offset"], boot["end"] - boot["offset"],
             f"second-stage bootloader ({detected['chip']})",
-            content=data[boot["offset"]:boot["end"]], espressif=boot))
+            content=data[boot["offset"]:boot["end"]], expanded=False,
+            espressif=boot))
+    return segments
+
+
+def _uefi_segments(data, detected, say):
+    """Segment a PC BIOS image the way the platform itself divides it.
+
+    A customer's BIOS dump is usually a whole SPI flash: the firmware is one
+    region of it, and the Management Engine - signed Intel code nobody outside
+    Intel can read - is another. Measuring the file as a whole averages those
+    together and produces a verdict about neither.
+    """
+    segments = []
+    descriptor = detected["descriptor"]
+
+    if descriptor:
+        say(f"container: Intel flash descriptor, "
+            f"{len(descriptor['regions'])} regions")
+        for region in descriptor["regions"]:
+            start = region["offset"]
+            end = min(len(data), start + region["length"])
+            if start >= len(data) or end <= start:
+                continue
+            say(f"container:   region {region['name']} at 0x{start:06x}, "
+                f"{(end - start) // 1024} KiB")
+            segments.append(_segment(
+                "flash-region", start, end - start,
+                f"flash region: {region['name']}",
+                content=data[start:end], expanded=False, region=region))
+
+    inventory = uefi.read_modules(data, detected["volumes"])
+    named = sum(1 for m in inventory["modules"] if m["name"])
+    say(f"container: {len(detected['volumes'])} firmware volume(s), "
+        f"{len(inventory['modules'])} module(s), {named} named")
+
+    for index, volume in enumerate(detected["volumes"]):
+        start = volume["offset"]
+        end = min(len(data), start + volume["length"])
+        kind = volume["filesystem"] or volume["filesystem_guid"]
+        label = f"UEFI firmware volume ({kind})"
+        segments.append(_segment(
+            "firmware-volume", start, end - start, label,
+            content=data[start:end], expanded=False, volume=volume,
+            **({"uefi": inventory} if index == 0 else {})))
+
+    # The expanded volumes are where a vendor's own libraries live, if the
+    # image has any. Without them the signature scan reads only the 3% of a
+    # BIOS that is not compressed.
+    for index, expansion in enumerate(inventory["expansions"], 1):
+        segments.append(_segment(
+            "uefi-expanded", 0, len(expansion["data"]),
+            f"decompressed UEFI volume {index} (from {expansion['origin']})",
+            content=expansion["data"]))
+
+    for note in inventory["unreadable"]:
+        say(f"container:   {note}")
     return segments
 
 
@@ -206,6 +270,13 @@ def walk(data, verbose=False, log=None):
 
     def claim(start, end):
         covered.append((start, end))
+
+    # --- 0. A PC BIOS, which is a structure rather than a blob -------------
+    firmware = uefi.detect(data)
+    if firmware:
+        segments = _uefi_segments(data, firmware, say)
+        segments.sort(key=lambda seg: seg["offset"])
+        return segments, warnings
 
     # --- 0. Espressif, which is neither a flat image nor a Linux one -------
     espressif = esp32.detect(data)

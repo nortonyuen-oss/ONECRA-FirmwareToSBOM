@@ -89,8 +89,15 @@ jobs:
           python fw2sbom.py corpus/router/openwrt-mt300n-v2-4.3.25.bin             -d "$RUNNER_TEMP/out" --format both --pretty -v
           ls -l "$RUNNER_TEMP/out"
 
+      - name: Analyse a real PC BIOS end to end
+        run: |
+          python fw2sbom.py corpus/uefi/edk2-ovmf-x64.fd -d "$RUNNER_TEMP/bios" --format both --pretty -v
+          ls -l "$RUNNER_TEMP/bios"
+
       - name: Run the corpus tests
-        run: python -m unittest discover -s tests -k RealFirmware -v
+        run: |
+          python -m unittest discover -s tests -k RealFirmware -v
+          python -m unittest discover -s tests -k RealBios -v
 
   portable-package:
     name: Portable package (Windows)

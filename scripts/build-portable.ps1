@@ -74,6 +74,7 @@ $PayloadFromRoot = @(
     'vendor_sbom.py',
     'image_input.py',
     'esp32.py',
+    'uefi.py',
     'onecra_logo.png',
     'onecra_icon.png'
 )

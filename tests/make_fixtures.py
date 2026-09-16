@@ -20,6 +20,7 @@ Usage:
 
 import gzip
 import hashlib
+import lzma
 import os
 import random
 import struct
@@ -492,6 +493,203 @@ def build_esp32_flash():
 
     data = strings_blob(["littlefs v2.8.1", "fixture data partition"])
     flash[0x70000:0x70000 + len(data)] = data
+    return bytes(flash)
+
+
+# --- UEFI / PC BIOS -------------------------------------------------------- #
+#
+# Built from the specifications, then checked against published EDK2 OVMF
+# images. Two things here exist because the real images disagreed with a naive
+# reading of the spec: a pad file whose GUID is all 0xFF (which is not the end
+# of the volume, though it looks exactly like erased flash), and a variable
+# store sharing the volume header with the module volumes (which must not be
+# walked as if it held modules).
+
+FFS2_GUID = bytes.fromhex("78e58c8c3d8a1c4f9935896185c32dd3")
+NVRAM_GUID = bytes.fromhex("8d2bf1ff96768b4ca9852747075b4f50")
+LZMA_SECTION_GUID = bytes.fromhex("98584eee143959429d6edc7bd79403cf")
+CRC32_SECTION_GUID = bytes.fromhex("2e5a9b0b1b6f0e4c8c2ff2d0a1b3c4d5")
+
+PE32_MACHINE_X64 = 0x8664
+
+
+def uefi_pe32(r, machine=PE32_MACHINE_X64, size=0x200):
+    """A PE32 *section* holding just enough PE/COFF for the machine field.
+
+    It has to be a section: a firmware file is a sequence of sections, and a
+    bare image dropped in among them is read as a section header made of
+    whatever its first four bytes happen to be.
+    """
+    head = bytearray(b"\x00" * 0x40)
+    head[0:2] = b"MZ"
+    struct.pack_into("<I", head, 0x3C, 0x40)
+    coff = b"PE\x00\x00" + struct.pack("<HH", machine, 1) + b"\x00" * 16
+    body = bytes(head) + coff
+    return uefi_section(0x10, body + filler(r, max(0, size - len(body))))
+
+
+def uefi_section(kind, body):
+    """EFI_COMMON_SECTION_HEADER plus payload, padded to 4 bytes."""
+    size = len(body) + 4
+    raw = size.to_bytes(3, "little") + bytes([kind]) + body
+    return raw + b"\x00" * (-len(raw) % 4)
+
+
+def uefi_ui_section(name):
+    return uefi_section(0x15, name.encode("utf-16-le") + b"\x00\x00")
+
+
+def uefi_version_section(version):
+    return uefi_section(0x14, struct.pack("<H", 1)
+                        + version.encode("utf-16-le") + b"\x00\x00")
+
+
+def uefi_guided_section(guid, payload, attributes=0x0001):
+    """EFI_GUID_DEFINED_SECTION: header, GUID, data offset, attributes."""
+    body = guid + struct.pack("<HH", 24, attributes) + payload
+    size = len(body) + 4
+    raw = size.to_bytes(3, "little") + bytes([0x02]) + body
+    return raw + b"\x00" * (-len(raw) % 4)
+
+
+def uefi_compression_section(kind, payload):
+    """EFI_COMPRESSION_SECTION. Type 1 is EFI/Tiano, which we cannot expand."""
+    body = struct.pack("<IB", len(payload), kind) + payload
+    size = len(body) + 4
+    raw = size.to_bytes(3, "little") + bytes([0x01]) + body
+    return raw + b"\x00" * (-len(raw) % 4)
+
+
+def uefi_file(guid, kind, sections):
+    """EFI_FFS_FILE_HEADER plus its sections, padded to 8 bytes."""
+    body = b"".join(sections)
+    size = len(body) + 24
+    header = (guid + struct.pack("<BB", 0xAA, 0x55) + bytes([kind, 0x00])
+              + size.to_bytes(3, "little") + bytes([0xF8]))
+    raw = header + body
+    return raw + b"\x00" * (-len(raw) % 8)
+
+
+def uefi_pad_file(size=64):
+    """A pad file. Its GUID is all 0xFF, which is exactly what erased flash
+    looks like - reading the GUID alone to find the end of a volume stops here
+    and loses every module that follows."""
+    header = (b"\xff" * 16 + struct.pack("<BB", 0xAA, 0x55)
+              + bytes([0xF0, 0x00]) + size.to_bytes(3, "little") + bytes([0xF8]))
+    return header + b"\xff" * (size - 24)
+
+
+def uefi_volume(guid, files, total=None, block_size=0x1000):
+    """EFI_FIRMWARE_VOLUME_HEADER with a valid checksum, plus its files."""
+    body = b"".join(files)
+    header_length = 72
+    total = total or (((header_length + len(body)) // block_size) + 1) * block_size
+    blocks = total // block_size
+
+    header = bytearray(header_length)
+    header[16:32] = guid
+    struct.pack_into("<Q", header, 32, total)
+    header[40:44] = b"_FVH"
+    struct.pack_into("<I", header, 44, 0x0004FEFF)     # attributes, as EDK2 sets
+    struct.pack_into("<H", header, 48, header_length)
+    struct.pack_into("<H", header, 52, 0)              # no extended header
+    header[55] = 2                                     # revision
+    struct.pack_into("<II", header, 56, blocks, block_size)
+    struct.pack_into("<II", header, 64, 0, 0)          # block map terminator
+
+    # Every UINT16 of the header sums to zero. That is what separates a volume
+    # from the "_FVH" that turns up by chance inside compiled code.
+    total_sum = sum(struct.unpack(f"<{header_length // 2}H", bytes(header)))
+    struct.pack_into("<H", header, 50, (-total_sum) & 0xFFFF)
+
+    out = bytes(header) + body
+    return out + b"\xff" * (total - len(out))
+
+
+def uefi_modules(r):
+    """The files a small DXE volume would hold."""
+    return [
+        uefi_file(bytes.fromhex("7fcba2d6186a2f4eb43b9920a733700a"), 0x05, [
+            uefi_pe32(r), uefi_ui_section("DxeCore"),
+            uefi_version_section("1.0")]),
+        uefi_pad_file(),
+        uefi_file(bytes.fromhex("0400b8933bfa9f4b9b8e2ce2b0d4c8f1"), 0x07, [
+            uefi_pe32(r), uefi_ui_section("PciBusDxe"),
+            uefi_version_section("1.0")]),
+        uefi_file(bytes.fromhex("11223344556677889900aabbccddeeff"), 0x07, [
+            uefi_pe32(r)]),                    # no UI section: GUID is the name
+    ]
+
+
+@fixture("uefi_volume.bin")
+def build_uefi_volume():
+    """A bare UEFI firmware volume, as a BIOS region dump arrives.
+
+    Holds a compressed inner volume as well, because that is where a real BIOS
+    keeps nearly everything: a reader that stops at the outer volume sees three
+    modules and calls it a firmware image.
+    """
+    r = rng("uefi_volume")
+    inner = uefi_volume(FFS2_GUID, [
+        uefi_file(bytes.fromhex("145bcd0a156a428aaf6249864da0e6e6"), 0x06, [
+            uefi_pe32(r), uefi_ui_section("PlatformPei"),
+            uefi_version_section("1.0")]),
+        uefi_pad_file(),
+        uefi_file(bytes.fromhex("52c05b140b98496cbc3b04b50211d680"), 0x04, [
+            uefi_pe32(r), uefi_ui_section("PeiCore")]),
+    ])
+    packed = lzma.compress(
+        uefi_section(0x17, inner),
+        format=lzma.FORMAT_ALONE,
+        filters=[{"id": lzma.FILTER_LZMA1, "preset": 6}])
+
+    files = uefi_modules(r) + [
+        uefi_file(bytes.fromhex("93fd219e729c154c8c4be77f1db2d792"), 0x0B, [
+            uefi_guided_section(LZMA_SECTION_GUID, packed)]),
+        # EFI/Tiano compression: recognised, not expanded, and said so.
+        uefi_file(bytes.fromhex("aabbccdd00112233445566778899aabb"), 0x07, [
+            uefi_compression_section(1, filler(r, 0x200))]),
+    ]
+    return uefi_volume(FFS2_GUID, files)
+
+
+@fixture("uefi_flash.bin")
+def build_uefi_flash():
+    """A whole SPI flash: descriptor, a variable store, the BIOS region.
+
+    What a customer actually dumps off a PC. The Management Engine region is
+    included and is opaque by construction - reporting it as "not analysed"
+    rather than averaging it into a verdict about the firmware is the point of
+    reading the descriptor at all.
+    """
+    r = rng("uefi_flash")
+    size = 0x400000
+    flash = bytearray(b"\xff" * size)
+
+    # Intel flash descriptor: signature at 0x10, then FLMAP0 naming the region
+    # table, then one UINT32 per region holding base and limit in 4 KiB units.
+    struct.pack_into("<I", flash, 0x10, 0x0FF0A55A)
+    region_base = 0x40
+    struct.pack_into("<I", flash, 0x14,
+                     ((region_base >> 4) << 16) | (4 << 24))   # 5 regions
+    regions = [(0x000000, 0x000FFF),      # descriptor
+               (0x200000, 0x3FFFFF),      # BIOS
+               (0x001000, 0x1FFFFF),      # management engine
+               (0, 0), (0, 0)]            # no GbE, no platform data
+    for index, (base, limit) in enumerate(regions):
+        value = 0x00007FFF if (base, limit) == (0, 0) else \
+            ((base >> 12) & 0x1FFF) | (((limit >> 12) & 0x1FFF) << 16)
+        struct.pack_into("<I", flash, region_base + index * 4, value)
+
+    # The ME region: signed Intel code we cannot read, so high-entropy filler.
+    me = filler(r, 0x1FF000)
+    flash[0x1000:0x1000 + len(me)] = me
+
+    store = uefi_volume(NVRAM_GUID, [], total=0x10000)
+    flash[0x200000:0x200000 + len(store)] = store
+
+    bios = uefi_volume(FFS2_GUID, uefi_modules(r), total=0x100000)
+    flash[0x210000:0x210000 + len(bios)] = bios
     return bytes(flash)
 
 

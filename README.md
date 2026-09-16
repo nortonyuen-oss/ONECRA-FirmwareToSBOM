@@ -3,6 +3,7 @@
 Evidence-based **CycloneDX 1.6 / SPDX 2.3** SBOM generator for embedded firmware images
 (`.bin`):Linux 裝置(router / gateway / NVR:uImage + 壓縮 kernel + SquashFS
 rootfs)、**Espressif ESP32 系列**(application image 與整顆 flash dump)、
+**UEFI / PC BIOS**(Intel flash descriptor + firmware volume + 模組清單)、
 ARM Cortex-M 映像、MCS-51(8051)映像(顯示控制器 / monitor scaler
 韌體),以及廠商 **packetized / ISP-dump** 格式(自動去框)。
 Designed to run out-of-the-box on Kali Linux (Python 3.9+, stdlib only — no pip
@@ -22,8 +23,10 @@ dependencies).
      佔比(LCALL / LJMP / MOV DPTR / MOVX / RET;均勻隨機只會佔 2.3%)
    - **Espressif**:image header 裡的 chip ID 直接寫明是哪顆晶片,所以指令集
      是**讀出來的**,不是猜的;Xtensa 與 RISC-V 兩系也只有這個欄位分得開
-   - 判定互斥:Espressif 的宣告最優先,其次 Cortex-M(其向量表約束較強),
-     最後才是 MCS-51
+   - **UEFI / BIOS**:每個模組都是 PE32+ 或 TE 映像,檔頭的 machine 欄位直接
+     寫明 x86-64 / IA-32 / AArch64 / RISC-V
+   - 判定互斥:**宣告出來的最優先**(UEFI PE 檔頭、Espressif chip ID),
+     其次 Cortex-M(其向量表約束較強),最後才是 MCS-51
 2. **Strings 萃取** — 可列印 ASCII 與 UTF-16LE 字串(含檔案 offset)
 3. **Embedded standard data** — 結構化偵測(解析並驗證結構,非字串比對):
    VESA E-EDID 區塊(128 bytes、magic + checksum、PnP ID、EDID 版本、monitor
@@ -365,6 +368,69 @@ ESP32 系列佔 IoT 裝置很大一塊,而它的韌體既不是平坦的 MCU 映
 > 出來**。如果映像裡沒有這些元件自己的字串(release build 常常被剝掉),SBOM 就
 > 不會有它們——這是「沒讀到」,不是「不存在」。
 
+## UEFI / PC BIOS
+
+BIOS 是唯一一類**字串比對幾乎找不到任何東西**的韌體。一份 EDK2 release build
+裡沒有任何函式庫 banner ——沒有 `OpenSSL 3.0.x`、沒有 `EDK II`、沒有一個 regex
+抓得住的東西。實測一份公開的 OVMF 映像:整整 4 MB,我們資料庫裡**全部 36 個簽章
+一個都沒命中**。
+
+但它有另一樣東西:**build 系統自己寫進去的清單**。
+
+### 模組清單就是 SBOM
+
+| 來源 | 內容 | Confidence |
+|---|---|---|
+| `USER_INTERFACE` section | 模組名稱,build 當時怎麼叫它就是什麼(`DxeCore`、`PciBusDxe`、`SecureBootConfigDxe`) | 0.97 |
+| 檔案 GUID | 即使名稱 section 被拿掉,GUID 仍然精確指認這個模組 | 0.90 |
+| `VERSION` section | 模組**自己**的版本 | —— 見下方警告 |
+
+同一份 OVMF 映像跑出 **123 個模組,119 個有名字**。
+
+### 結構就是切法
+
+```
+Intel flash descriptor  → descriptor / BIOS / Management Engine / GbE / 平台資料
+  BIOS region           → firmware volume(s)
+    firmware volume     → firmware file(s)
+      firmware file     → section(s)
+        LZMA section    → 另一個 firmware volume,裡面才是絕大部分東西
+```
+
+實測數字:**1.4 MB 壓縮 → 16 MB 解開,123 個模組裡有 112 個在裡面**。不解壓縮的
+工具看到十來個模組就當自己讀完了一份 BIOS。
+
+解開的內容也會照樣跑字串比對 —— 那份 OVMF 唯一命中的元件(OpenSSL,只有符號沒有
+版本)就只在解壓後的 volume 裡找得到。
+
+### Management Engine 不會被當成韌體的一部分
+
+客戶 dump 出來的通常是整顆 SPI flash,裡面除了 BIOS 還有 **Intel ME** —— 簽章過
+的 Intel 程式碼,Intel 以外沒有人讀得懂。把整個檔案一起量,等於把兩件不同的東西
+平均起來,結果哪一件都不描述。fw2sbom 依 descriptor 切開,ME 區段照實報成
+**opaque、未列舉**。
+
+同理,與模組 volume 共用檔頭的 **variable store(NVRAM)**不會被當成模組來讀 ——
+它裝的是 UEFI 變數。(真實映像第一次跑就從 NVRAM 裡「生」出了一個不存在的模組,
+所以這條規則是被真檔逼出來的。)
+
+### 三個刻意的限制
+
+- **不發 purl。** UEFI 模組不是任何生態系裡的套件,硬生一個
+  `pkg:generic/DxeCore` 等於餵給 CVE 比對系統一個世上不存在的識別碼 —— 比留空更糟。
+  身分用 GUID(`fw2sbom:uefi_guid`),那個是精確的。
+- **`VERSION` section 不是函式庫版本。** EDK2 實務上幾乎永遠是 `1.0`,它描述的是
+  模組本身。有就照報,並附一句說明它不是拿去比對 CVE 的東西。
+- **EFI/Tiano 壓縮(LZMA 之前那套,部分廠商仍在用)認得但解不開。** 這類 section
+  會**明確報告為讀不到**,而不是略過 —— 略過會讓清單靜靜變短,那正是這個工具最
+  不該做的事。
+
+### 驗證狀態
+
+firmware volume / file / section / LZMA 這條路是對著公開的 EDK2 OVMF build 開發
+與驗證的。**Intel flash descriptor 那段是照公開規格寫的,還沒跑過真實廠商 dump**
+—— 手上還沒有客戶的 BIOS 樣本。有樣本的話這是最該先跑的東西。
+
 ## 內嵌標準資料 (Embedded standard data)
 
 不是所有可識別的東西都是連結進去的軟體函式庫。顯示控制器韌體內嵌大量**標準化
@@ -664,6 +730,7 @@ fw2sbom/
 ├── squashfs.py             # 唯讀 SquashFS 4.0 reader(stdlib only)
 ├── elf.py                  # 精簡 ELF reader(DT_NEEDED / SONAME / .comment)
 ├── esp32.py                # Espressif image、app descriptor、partition table
+├── uefi.py                 # UEFI flash descriptor、firmware volume、模組清單
 ├── image_input.py          # ELF / Intel HEX / S-record / UF2 讀入成平坦映像
 ├── vendor_sbom.py          # 讀入廠商 SBOM 並與分析結果對帳
 ├── service.py              # 拖拉式本機網頁服務(localhost drag-and-drop UI)

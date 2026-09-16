@@ -679,7 +679,9 @@ def analyze_bytes(filename, data, vendor_uploads=None):
     hits = core.merge_segment_hits(segments)
     packages = core.packages_to_components(rootfs)
     opacity = core.summarise_opacity(segments, opacity)
-    opacity = core.reconcile_opacity(opacity, hits + packages, standards)
+    opacity = core.reconcile_opacity(
+        opacity, hits + packages + core.structural_components(segments),
+        standards)
 
     vendor_documents, vendor_errors = read_vendor_sboms(vendor_uploads)
     vendor = core.reconcile_vendor_sboms(

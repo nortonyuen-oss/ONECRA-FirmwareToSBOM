@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-16** · 版本 **v1.14.0**
+快照日期:**2026-09-16** · 版本 **v1.15.0**
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -26,7 +26,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | **IoT / Wi-Fi SoC**<br>Espressif ESP32 系列 | 可用 | Application image 與整顆 flash dump 都按自己的結構切(partition table 就是地圖)。晶片型號與指令集由 header 宣告讀出,ESP-IDF 版本由 `esp_app_desc_t` 讀出(confidence 0.97)。IDF 內含的 mbedTLS / lwIP / FreeRTOS 版本**不作推導** |
 | **Router / Gateway**<br>Linux, MIPS / ARM | 可用(OpenWrt 類) | uImage + 壓縮 kernel + SquashFS + ELF。真實 GL.iNet router:**366 個元件、362 個帶精確版本、262 個帶授權、1268 條依賴邊**。FIT / TRX / 廠商自訂檔頭尚未支援 |
 | **CCTV / NVR**<br>Linux, 專有 SoC | 部分 | 用標準 uImage + SquashFS 的機型現在就能分析,**即使沒有套件資料庫也能從檔案本身取得元件**。整段加密的機型上限是 opaque,但可以**匯入廠商 SBOM 並與映像比對 —— CLI 與拖拉介面都支援**。廠商自訂容器要逐個加 |
-| **PC BIOS / UEFI**<br>x86, EDK2 | 未開始 | 獨立的問題域(Flash Descriptor / FV / FFS / GUID),與 Linux 那條路幾乎不共用程式碼 |
+| **PC BIOS / UEFI**<br>x86, EDK2 | 可用 | Flash descriptor 切區(ME 照實報 opaque)、firmware volume / file / section 走訪、LZMA 解壓。公開 OVMF 映像:**123 個模組、119 個有名字**。字串比對在 BIOS 上命中 0 個,清單全部來自結構。**Flash descriptor 那段尚未對真實廠商 dump 驗證** |
 
 ### 真實韌體實測
 
@@ -54,15 +54,16 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | `v1.13.0` | **Phase 3 第二階段**:Espressif ESP32 系列(image / partition table / app descriptor、宣告式指令集) |
 | `v1.13.1` | 修正:畫面上的元件清單改由 SBOM 文件推導,不再與下載到的文件不一致 |
 | `v1.14.0` | 拖拉介面補上廠商 SBOM 匯入與比對;廠商文件沒有 purl 也能比對得到 |
+| `v1.15.0` | **Phase 4**:UEFI / PC BIOS(flash descriptor、firmware volume、LZMA 解壓、模組清單) |
 | `v1.7.0` | **Phase 2 第一階段**:容器走訪、解壓、SquashFS 4.0 reader、opkg / dpkg / apk 套件資料庫、發行版識別、真實韌體 corpus 測試 |
 
 ### 工程現況
 
 | 項目 | 狀態 |
 |---|---|
-| 程式碼 | 約 9,100 行(含測試),10 個模組 + 6 個簽章包(36 個簽章) |
+| 程式碼 | 約 10,000 行(含測試),11 個模組 + 6 個簽章包(36 個簽章) |
 | 依賴 | 無。Python 3.9+ 標準函式庫 |
-| 測試 | 164 個。12 個合成 fixture + 真實廠商韌體 corpus(1 份 router、3 份 ESP32) |
+| 測試 | 192 個。12 個合成 fixture + 真實廠商韌體 corpus(1 份 router、3 份 ESP32) |
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
@@ -98,6 +99,14 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 10. **沒有 purl 的廠商 SBOM 比對不到任何東西** — 比對只用 purl 當 key,而供應商
    自己產的 SPDX 常常沒有 purl。結果是整份文件都被歸類成「聲明了但未觀察到」,
    看起來像一切正常,其實是根本沒比對成功。現在 purl 與名稱都當 key。
+11. **切出來的區段被標成「已解開」** — `expanded` 這個旗標的意思是「無論熵值
+   多少,我們讀得懂這段」。但 ESP32 partition 與 UEFI flash region 只是從檔案裡
+   切一段出來,不是解壓出來的。結果:**加密的 ESP32 partition 或 Intel ME 區會
+   因為「我們有它的 bytes」而被判成明文**。由 Phase 4 揭發,ESP32 那條路徑同樣
+   受影響。
+12. **opacity 調和不認得結構性元件** — 剛列完 123 個 BIOS 模組,標題卻寫「無法
+   靜態識別元件」。調和函式只看得到簽章命中與套件,看不到 UEFI / Espressif 這類
+   由結構讀出來的元件。
 
 ---
 
@@ -111,9 +120,13 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 這兩項沒有真實樣本就只能照規格書寫,驗證不到廠商實際的偏差 —— `gcc-arm-none-eabi`
 誤報那次已經示範過合成 fixture 看不出真實問題。
 
+**Phase 4 第一階段已完成**(v1.15.0)。剩餘:AMI / Insyde / Phoenix 廠商模組的
+辨識、EFI/Tiano 解壓、以及對真實 BIOS dump 驗證 flash descriptor —— 三項都需要
+一份真實的 PC BIOS 樣本。
+
 Phase 3 剩餘:raw 映像(非 ESP32、非 ELF)的 RISC-V / Xtensa 指令集辨識 ——
 ESP32 已由 header 的 chip ID 直接解決,ELF 輸入本來就涵蓋,所以剩下的是「一份
-沒有任何檔頭的 RISC-V raw dump」這個窄情況。之後:Phase 4(UEFI)。
+沒有任何檔頭的 RISC-V raw dump」這個窄情況。
 
 值得考慮的下一項:**ESP-IDF 內含元件的版本對照**。一份只寫著 `esp-idf 5.5.4`
 的 SBOM 對 CVE 比對幫助有限 —— 真正會中 CVE 的是 mbedTLS 與 lwIP。但 release
@@ -151,3 +164,4 @@ zip,雜湊與頁面公佈的一致;解壓後用套件內的直譯器跑真實 ro
 | CPython hash pin | `scripts/python-embed.sha256` 仍為空。下次有網時跑 `build-portable.ps1 -PinHash` 並對照 python.org |
 | 真實 CCTV 韌體樣本 | 有樣本才能決定 Phase 2 剩餘項目的優先次序 |
 | 真實客戶 ESP32 韌體 | 目前只用公開的 Tasmota 映像驗證過。客戶的 build 多半會填滿 app descriptor(專案名稱、應用版本),那條路徑值得用真檔跑一次 |
+| **真實 PC BIOS dump** | 最需要的一份樣本。OVMF 是虛擬機韌體,沒有 Intel flash descriptor、沒有 ME 區、也沒有 AMI / Insyde / Phoenix 的廠商模組。descriptor 那段目前只照規格寫,未經真檔驗證 |

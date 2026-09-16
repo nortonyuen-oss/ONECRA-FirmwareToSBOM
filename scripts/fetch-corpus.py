@@ -36,6 +36,40 @@ CORPUS = [
                 "uImage + LZMA kernel + xz SquashFS with a 359-entry opkg "
                 "database.",
     },
+    {
+        "path": "esp32/tasmota32.bin",
+        "url": "https://github.com/arendst/Tasmota/releases/download/v15.6.0/"
+               "tasmota32.bin",
+        "sha256": "5249c9b49e40c9fb96869f3fc573c3a00c9d99ea55997fd9117aaafbf7c0e7f3",
+        "note": "Tasmota 15.6.0 for ESP32, Xtensa LX6. An application image "
+                "whose app descriptor fills in only idf_ver - the blank-field "
+                "case every synthetic fixture gets wrong.",
+    },
+    {
+        "path": "esp32/tasmota32c3.bin",
+        "url": "https://github.com/arendst/Tasmota/releases/download/v15.6.0/"
+               "tasmota32c3.bin",
+        "sha256": "5991d11ad8f8b100b165974e81544594394df1d12d165012a42c002e1985cb1c",
+        "note": "Tasmota 15.6.0 for ESP32-C3, RISC-V. The core that no entropy "
+                "or opcode heuristic can tell apart from the Xtensa parts.",
+    },
+    {
+        "path": "esp32/tasmota32.factory.bin",
+        "url": "https://github.com/arendst/Tasmota/releases/download/v15.6.0/"
+               "tasmota32.factory.bin",
+        "sha256": "35b8c70c843767919f6ec6e25c0d79f87e3519fae0c5c2b2f7d1631b27431a41",
+        "note": "The same firmware as a full flash image: bootloader, "
+                "partition table, and a layout that names its app partition "
+                "'safeboot' rather than the textbook 'factory'.",
+    },
+    {
+        "path": "uefi/edk2-ovmf-x64.fd",
+        "url": "https://retrage.github.io/edk2-nightly/bin/RELEASEX64_OVMF.fd",
+        "sha256": "f8c95686ef99f028fb3863e21fc98423f95a08bac1018c774bf6687921c85d83",
+        "note": "An EDK2 release build. A PC BIOS with no library banners at "
+                "all - the inventory is 123 modules behind an LZMA section "
+                "that expands 1.4 MB into 16 MB.",
+    },
 ]
 
 TIMEOUT = 300
