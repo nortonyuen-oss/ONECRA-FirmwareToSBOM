@@ -240,7 +240,8 @@ PAGE_TEMPLATE = """<!doctype html>
     <p class="tagline">fw2sbom &middot; Firmware SBOM Generator &middot; v__TOOL_VERSION__</p>
     <p class="sub">拖曳 firmware 到下方，產生 evidence-based CycloneDX 1.6 或 SPDX 2.3 SBOM。<br>
       收 raw <code>.bin</code>、<code>.hex</code>、<code>.s19</code>、<code>.uf2</code>、<code>.elf</code>、
-      ESP32 映像與整顆 flash dump，以及廠商封包格式（自動去框）</p>
+      Linux 裝置韌體、ESP32 映像與 flash dump、<strong>UEFI / PC BIOS</strong>，
+      以及廠商封包格式（自動去框）</p>
   </header>
 
   <div class="wrap">
@@ -425,6 +426,8 @@ async function handleFile(file) {
         c.evidence_class === 'embedded-standard-data' ? '標準資料' :
         c.evidence_class === 'vendor-sbom' ? '廠商聲明' :
         c.evidence_class === 'esp-idf-app-descriptor' ? '映像自述' :
+        c.evidence_class === 'uefi-module' ? 'UEFI 模組' :
+        c.evidence_class === 'os-release-file' ? '發行版' :
         c.evidence_class === 'package-database' ? '套件資料庫' : '';
       tr.innerHTML =
         '<td>' + escapeHtml(c.name) +
@@ -686,7 +689,7 @@ def analyze_bytes(filename, data, vendor_uploads=None):
     vendor_documents, vendor_errors = read_vendor_sboms(vendor_uploads)
     vendor = core.reconcile_vendor_sboms(
         vendor_documents, hits, standards, packages, False,
-        core.espressif_components(segments))
+        core.structural_components(segments))
 
     name = filename or "firmware.bin"
     stem = os.path.splitext(os.path.basename(name))[0]

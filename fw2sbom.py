@@ -52,7 +52,7 @@ import uefi
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.15.0"
+TOOL_VERSION = "1.15.1"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1344,12 +1344,19 @@ def load_vendor_sboms(paths, verbose=False):
     return documents
 
 
-def identified_components(hits, standards, packages, espressif=None):
-    """Everything this analysis found, flattened for comparison."""
+def identified_components(hits, standards, packages, structural=None):
+    """Everything this analysis found, flattened for comparison.
+
+    `structural` is whatever came out of a format's own structures rather than
+    out of its strings - ESP-IDF's app descriptor, a BIOS's module inventory.
+    Leaving those out does not produce a smaller comparison; it produces a
+    wrong one, where a vendor naming a module the image visibly contains comes
+    back as "declared but not observed".
+    """
     found = []
-    for item in espressif or []:
-        found.append({"name": item["name"], "version": item["version"],
-                      "purl": item["purl"], "source": "app-descriptor"})
+    for item in structural or []:
+        found.append({"name": item["name"], "version": item.get("version"),
+                      "purl": item.get("purl"), "source": "declared-structure"})
     for hit in hits:
         found.append({"name": hit["sig"]["name"], "version": hit["version"],
                       "purl": hit["sig"]["purl"], "source": "signature"})
@@ -1363,7 +1370,7 @@ def identified_components(hits, standards, packages, espressif=None):
 
 
 def reconcile_vendor_sboms(documents, hits, standards, packages,
-                           verbose=False, espressif=None):
+                           verbose=False, structural=None):
     """Compare each vendor document against what the image actually showed.
 
     A version the vendor declares that the binary contradicts is a finding, and
@@ -1374,7 +1381,7 @@ def reconcile_vendor_sboms(documents, hits, standards, packages,
     report = []
     for loaded in documents:
         agreements, conflicts, vendor_only, _ours_only = vendor_sbom.compare(
-            identified_components(hits, standards, packages, espressif),
+            identified_components(hits, standards, packages, structural),
             loaded["components"])
         report.append({"document": loaded["document"],
                        "components": loaded["components"],
@@ -2622,7 +2629,7 @@ def main(argv=None):
     # package database is the most decisive evidence of all.
     vendor = reconcile_vendor_sboms(vendor_documents, hits, standards,
                                     packages, args.verbose,
-                                    espressif_components(segments))
+                                    structural_components(segments))
     opacity = summarise_opacity(segments, opacity)
     opacity = reconcile_opacity(opacity, hits + packages
                                 + structural_components(segments),

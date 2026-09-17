@@ -1432,6 +1432,36 @@ class ServiceTest(unittest.TestCase):
         self.assertEqual([f[0] for f in fields["vendor"]], ["a.json", "b.json"])
         self.assertEqual(fields["vendor"][1][1], b"[]")
 
+    def test_a_vendor_claim_about_a_uefi_module_is_compared(self):
+        """A vendor SBOM for a BIOS names modules, and the comparison has to
+        see the module inventory or it answers "declared but not observed" to
+        every one of them - a clean bill of health that is really a failure to
+        compare. Found by dragging a real BIOS into the real page: PciBusDxe
+        came back unobserved while sitting in the list above it.
+        """
+        vendor = json.dumps({
+            "bomFormat": "CycloneDX", "specVersion": "1.6", "version": 1,
+            "components": [
+                {"type": "device-driver", "name": "DxeCore", "version": "2.0"},
+                {"type": "device-driver", "name": "PciBusDxe", "version": "1.0"},
+                {"type": "library", "name": "zlib", "version": "1.2.13"},
+            ],
+        }).encode("utf-8")
+        result = service.analyze_bytes("uefi_volume.bin", fixture("uefi_volume.bin"),
+                                       [("bios-vendor.cdx.json", vendor)])
+        doc = result["vendor"][0]
+        self.assertEqual([c["name"] for c in doc["conflicts"]], ["DxeCore"])
+        self.assertEqual(doc["conflicts"][0]["our_version"], "1.0")
+        self.assertEqual(doc["corroborated"], 1)          # PciBusDxe agrees
+        self.assertEqual([c["name"] for c in doc["not_observed"]], ["zlib"])
+
+    def test_a_uefi_module_row_says_where_it_came_from(self):
+        """123 rows tagged as plain signature hits misrepresents every one of
+        them: none of them came from a string match."""
+        result = service.analyze_bytes("uefi_volume.bin", fixture("uefi_volume.bin"))
+        classes = {row["evidence_class"] for row in result["components"]}
+        self.assertEqual(classes, {"uefi-module"})
+
     def test_the_screen_list_matches_the_document(self):
         """A customer reads the list in the browser and hands the download to
         an auditor. If the two disagree there is no way to tell which is wrong.
