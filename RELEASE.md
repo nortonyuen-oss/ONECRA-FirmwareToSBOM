@@ -34,6 +34,93 @@ timestamp,所以嗰啲 exe 嘅 hash 從來只係「嗰一次 build 嘅紀錄」,
 
 ---
 
+## v1.16.0
+
+| | |
+|---|---|
+| Tag | `v1.16.0` |
+| 程式碼 commit | `e80b4b5ad697434c1f5f4a6c8e1ede5f3c39fa76` |
+| Build 日期 | 2026-09-17 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+### Portable 版(唯一交付形式)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,265,146 bytes |
+| SHA-256 | `db0475c2b3d635e85a66dd8ae96b2364453636cd566255eab545961017bda491` |
+| 內容 | 59 個檔案(多咗 `cramfs.py`、`vendor_container.py`) |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `4746460ac68b7564b9528e380f90d8fcf8b6c5145699e5d083d57e02125e729e` |
+| `container.py` | `96c1dc6095ea5844529cce9febed25b30892a3409c67b878c38e46ca4005bb78` |
+| `cramfs.py` | `b506da28dcf7ee83d08f641c11efdb48ccc9a96159e8eb0215bfefc8b3e6217a` |
+| `vendor_container.py` | `9efb3dda2b60d6dc001f77f655181957969f4edd0249f7efee325944cf11267b` |
+
+其餘檔案與 v1.15.1 相同。
+
+### 新增:廠商外層容器
+
+消費級 router 嘅韌體下載檔好少係裸映像,而係前面加咗廠商自己嘅檔頭。檔頭好細,
+後面就係我哋本來讀得懂嘅韌體 —— 所以一個 `.trx` 檔同一份完整 SBOM 之間,爭嘅
+只係「知道要跳過 32 個 byte」。
+
+| 容器 | Magic | 常見於 |
+|---|---|---|
+| Broadcom TRX v1 / v2 | `HDR0` | Netgear、Linksys、Asus、Buffalo |
+| Netgear CHK | `*#$^` | Netgear(入面通常包住一個 TRX) |
+| D-Link SHRS | `SHRS` | D-Link |
+| Instar BNEG | `BNEG` | Instar IP camera |
+| Moxa FRM | `*FRM` | Moxa 工業閘道器 |
+
+**呢個模組刻意寫得好薄:佢乜都唔解壓。** 認得容器、記低檔頭講咗乜、將檔頭嗰幾十
+個 byte 標記為已解釋,**其餘交返原本嘅流程**。兩件唔會做嘅事:唔猜 payload 位置
+(切錯位唔會大聲失敗,只會令之後每一項發現都偏移);唔假裝加密嘅 payload 讀得到。
+
+### 新增:CramFS
+
+好多細型 Linux 裝置(攝影機、機上盒、舊閘道器)喺 router 用 SquashFS 嗰個位置用
+CramFS。`cramfs.py` **提供同 `squashfs.SquashFS` 一模一樣嘅介面**,所以後面全部
+照跑:套件資料庫、ELF 依賴分析、逐檔簽章掃描,一行都唔使改。
+
+兩個會令人寫錯嘅細節:**兩種位元組序都存在,而且 inode 入面嘅欄位會跟住翻**
+(淨係翻 word 唔翻欄位,會得出幾 MB 嘅檔案大小同零長度檔名);**長度嘅單位唔係
+byte**(`namelen` 同 `offset` 數嘅都係 4-byte 單位)。
+
+驗證方式值得一提:公開樣本**同樣內容有 LE 同 BE 兩份**,所以兩個 decoder 係互相
+驗證,唔淨係各自對照規格書。12 個變體全部讀出**完全相同**嘅檔案清單同內容。
+
+### 修正:一個喺最常走嗰條路上嘅缺陷
+
+**未識別區段被標成「已解開」。** 嗰個旗標嘅意思係「無論熵值幾高,呢段我哋讀得明」
+—— 於是**任何唔屬於已知容器嘅高熵區段,都會因為「我哋有佢啲 bytes」而被判成明文**。
+一個加密嘅 D-Link SHRS payload,熵值 **7.951**,就係咁被報成 plaintext。
+
+呢個係 v1.15.0 嗰個問題嘅同一個錯誤,但喺最常走嗰條路上。同場修埋 uImage 檔頭同
+未壓縮 kernel 兩處一樣嘅假宣稱。**由今次加入嘅真實樣本測試揭發 —— 之前 194 個
+測試全部綠。**
+
+### 樣本來源
+
+`scripts/fetch-corpus.py` 新增 8 個格式樣本,來自 unblob 專案(MIT)。佢哋用 Git LFS
+存放,所以 fetcher 加咗 LFS 指標解析 —— 唔係嘅話會下載到一個 128-byte 嘅文字檔,
+而且完全唔會報錯。
+
+要講清楚:呢批係**格式變體向量,唔係完整廠商韌體**。啱用嚟寫 reader,唔可以當成
+「喺真實映像上行得通」嘅證明 —— 所以 router / ESP32 / BIOS 嗰幾份真檔仍然喺度。
+
+### 測試
+
+214 個(由 194 增加)。新增 `VendorContainerTest` 七項、`CramFSTest` 九項、
+`RealFormatSampleTest` 四項(對住公開樣本)。
+
+---
+
 ## v1.15.1
 
 | | |

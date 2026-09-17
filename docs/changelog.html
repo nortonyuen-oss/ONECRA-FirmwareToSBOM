@@ -154,9 +154,72 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.15.1</span>
+        <span class="ver">1.16.0</span>
         <span class="date">2026-09-17</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>認得廠商包在外面那層,以及裡面的 CramFS</h2>
+        <p>
+          消費級 router 的韌體下載檔很少是裸映像,而是映像前面加了廠商自己的檔頭。
+          檔頭很小,後面就是我們本來就讀得懂的韌體 —— 所以一個 <code>.trx</code>
+          檔與一份完整 SBOM 之間,<strong>差的只是「知道要跳過 32 個位元組」</strong>。
+        </p>
+        <div class="tw"><table>
+          <thead><tr><th>容器</th><th>常見於</th></tr></thead>
+          <tbody>
+            <tr><td>Broadcom TRX v1 / v2</td><td>Netgear、Linksys、Asus、Buffalo</td></tr>
+            <tr><td>Netgear CHK</td><td>Netgear（裡面通常包一個 TRX）</td></tr>
+            <tr><td>D-Link SHRS</td><td>D-Link</td></tr>
+            <tr><td>Instar BNEG</td><td>Instar IP camera</td></tr>
+            <tr><td>Moxa FRM</td><td>Moxa 工業閘道器</td></tr>
+          </tbody>
+        </table></div>
+        <p>
+          <strong>它不解壓任何東西</strong> —— 認得容器、記下檔頭說了什麼,其餘交還
+          原本的流程。兩件刻意不做的事:<strong>不猜 payload 位置</strong>(切錯位
+          置不會大聲失敗,只會讓後面每一項發現都偏移幾個位元組,然後安靜地產生垃圾);
+          <strong>不假裝加密的 payload 讀得到</strong>(D-Link SHRS 在實機上是加密的,
+          認得外層不會改變這件事)。
+        </p>
+        <p>
+          <strong>CramFS</strong> 是很多攝影機、機上盒與較舊閘道器在 router 用
+          SquashFS 的位置上用的東西。新的 reader 提供與 SquashFS 完全相同的介面,
+          所以套件資料庫讀取、ELF 依賴分析、逐檔簽章掃描全部照跑,一行都不用改。
+        </p>
+        <p>
+          驗證方式值得一提:公開樣本同樣的內容有大端與小端兩份,所以兩個 decoder 是
+          <strong>互相驗證</strong>,不只是各自對照規格書。12 個變體全部讀出完全相同的
+          檔案清單與內容。
+        </p>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            <strong>未識別的區段被標成「已解開」。</strong>那個旗標的意思是「無論熵值
+            多高,這一段我們讀得懂」—— 於是<strong>任何不屬於已知容器的高熵區段,都
+            會因為「我們有它的位元組」而被判成明文</strong>。一個加密的 D-Link 韌體
+            payload,熵值 7.951,就這樣被報成 plaintext。
+          </p>
+          <p>
+            這是上一版那個問題的同一個錯誤,但在<strong>最常走的那條路上</strong>。
+            如果你分析過任何含有加密區段、而外層容器我們當時不認得的韌體,
+            <strong>值得用這一版重跑</strong>。
+          </p>
+          <p style="opacity:.8">
+            由這次加入的真實樣本測試揭發 —— 在那之前,194 個測試全部通過。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,265,146 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">db0475c2b3d635e85a66dd8ae96b2364453636cd566255eab545961017bda491</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.15.1</span>
+        <span class="date">2026-09-17</span>
       </div>
       <div>
         <div class="fixed">
