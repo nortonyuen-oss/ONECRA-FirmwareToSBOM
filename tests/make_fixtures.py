@@ -21,6 +21,7 @@ Usage:
 import gzip
 import hashlib
 import lzma
+import zlib
 import os
 import random
 import struct
@@ -691,6 +692,139 @@ def build_uefi_flash():
     bios = uefi_volume(FFS2_GUID, uefi_modules(r), total=0x100000)
     flash[0x210000:0x210000 + len(bios)] = bios
     return bytes(flash)
+
+
+# --- CramFS ---------------------------------------------------------------- #
+#
+# Built here rather than downloaded because the published CramFS samples hold
+# two text files called apple.txt and cherry.txt: they prove the reader walks
+# the format, and prove nothing at all about whether a component comes out the
+# other end. This one carries a package database and a banner, so the whole
+# path is exercised - filesystem, package database, signature scan.
+
+CRAMFS_MAGIC_LE = 0x28CD3D45
+CRAMFS_SIGNATURE = b"Compressed ROMFS"
+CRAMFS_BLOCK = 4096
+S_IFREG_755 = 0x81ED
+S_IFDIR_755 = 0x41ED
+
+
+def cramfs_inode(mode, size, namelen_units, offset_units):
+    """The 12-byte inode, little-endian, with its three packed words."""
+    return struct.pack("<III",
+                       (mode & 0xFFFF),
+                       (size & 0xFFFFFF),
+                       (namelen_units & 0x3F) | ((offset_units & 0x03FFFFFF) << 6))
+
+
+def cramfs_entry(name, mode, size, offset_units):
+    """An inode followed by its name, padded to a 4-byte boundary."""
+    raw = name.encode("ascii")
+    padded = raw + b"\x00" * (-len(raw) % 4)
+    return cramfs_inode(mode, size, len(padded) // 4, offset_units) + padded
+
+
+def cramfs_file_data(payload):
+    """A block table of block *end* offsets, then the zlib-compressed blocks.
+
+    The table is written by the caller once the absolute start is known, so
+    this returns the compressed blocks and their lengths.
+    """
+    blocks = [payload[i:i + CRAMFS_BLOCK]
+              for i in range(0, max(len(payload), 1), CRAMFS_BLOCK)]
+    return [zlib.compress(b, 9) for b in blocks if b] or [zlib.compress(b"", 9)]
+
+
+@fixture("cramfs_rootfs.bin")
+def build_cramfs_rootfs():
+    """A small CramFS root filesystem with a package database and a banner.
+
+    Laid out by hand: superblock, then the root directory's entries, then one
+    subdirectory's entries, then each file's block table and data. Every offset
+    an inode carries is in 4-byte units, which is the detail a reader written
+    from a half-remembered spec gets wrong.
+    """
+    status = (
+        "Package: busybox\n"
+        "Version: 1.36.1-r2\n"
+        "Architecture: arm_cortex-a7\n"
+        "License: GPL-2.0-only\n"
+        "Installed-Time: 1700000000\n"
+        "\n"
+        "Package: openssl-util\n"
+        "Version: 3.0.12-r1\n"
+        "Architecture: arm_cortex-a7\n"
+        "License: Apache-2.0\n"
+        "Installed-Time: 1700000000\n"
+    ).encode("ascii")
+    banner = (b"\x7fELF\x01\x01\x01" + b"\x00" * 9
+              + struct.pack("<HH", 2, 40)          # ET_EXEC, EM_ARM
+              + strings_blob(["BusyBox v1.36.1 (2023-11-14 20:19:46 UTC)",
+                              "mbed TLS 3.4.0", "usage: busybox [function]"]))
+    release = (b'NAME="OpenWrt"\n'
+               b'VERSION="22.03.4"\n'
+               b'ID=openwrt\n'
+               b'PRETTY_NAME="OpenWrt 22.03.4"\n')
+
+    # Two directories, three files. The subdirectory is what exercises walk().
+    files = [("status", status), ("busybox", banner), ("os-release", release)]
+    compressed = {name: cramfs_file_data(body) for name, body in files}
+
+    # --- lay the image out ------------------------------------------------- #
+    root_entries_at = 76
+    root_names = [("etc", S_IFDIR_755), ("busybox", S_IFREG_755)]
+    root_size = sum(12 + (-(-len(n.encode()) // 4)) * 4 for n, _ in root_names)
+
+    etc_entries_at = root_entries_at + root_size
+    etc_names = [("opkg-status", S_IFREG_755), ("os-release", S_IFREG_755)]
+    etc_size = sum(12 + (-(-len(n.encode()) // 4)) * 4 for n, _ in etc_names)
+
+    at = etc_entries_at + etc_size
+    placed = {}
+    for name, body in files:
+        blocks = compressed[name]
+        table_at = at
+        ends, cursor = [], table_at + len(blocks) * 4
+        for block in blocks:
+            cursor += len(block)
+            ends.append(cursor)
+        placed[name] = {"table_at": table_at, "ends": ends, "blocks": blocks,
+                        "size": len(body)}
+        at = cursor + (-cursor % 4)
+
+    total = at
+    image = bytearray(total)
+
+    root_inode = cramfs_inode(S_IFDIR_755, root_size, 0, root_entries_at // 4)
+    header = struct.pack("<III", CRAMFS_MAGIC_LE, total, 0)
+    header += struct.pack("<I", 0)
+    header += CRAMFS_SIGNATURE
+    header += struct.pack("<IIII", 0, 0, total // CRAMFS_BLOCK + 1, len(files))
+    header += b"fw2sbom-fixture\x00"
+    image[0:64] = header
+    image[64:76] = root_inode
+
+    root_blob = (cramfs_entry("etc", S_IFDIR_755, etc_size, etc_entries_at // 4)
+                 + cramfs_entry("busybox", S_IFREG_755, placed["busybox"]["size"],
+                                placed["busybox"]["table_at"] // 4))
+    image[root_entries_at:root_entries_at + len(root_blob)] = root_blob
+
+    etc_blob = (cramfs_entry("opkg-status", S_IFREG_755, placed["status"]["size"],
+                             placed["status"]["table_at"] // 4)
+                + cramfs_entry("os-release", S_IFREG_755,
+                               placed["os-release"]["size"],
+                               placed["os-release"]["table_at"] // 4))
+    image[etc_entries_at:etc_entries_at + len(etc_blob)] = etc_blob
+
+    for name in placed:
+        spot = placed[name]
+        table = b"".join(struct.pack("<I", e) for e in spot["ends"])
+        image[spot["table_at"]:spot["table_at"] + len(table)] = table
+        cursor = spot["table_at"] + len(table)
+        for block in spot["blocks"]:
+            image[cursor:cursor + len(block)] = block
+            cursor += len(block)
+    return bytes(image)
 
 
 # --------------------------------------------------------------------------- #

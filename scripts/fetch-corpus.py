@@ -22,9 +22,13 @@ run.
 """
 
 import hashlib
+import json
 import os
 import sys
 import urllib.request
+
+UNBLOB = ("https://raw.githubusercontent.com/onekey-sec/unblob/"
+          "main/tests/integration/")
 
 CORPUS = [
     {
@@ -70,9 +74,102 @@ CORPUS = [
                 "all - the inventory is 123 modules behind an LZMA section "
                 "that expands 1.4 MB into 16 MB.",
     },
+    # --- Format samples from the unblob project (MIT) ---------------------- #
+    #
+    # These are format-variant vectors rather than whole firmware: every byte
+    # order, every compressor, padded and unpadded. That makes them the right
+    # thing to write a reader against and the wrong thing to trust as proof it
+    # survives a real vendor image - which is why the router, ESP32 and BIOS
+    # entries above are still here. Both kinds earn their place.
+    #
+    # They are stored with Git LFS, so the raw URL serves a pointer file and
+    # the fetcher resolves it.
+    {
+        "path": "formats/cramfs_le.bin",
+        "url": UNBLOB + "filesystem/cramfs/little_endian/__input__/fruits.cramfs_le",
+        "sha256": "8e594657cd8a394eb7abb2a10041681a925edb95e829d37a7a4ac5168f026b9e",
+        "note": "CramFS, little-endian. The filesystem many small Linux "
+                "devices use where a router uses SquashFS.",
+    },
+    {
+        "path": "formats/cramfs_be.bin",
+        "url": UNBLOB + "filesystem/cramfs/big_endian/__input__/fruits.cramfs_be",
+        "sha256": "de1d6be79d816470ff54836760a0a1574fba6c2efa9ed13108f0669eb329d749",
+        "note": "The same contents big-endian. The inode bitfields flip with "
+                "the byte order, so the two decoders check each other.",
+    },
+    {
+        "path": "formats/netgear_trx_v1.bin",
+        "url": UNBLOB + "archive/netgear/trx/trx_v1/__input__/sample.trx",
+        "sha256": "94c27fcc2ceeabeefde74134c84cfbdec79b237db720b01d914a69a47d2a292e",
+        "note": "Broadcom TRX revision 1 - three parts.",
+    },
+    {
+        "path": "formats/netgear_trx_v2.bin",
+        "url": UNBLOB + "archive/netgear/trx/trx_v2/__input__/sample.trx",
+        "sha256": "fa7ccf8baa38f293e5d26c397e59a673d8de2a1434fa6e5654a0b75309f56849",
+        "note": "Broadcom TRX revision 2 - four parts. The wrapper on a large "
+                "share of consumer routers.",
+    },
+    {
+        "path": "formats/netgear_chk.bin",
+        "url": UNBLOB + "archive/netgear/chk/__input__/sample.chk",
+        "sha256": "18e9a759fc06d2c99e531188b39f4482d06a7b772393e225fd06550fe16321ee",
+        "note": "Netgear CHK, the board-identifying wrapper that contains a "
+                "TRX on a real device.",
+    },
+    {
+        "path": "formats/dlink_shrs.bin",
+        "url": UNBLOB + "archive/dlink/shrs/__input__/sample.bin",
+        "sha256": "df841ac5e923fa5bd69d7f71aa131fbfa941bd10dd6d406698612540e078aaf0",
+        "note": "D-Link SHRS: a 1,756-byte header over a payload that is "
+                "AES-encrypted on shipping devices - the honest-opacity case.",
+    },
+    {
+        "path": "formats/instar_bneg.bin",
+        "url": UNBLOB + "archive/instar/bneg/__input__/output.bin",
+        "sha256": "9b422c5cd65b3c72a2c113fd6d80a5d8241a4989b8b51b35c3a3c695979119f7",
+        "note": "Instar BNEG. IP cameras are a firmware class we are short of.",
+    },
+    {
+        "path": "formats/moxa_frm.bin",
+        "url": UNBLOB + "archive/moxa/frm/moxa_frm/__input__/test.frm",
+        "sha256": "91d68c12cb810a8b22c957ad7d9e57b0844eec701638acd0a6b450072d5f4e03",
+        "note": "Moxa FRM, industrial gateways.",
+    },
 ]
 
 TIMEOUT = 300
+
+LFS_POINTER = b"version https://git-lfs.github.com/spec/v1"
+LFS_BATCH = "https://github.com/onekey-sec/unblob.git/info/lfs/objects/batch"
+
+
+def resolve_lfs(blob):
+    """Turn a Git LFS pointer into the bytes it points at.
+
+    raw.githubusercontent.com serves the pointer, not the file, for anything
+    stored with LFS - a 128-byte text file where a firmware image was expected.
+    Silently writing that to disk would make every reader fail on a file that
+    downloaded without an error.
+    """
+    if not blob.startswith(LFS_POINTER):
+        return blob
+    fields = dict(line.split(" ", 1)
+                  for line in blob.decode("ascii").strip().split("\n"))
+    oid = fields["oid"].split(":", 1)[1]
+    request = urllib.request.Request(
+        LFS_BATCH,
+        data=json.dumps({"operation": "download", "transfers": ["basic"],
+                         "objects": [{"oid": oid,
+                                      "size": int(fields["size"])}]}).encode(),
+        headers={"Accept": "application/vnd.git-lfs+json",
+                 "Content-Type": "application/vnd.git-lfs+json"})
+    with urllib.request.urlopen(request, timeout=TIMEOUT) as r:
+        answer = json.loads(r.read())
+    href = answer["objects"][0]["actions"]["download"]["href"]
+    with urllib.request.urlopen(href, timeout=TIMEOUT) as r:
+        return r.read()
 
 
 def main(argv):
@@ -86,7 +183,7 @@ def main(argv):
         else:
             print(f"fetch {entry['url']}")
             with urllib.request.urlopen(entry["url"], timeout=TIMEOUT) as r:
-                blob = r.read()
+                blob = resolve_lfs(r.read())
             with open(target, "wb") as f:
                 f.write(blob)
         digest = hashlib.sha256(open(target, "rb").read()).hexdigest()

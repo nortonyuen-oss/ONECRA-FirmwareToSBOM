@@ -41,12 +41,20 @@ import zlib
 
 import elf
 import esp32
+import cramfs
 import squashfs
 import uefi
+import vendor_container
 
 # A decompressed region is capped so a crafted image cannot exhaust memory.
 MAX_EXPANDED = 256 * 1024 * 1024
 MAX_SEGMENTS = 64
+
+# Every on-image filesystem reader raises its own error type, and the code that
+# reads packages, binaries and files out of one should not care which reader it
+# was handed. Catching the specific type is how a second filesystem turns into
+# a traceback instead of a warning.
+FILESYSTEM_ERRORS = (squashfs.SquashFSError, cramfs.CramFSError)
 
 UIMAGE_MAGIC = 0x27051956
 UIMAGE_HEADER_SIZE = 64
@@ -285,6 +293,28 @@ def walk(data, verbose=False, log=None):
         segments.sort(key=lambda seg: seg["offset"])
         return segments, warnings
 
+    # --- 0.5 A vendor's own wrapper round the front -------------------------
+    # Only the header is claimed. Everything behind it is firmware this walk
+    # already knows how to read, so the kernel scan and the filesystem scan do
+    # the rest exactly as they would for a bare image - which is the whole
+    # reason these wrappers are cheap to support.
+    chain = vendor_container.detect_chain(data)
+    for index, found in enumerate(chain):
+        detail = found.get("board") or found["vendors"]
+        say(f"container: {found['label']} header ({detail})")
+        for part in found["parts"]:
+            say(f"container:   {part['name']} at 0x{part['offset']:x}, "
+                f"{part['length']} bytes")
+        for note in found["notes"]:
+            say(f"container:   {note}")
+        start, end = found["offset"], found["offset"] + found["header_length"]
+        segments.append(_segment(
+            "vendor-header", start, end - start,
+            f"{found['label']} header",
+            content=data[start:end], expanded=False,
+            **({"vendor_container": chain} if index == 0 else {})))
+        claim(start, end)
+
     # --- 1. A boot header at offset 0 ---------------------------------------
     header = parse_uimage(data)
     if header:
@@ -295,7 +325,7 @@ def walk(data, verbose=False, log=None):
         segments.append(_segment(
             "boot-header", 0, UIMAGE_HEADER_SIZE,
             f"U-Boot uImage header ({header['os']}/{header['architecture']})",
-            content=data[:UIMAGE_HEADER_SIZE], uimage=header))
+            content=data[:UIMAGE_HEADER_SIZE], expanded=False, uimage=header))
         claim(0, UIMAGE_HEADER_SIZE)
 
         start = header["payload_offset"]
@@ -313,7 +343,11 @@ def walk(data, verbose=False, log=None):
                 say(f"container: kernel NOT expanded: {e}")
         seg = _segment("kernel", start, end - start,
                        f"{header['os']} kernel ({header['compression'] or 'raw'})",
-                       content=kernel, uimage=header)
+                       content=kernel,
+                       # Expanded only if it really was: a kernel whose
+                       # decompression failed has no content to have expanded.
+                       expanded=bool(header["compression"]) and kernel is not None,
+                       uimage=header)
         if note:
             seg["warnings"].append(note)
         segments.append(seg)
@@ -325,7 +359,7 @@ def walk(data, verbose=False, log=None):
             continue
         try:
             image = squashfs.SquashFS(data, offset)
-        except squashfs.SquashFSError as e:
+        except FILESYSTEM_ERRORS as e:
             # A 4-byte magic hits by chance in 14 MB of compressed data; a
             # superblock that will not open is almost always one of those.
             continue
@@ -337,6 +371,24 @@ def walk(data, verbose=False, log=None):
             "filesystem", offset, end - offset,
             f"SquashFS {image.version_major}.{image.version_minor} "
             f"({image.compressor})",
+            content=None, filesystem=image))
+        claim(offset, end)
+        if len(segments) >= MAX_SEGMENTS:
+            break
+
+    for offset in cramfs.find_offsets(data):
+        if any(s <= offset < e for s, e in covered):
+            continue
+        try:
+            image = cramfs.CramFS(data, offset)
+        except cramfs.CramFSError:
+            continue
+        end = min(len(data), offset + image.size)
+        say(f"container: CramFS at 0x{offset:x}, {image.byte_order}, "
+            f"{image.file_count} files, {image.size} bytes")
+        segments.append(_segment(
+            "filesystem", offset, end - offset,
+            f"CramFS ({image.byte_order})",
             content=None, filesystem=image))
         claim(offset, end)
         if len(segments) >= MAX_SEGMENTS:
@@ -377,8 +429,13 @@ def walk(data, verbose=False, log=None):
     for start, end in gaps:
         if end - start < 512:
             continue
+        # expanded=False because this is a slice of the input, not something
+        # we expanded. Marking it expanded tells the opacity judgement "we read
+        # this whatever it scored", which turned every encrypted region that
+        # was not inside a recognised container into "plaintext" - the exact
+        # failure this tool exists to prevent, on the commonest path of all.
         segments.append(_segment("unclaimed", start, end - start,
-                                 "unidentified region",
+                                 "unidentified region", expanded=False,
                                  content=data[start:end]))
 
     segments.sort(key=lambda s: s["offset"])
@@ -395,7 +452,7 @@ def _read_text(image, files, path, limit=4 * 1024 * 1024):
         return None
     try:
         return image.read_file(node).decode("utf-8", "replace")
-    except squashfs.SquashFSError:
+    except FILESYSTEM_ERRORS:
         return None
 
 
@@ -632,7 +689,7 @@ def analyze_binaries(image, files, package_info=None, verbose=False, log=None):
             continue
         try:
             blob = image.read_file(node)
-        except squashfs.SquashFSError as e:
+        except FILESYSTEM_ERRORS as e:
             warnings.append(f"{path}: {e}")
             continue
         scanned += len(blob)
@@ -769,7 +826,7 @@ def unclaimed_files(rootfs, log=None):
             continue
         try:
             blob = image.read_file(node)
-        except squashfs.SquashFSError:
+        except FILESYSTEM_ERRORS:
             skipped += 1
             continue
         scanned += len(blob)
@@ -785,7 +842,7 @@ def inspect_filesystem(segment, verbose=False, log=None):
         return None
     try:
         files = image.files()
-    except squashfs.SquashFSError as e:
+    except FILESYSTEM_ERRORS as e:
         segment["warnings"].append(f"filesystem could not be walked: {e}")
         return None
     segment["warnings"].extend(image.warnings)

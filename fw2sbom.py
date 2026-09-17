@@ -52,7 +52,7 @@ import uefi
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.15.1"
+TOOL_VERSION = "1.16.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1722,6 +1722,25 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             "name": "fw2sbom:offset_basis",
             "value": "offsets in this document refer to the reassembled "
                      "image, not to byte positions in the delivered file"})
+    for segment in segments or []:
+        chain = segment.get("vendor_container")
+        if not chain:
+            continue
+        # Which wrapper a file arrived in is provenance: it says whose tooling
+        # produced it, and it is the difference between "we could not read
+        # this" and "we did not recognise the 32 bytes at the front".
+        fw_props.append({
+            "name": "fw2sbom:vendor_container",
+            "value": " > ".join(c["label"] for c in chain)})
+        for found in chain:
+            if found.get("board"):
+                fw_props.append({"name": "fw2sbom:vendor_board",
+                                 "value": found["board"]})
+            for note in found["notes"]:
+                fw_props.append({"name": "fw2sbom:vendor_container_note",
+                                 "value": note})
+        break
+
     inventory = uefi_inventory(segments)
     if inventory:
         named = sum(1 for m in inventory["modules"] if m["name"])
@@ -1767,7 +1786,7 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         if segment.get("blank"):
             detail += " (erased flash, no content)"
         elif segment.get("expanded"):
-            detail += f" (expanded to {len(segment['content'])} bytes)"
+            detail += f" (expanded to {len(segment['content'] or b'')} bytes)"
         elif segment["content"] is None and segment["kind"] != "filesystem":
             detail += " (not expanded)"
         verdict = segment.get("opacity")
@@ -2760,6 +2779,14 @@ def main(argv=None):
     if rootfs and rootfs.get("os_release"):
         release = rootfs["os_release"]
         print(f"[fw2sbom] distribution: {release['description']}", file=sys.stderr)
+    chain = next((s["vendor_container"] for s in segments
+                  if s.get("vendor_container")), None)
+    if chain:
+        print("[fw2sbom] vendor container: "
+              + " > ".join(c["label"] for c in chain)
+              + (f" (board {chain[0]['board']})"
+                 if chain[0].get("board") else ""), file=sys.stderr)
+
     inventory = uefi_inventory(segments)
     if inventory:
         named = sum(1 for m in inventory["modules"] if m["name"])

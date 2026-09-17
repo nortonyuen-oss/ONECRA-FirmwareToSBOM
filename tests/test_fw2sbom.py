@@ -35,6 +35,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
 import container                                        # noqa: E402
+import cramfs                                           # noqa: E402
 import image_input                                      # noqa: E402
 import elf                                              # noqa: E402
 import esp32                                            # noqa: E402
@@ -44,6 +45,7 @@ import make_fixtures                                     # noqa: E402
 import spdx_report                                       # noqa: E402
 import squashfs                                          # noqa: E402
 import uefi                                             # noqa: E402
+import vendor_container                                 # noqa: E402
 import vendor_sbom                                      # noqa: E402
 import service                                           # noqa: E402
 
@@ -496,7 +498,7 @@ class SbomStructureTest(unittest.TestCase):
            "packet_front.bin", "packet_back.bin", "opaque_encrypted.bin",
            "random_flat.bin", "router_uimage.bin", "bare_unknown.bin",
            "encrypted_kernel.bin", "esp32_app.bin", "esp32_flash.bin",
-           "uefi_volume.bin", "uefi_flash.bin")
+           "uefi_volume.bin", "uefi_flash.bin", "cramfs_rootfs.bin")
 
     def test_is_valid_cyclonedx_16_json(self):
         for name in self.ALL:
@@ -1980,6 +1982,179 @@ class UefiTest(unittest.TestCase):
 
 # --------------------------------------------------------------------------- #
 
+class VendorContainerTest(unittest.TestCase):
+    """The wrappers vendors bolt on the front of a firmware download.
+
+    These are worth supporting precisely because they are trivial: the payload
+    behind the header is firmware the walk already reads, so the only thing
+    between a .trx file and a full SBOM is knowing to skip 32 bytes. What the
+    reader must not do is guess - a header claimed at the wrong offset does not
+    fail loudly, it shifts every later finding and quietly produces nonsense.
+    """
+
+    def _trx(self, version, parts=None):
+        """A TRX image: magic, length, crc, flags/version, part offsets."""
+        count = 4 if version == 2 else 3
+        header_size = 16 + count * 4
+        parts = parts or [b"kernel-here" * 8, b"rootfs-here" * 8, b"tail" * 8]
+        offsets, at, body = [], header_size, b""
+        for part in parts:
+            offsets.append(at)
+            body += part
+            at += len(part)
+        offsets += [0] * (count - len(offsets))
+        total = header_size + len(body)
+        head = (b"HDR0" + struct.pack("<III", total, 0x12345678,
+                                      (version << 16))
+                + struct.pack(f"<{count}I", *offsets))
+        return head + body
+
+    def test_a_trx_header_is_read_and_its_parts_located(self):
+        for version in (1, 2):
+            with self.subTest(version=version):
+                found = vendor_container.parse_trx(self._trx(version))
+                self.assertEqual(found["version"], version)
+                self.assertEqual(found["header_length"], 16 + (4 if version == 2 else 3) * 4)
+                self.assertEqual([p["name"] for p in found["parts"]][:2],
+                                 ["kernel", "root filesystem"])
+                self.assertEqual(found["parts"][0]["offset"], found["header_length"])
+
+    def test_a_stray_magic_is_not_a_container(self):
+        """"HDR0" is four bytes of ASCII and turns up inside compressed data."""
+        noise = b"HDR0" + bytes(range(256)) * 4
+        self.assertIsNone(vendor_container.parse_trx(noise))
+        self.assertIsNone(vendor_container.detect(noise))
+
+    def test_a_trx_claiming_more_than_it_has_is_refused(self):
+        image = bytearray(self._trx(2))
+        struct.pack_into("<I", image, 4, 0x7FFFFFFF)     # declared length
+        self.assertIsNone(vendor_container.parse_trx(bytes(image)))
+
+    def test_a_truncated_container_is_refused_rather_than_raising(self):
+        image = self._trx(2)
+        for length in (0, 4, 16, 20, 31):
+            with self.subTest(length=length):
+                self.assertIsNone(vendor_container.detect(image[:length]))
+
+    def test_an_shrs_payload_is_not_claimed_to_be_readable(self):
+        """D-Link encrypts these. Naming the container does not decrypt it, and
+        the payload still has to reach the opacity judgement."""
+        payload = bytes(range(256)) * 16
+        image = (b"SHRS" + struct.pack(">II", len(payload), len(payload))
+                 + b"\x00" * (vendor_container.SHRS_HEADER_SIZE - 12) + payload)
+        found = vendor_container.parse_shrs(image)
+        self.assertEqual(found["header_length"], 1756)
+        self.assertEqual(found["parts"][0]["length"], len(payload))
+        self.assertTrue(any("encrypted" in note for note in found["notes"]))
+
+    def test_the_header_is_claimed_and_the_payload_left_to_the_walk(self):
+        """The whole design: claim 32 bytes, let the existing scans do the rest.
+        Claiming the payload too would hide the filesystem inside it."""
+        rootfs = fixture("cramfs_rootfs.bin")
+        image = self._trx(2, parts=[b"\x00" * 64, rootfs])
+        segments, _warnings = container.walk(image)
+        kinds = [s["kind"] for s in segments]
+        self.assertIn("vendor-header", kinds)
+        self.assertIn("filesystem", kinds)
+        header = next(s for s in segments if s["kind"] == "vendor-header")
+        self.assertEqual(header["offset"], 0)
+        self.assertEqual(header["length"], 32)
+
+    def test_the_container_reaches_the_document(self):
+        rootfs = fixture("cramfs_rootfs.bin")
+        image = self._trx(2, parts=[b"\x00" * 64, rootfs])
+        result = service.analyze_bytes("router.trx", image)
+        properties = {p["name"]: p["value"]
+                      for p in json.loads(result["sbom_json"])
+                      ["metadata"]["component"]["properties"]}
+        self.assertEqual(properties["fw2sbom:vendor_container"], "Broadcom TRX v2")
+
+
+# --------------------------------------------------------------------------- #
+
+class CramFSTest(unittest.TestCase):
+    """CramFS is what many small Linux devices use where a router uses SquashFS.
+
+    The reader presents the same surface as the SquashFS one, which is the
+    point: package databases, ELF analysis and per-file signature scanning all
+    work on a CramFS rootfs without another line of code.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.image = fixture("cramfs_rootfs.bin")
+        cls.fs = cramfs.CramFS(cls.image, 0)
+
+    def test_the_superblock_is_read(self):
+        self.assertEqual(self.fs.byte_order, "little-endian")
+        self.assertEqual(self.fs.size, len(self.image))
+        self.assertEqual(self.fs.name, "fw2sbom-fixture")
+
+    def test_a_stray_magic_is_not_a_filesystem(self):
+        """The four magic bytes alone identify nothing; the signature 16 bytes
+        in is what settles it."""
+        noise = cramfs.MAGIC_LE + bytes(range(256)) * 4
+        self.assertEqual([], cramfs.find_offsets(noise))
+        with self.assertRaises(cramfs.CramFSError):
+            cramfs.CramFS(noise, 0)
+
+    def test_a_truncated_image_is_refused_rather_than_raising(self):
+        for length in (0, 4, 40, 75):
+            with self.subTest(length=length):
+                with self.assertRaises(cramfs.CramFSError):
+                    cramfs.CramFS(self.image[:length], 0)
+
+    def test_the_walk_descends_into_subdirectories(self):
+        paths = sorted(self.fs.files())
+        self.assertEqual(paths, ["/busybox", "/etc/opkg-status", "/etc/os-release"])
+        self.assertEqual([], self.fs.warnings)
+
+    def test_file_contents_come_back_whole(self):
+        files = self.fs.files()
+        release = self.fs.read_file(files["/etc/os-release"])
+        self.assertIn(b'VERSION="22.03.4"', release)
+        binary = self.fs.read_file(files["/busybox"])
+        self.assertTrue(binary.startswith(b"\x7fELF"))
+        self.assertIn(b"BusyBox v1.36.1", binary)
+
+    def test_the_offsets_are_counted_in_units_not_bytes(self):
+        """namelen counts 4-byte units and so does offset. Reading either as a
+        byte count lands in the middle of the image and looks like corruption
+        rather than a bug."""
+        root = self.fs.root
+        self.assertEqual(root["offset"] % 4, 0)
+        for _name, node in self.fs.listdir(root):
+            self.assertEqual(node["namelen"] % 4, 0)
+
+    # --- what the rest of the pipeline makes of it ------------------------- #
+
+    def test_the_rootfs_is_analysed_like_any_other(self):
+        result = analyze("cramfs_rootfs.bin")
+        names = {c["name"] for c in result["bom"]["components"]}
+        self.assertIn("busybox", names)          # from the binary's banner
+        self.assertIn("mbedtls", names)
+        self.assertEqual(result["rootfs"]["os_release"]["description"],
+                         "OpenWrt 22.03.4")
+
+    def test_the_architecture_comes_from_the_binaries_inside(self):
+        result = analyze("cramfs_rootfs.bin")
+        self.assertIn("ARM", result["rootfs"]["binaries"]["architecture"])
+
+    def test_a_text_file_that_looks_like_a_package_database_is_not_one(self):
+        """/etc/opkg-status holds "Package: busybox / Version: 1.36.1-r2" and is
+        not where opkg keeps its database. Treating any such text as a package
+        list is how version-less components get manufactured."""
+        result = analyze("cramfs_rootfs.bin")
+        self.assertEqual([], result["packages"])
+        busybox = next(c for c in result["bom"]["components"]
+                       if c["name"] == "busybox")
+        evidence = busybox["evidence"]["identity"][0]["methods"][0]["value"]
+        self.assertIn("busybox", evidence)
+        self.assertNotIn("opkg-status", evidence)
+
+
+# --------------------------------------------------------------------------- #
+
 class SpdxTest(unittest.TestCase):
     """SPDX 2.3 is a second rendering of one analysis, not a second analysis."""
 
@@ -2179,6 +2354,85 @@ class ElfReaderTest(unittest.TestCase):
     def test_machine_names_cover_the_targets_we_claim(self):
         for machine_id in (8, 40, 183, 62, 243):
             self.assertNotIn("machine-", elf.EM_NAMES[machine_id])
+
+
+class RealFormatSampleTest(unittest.TestCase):
+    """The published format samples, as produced by the real tools.
+
+    The fixtures in this suite are built by code in this repository, so they
+    prove the readers agree with the way *we* understand the format. These
+    files were produced by mkcramfs and by the vendors' own packers, which is
+    a different claim - and the CramFS pair is the sharpest version of it: the
+    same contents written in both byte orders, so the two decoders have to
+    agree with each other rather than merely with the specification.
+
+    Fetch them with `python scripts/fetch-corpus.py`; these tests skip without.
+    """
+
+    DIRECTORY = os.path.join(ROOT, "corpus", "formats")
+
+    @classmethod
+    def setUpClass(cls):
+        if not os.path.isdir(cls.DIRECTORY):
+            raise unittest.SkipTest(
+                "format samples missing; run python scripts/fetch-corpus.py")
+
+    def sample(self, name):
+        path = os.path.join(self.DIRECTORY, name)
+        if not os.path.exists(path):
+            self.skipTest(f"{name} missing; run python scripts/fetch-corpus.py")
+        with open(path, "rb") as f:
+            return f.read()
+
+    def test_both_byte_orders_of_cramfs_read_identically(self):
+        listings = {}
+        for name in ("cramfs_le.bin", "cramfs_be.bin"):
+            blob = self.sample(name)
+            offsets = cramfs.find_offsets(blob)
+            self.assertEqual(len(offsets), 1, name)
+            image = cramfs.CramFS(blob, offsets[0])
+            files = image.files()
+            listings[name] = {path: image.read_file(node)
+                              for path, node in files.items()}
+            self.assertEqual([], image.warnings, name)
+        self.assertEqual(listings["cramfs_le.bin"], listings["cramfs_be.bin"])
+        self.assertIn("/apple.txt", listings["cramfs_le.bin"])
+
+    def test_the_vendor_containers_are_recognised(self):
+        expected = {
+            "netgear_trx_v1.bin": "Broadcom TRX v1",
+            "netgear_trx_v2.bin": "Broadcom TRX v2",
+            "netgear_chk.bin": "Netgear CHK",
+            "dlink_shrs.bin": "D-Link SHRS",
+            "instar_bneg.bin": "Instar BNEG",
+            "moxa_frm.bin": "Moxa FRM",
+        }
+        for name, label in expected.items():
+            with self.subTest(sample=name):
+                found = vendor_container.detect(self.sample(name))
+                self.assertIsNotNone(found, name)
+                self.assertEqual(found["label"], label)
+                for part in found["parts"]:
+                    self.assertGreaterEqual(part["offset"],
+                                            found["header_length"])
+
+    def test_a_cramfs_sample_goes_through_the_whole_pipeline(self):
+        blob = self.sample("cramfs_le.bin")
+        segments, rootfs, _warnings = core.analyze_segments(blob, 6)
+        self.assertTrue(any(s["kind"] == "filesystem" for s in segments))
+        self.assertIsNotNone(rootfs)
+
+    def test_an_encrypted_payload_is_reported_as_unreadable(self):
+        """D-Link's SHRS payload is encrypted. Recognising the wrapper must not
+        turn into a claim that what is behind it was read."""
+        blob = self.sample("dlink_shrs.bin")
+        segments, _rootfs, _warnings = core.analyze_segments(blob, 6)
+        header = next(s for s in segments if s["kind"] == "vendor-header")
+        self.assertEqual(header["length"], vendor_container.SHRS_HEADER_SIZE)
+        payload = [s for s in segments if s["kind"] != "vendor-header"]
+        self.assertTrue(payload)
+        self.assertTrue(any((s.get("opacity") or {}).get("opaque")
+                            for s in payload), [s["label"] for s in payload])
 
 
 class RealBiosTest(unittest.TestCase):

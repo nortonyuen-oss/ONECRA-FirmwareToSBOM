@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-17** · 版本 **v1.15.1**
+快照日期:**2026-09-17** · 版本 **v1.16.0**
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -55,15 +55,17 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | `v1.13.1` | 修正:畫面上的元件清單改由 SBOM 文件推導,不再與下載到的文件不一致 |
 | `v1.14.0` | 拖拉介面補上廠商 SBOM 匯入與比對;廠商文件沒有 purl 也能比對得到 |
 | `v1.15.0` | **Phase 4**:UEFI / PC BIOS(flash descriptor、firmware volume、LZMA 解壓、模組清單) |
+| `v1.15.1` | 修正:廠商 SBOM 比對看得到 BIOS 模組清單;畫面標籤與文案補上 UEFI |
+| `v1.16.0` | 廠商外層容器(TRX / CHK / SHRS / BNEG / FRM)、CramFS reader |
 | `v1.7.0` | **Phase 2 第一階段**:容器走訪、解壓、SquashFS 4.0 reader、opkg / dpkg / apk 套件資料庫、發行版識別、真實韌體 corpus 測試 |
 
 ### 工程現況
 
 | 項目 | 狀態 |
 |---|---|
-| 程式碼 | 約 10,000 行(含測試),11 個模組 + 6 個簽章包(36 個簽章) |
+| 程式碼 | 約 11,000 行(含測試),13 個模組 + 6 個簽章包(36 個簽章) |
 | 依賴 | 無。Python 3.9+ 標準函式庫 |
-| 測試 | 194 個。12 個合成 fixture + 真實廠商韌體 corpus(1 份 router、3 份 ESP32) |
+| 測試 | 214 個。12 個合成 fixture + 真實廠商韌體 corpus(1 份 router、3 份 ESP32) |
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
@@ -108,7 +110,11 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
    模組,比對卻只認得簽章命中與套件。`PciBusDxe` 被報成「未觀察到」,而它就在
    上面那張清單裡。看起來像一切正常,實際上是根本沒比對成功。**由真實 BIOS 拖進
    真實頁面才發現,測試全綠。**
-13. **opacity 調和不認得結構性元件** — 剛列完 123 個 BIOS 模組,標題卻寫「無法
+13. **未識別區段被標成「已解開」** — 這是第 11 項的同一個錯誤,但在**最常走的
+   那條路上**:任何不屬於已知容器的高熵區段,都會因為「我們有它的 bytes」而被判
+   成明文。一個加密的 D-Link SHRS payload(熵值 7.951)就這樣被報成 plaintext。
+   由這次加入的真實樣本測試揭發。
+14. **opacity 調和不認得結構性元件** — 剛列完 123 個 BIOS 模組,標題卻寫「無法
    靜態識別元件」。調和函式只看得到簽章命中與套件,看不到 UEFI / Espressif 這類
    由結構讀出來的元件。
 
@@ -118,8 +124,9 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 
 **Phase 2 已完成。** 剩餘的擴充項目都需要我們手上沒有的韌體樣本:
 
-- 更多容器格式:FIT、TRX、TP-Link / D-Link / HiSilicon 等廠商自訂檔頭
-- 更多檔案系統:JFFS2、UBI / UBIFS、CramFS
+- 更多容器格式:FIT、TP-Link / HiSilicon 等廠商自訂檔頭
+  (**TRX / CHK / SHRS / BNEG / FRM 已於 v1.16.0 支援**)
+- 更多檔案系統:JFFS2、UBI / UBIFS(**CramFS 已於 v1.16.0 支援**)
 
 這兩項沒有真實樣本就只能照規格書寫,驗證不到廠商實際的偏差 —— `gcc-arm-none-eabi`
 誤報那次已經示範過合成 fixture 看不出真實問題。

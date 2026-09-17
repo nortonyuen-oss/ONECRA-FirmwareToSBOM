@@ -368,6 +368,60 @@ ESP32 系列佔 IoT 裝置很大一塊,而它的韌體既不是平坦的 MCU 映
 > 出來**。如果映像裡沒有這些元件自己的字串(release build 常常被剝掉),SBOM 就
 > 不會有它們——這是「沒讀到」,不是「不存在」。
 
+## 廠商外層容器 (Vendor containers)
+
+消費級 router 的韌體下載檔很少是裸映像,而是映像前面加了廠商自己的檔頭:一個
+magic、一個長度、一個 checksum,有時再加機型識別與簽章。檔頭很小,後面的 payload
+就是我們本來就讀得懂的韌體 —— 所以一個 `.trx` 檔與一份完整 SBOM 之間,差的只是
+「知道要跳過 32 個位元組」。
+
+| 容器 | Magic | 常見於 |
+|---|---|---|
+| **Broadcom TRX** v1 / v2 | `HDR0` | Netgear、Linksys、Asus、Buffalo,以及它們的 OpenWrt build |
+| **Netgear CHK** | `*#$^` | Netgear(裡面通常包一個 TRX) |
+| **D-Link SHRS** | `SHRS` | D-Link |
+| **Instar BNEG** | `BNEG` | Instar IP camera |
+| **Moxa FRM** | `*FRM` | Moxa 工業閘道器 |
+
+**這個模組刻意寫得很薄:它不解壓任何東西。** 它辨識容器、記錄檔頭說了什麼、把
+檔頭那幾十個位元組標記為已解釋,然後**其餘交給原本的流程** —— 壓縮區段掃描找到
+kernel、檔案系統掃描找到 rootfs。在這裡重做一次只是重複已經正確的程式碼。
+
+兩件它不會做的事:
+
+- **不猜 payload 位置。** 樣本裡讀不出佈局的檔頭,會報成「認得但未解析」,而不是
+  切在一個看起來合理的邊界。切錯位置不會大聲失敗,它只會讓後面每一項發現都偏移
+  幾個位元組,然後安靜地產生一堆垃圾。
+- **不假裝加密的 payload 讀得到。** D-Link SHRS 在實機上是加密的。認得外層容器
+  不會改變這件事,payload 照樣要經過 opacity 判定,而判定結果是「讀不到」——
+  那才是真話。
+
+```
+[fw2sbom] vendor container: Netgear CHK > Broadcom TRX v2 (board U12H139T01_NETGEAR)
+```
+
+## CramFS
+
+CramFS 是很多小型 Linux 裝置在 router 用 SquashFS 的位置上用的東西:攝影機、機上盒、
+較舊的閘道器 —— 任何 root 檔案系統在 build 時就固定、而且小到不需要 SquashFS 那套
+複雜機制的裝置。
+
+`cramfs.py` **提供與 `squashfs.SquashFS` 完全相同的介面**,所以後面全部照跑:套件
+資料庫讀取、ELF 依賴分析、逐檔簽章掃描 —— 一行都不用改。
+
+兩個會讓天真的 reader 出錯的細節:
+
+- **兩種位元組序都存在,而且欄位會跟著翻。** inode 把 mode/uid、size/gid、
+  namelen/offset 打包進三個 32-bit word。把 word 讀成 big-endian 還不夠 ——
+  裡面的欄位也在另一端。只翻 word 不翻欄位的 reader 會得到幾 MB 的檔案大小與
+  零長度的檔名,看起來像映像壞掉,其實是自己寫錯。
+- **長度的單位不是位元組。** `namelen` 數的是 4-byte 單位,`offset` 也是。把任何
+  一個當成位元組數,就會走進映像中間。
+
+驗證方式值得一提:公開樣本**同樣的內容有 LE 與 BE 兩份**,所以兩個 decoder 是
+互相驗證,不只是各自對照規格書。12 個變體(兩種位元組序 × 新舊 mkcramfs ×
+crc_swap × padded)全部讀出**完全相同**的檔案清單與內容。
+
 ## UEFI / PC BIOS
 
 BIOS 是唯一一類**字串比對幾乎找不到任何東西**的韌體。一份 EDK2 release build
@@ -731,6 +785,8 @@ fw2sbom/
 ├── elf.py                  # 精簡 ELF reader(DT_NEEDED / SONAME / .comment)
 ├── esp32.py                # Espressif image、app descriptor、partition table
 ├── uefi.py                 # UEFI flash descriptor、firmware volume、模組清單
+├── cramfs.py               # 唯讀 CramFS reader(兩種位元組序)
+├── vendor_container.py     # TRX / CHK / SHRS / BNEG / FRM 廠商外層檔頭
 ├── image_input.py          # ELF / Intel HEX / S-record / UF2 讀入成平坦映像
 ├── vendor_sbom.py          # 讀入廠商 SBOM 並與分析結果對帳
 ├── service.py              # 拖拉式本機網頁服務(localhost drag-and-drop UI)
