@@ -319,8 +319,11 @@
     <p class="eyebrow">Firmware → SBOM</p>
     <h1>把韌體變成有證據的 SBOM</h1>
     <p class="lede">
-      從 <strong>.bin</strong> 映像產生 <strong>CycloneDX 1.6</strong> 或
-      <strong>SPDX 2.3</strong>,每個元件都附上命中的字串、檔案位移與 confidence。
+      從韌體映像產生 <strong>CycloneDX 1.6</strong> 或 <strong>SPDX 2.3</strong>,
+      每個元件都附上證據:命中的字串、檔案位移、confidence,或它在映像結構裡的
+      出處。收 <code class="inline">.bin</code>、<code class="inline">.hex</code>、
+      <code class="inline">.s19</code>、<code class="inline">.uf2</code>、
+      <code class="inline">.elf</code>,以及 PC BIOS 與 ESP32 的整顆 flash dump。
       不需要安裝 Python,不需要任何 pip 套件,分析全部在本機記憶體完成。
     </p>
 
@@ -395,19 +398,38 @@ shasum -a 256 fw2sbom-portable-1.15.1.zip</pre>
         </div>
       </div>
       <div class="cov">
+        <div class="what">IoT / Wi-Fi SoC<span>Espressif ESP32 系列</span></div>
+        <div><span class="state full">支援</span></div>
+        <div class="how">
+          Application image 與整顆 flash dump 都依自己的結構切開(partition table
+          就是裝置用的地圖)。<strong>晶片型號與指令集由映像 header 宣告讀出</strong>
+          —— 沒有任何熵值或 opcode 統計分得開 Xtensa 與 RISC-V,但這個欄位分得開。
+          ESP-IDF 版本讀自 <code class="inline">esp_app_desc_t</code>。
+          IDF 內含的 mbedTLS / lwIP 版本<strong>不作推導</strong>。
+        </div>
+      </div>
+      <div class="cov">
         <div class="what">CCTV / NVR<span>Linux · 專有 SoC</span></div>
         <div><span class="state part">部分</span></div>
         <div class="how">
           使用標準 uImage + SquashFS 的機型與 router 相同。廠商自訂容器需逐個支援;
-          整段加密的機型會被判定為 opaque 並如實標記,需要向供應商索取原廠 SBOM。
+          整段加密的機型會被判定為 opaque 並如實標記 —— 這時可以
+          <strong>把供應商的 SBOM 一起拖進頁面</strong>,逐項比對出哪些獲映像佐證、
+          哪些版本對不上、哪些只有廠商說有。
         </div>
       </div>
       <div class="cov">
         <div class="what">PC BIOS / UEFI<span>x86 · EDK2</span></div>
-        <div><span class="state none">未支援</span></div>
+        <div><span class="state full">支援</span></div>
         <div class="how">
-          Flash Descriptor / Firmware Volume / FFS 解析尚未實作。目前分析這類映像
-          會回報「未識別架構」,不會產生誤導性的結果。
+          Intel flash descriptor 切區、firmware volume / file / section 走訪、
+          LZMA 解壓。<strong>BIOS 是唯一一類字串比對找不到東西的韌體</strong> ——
+          一份公開 EDK2 映像,36 組簽章一個都沒命中 —— 所以清單來自結構:
+          每個模組帶著自己的名字,名字被剝掉的還有 GUID。實測該映像
+          <strong>123 個模組、119 個有名字</strong>,其中 112 個藏在一層
+          1.4 MB→16 MB 的壓縮後面。Management Engine 區照實報成未列舉。
+          <strong>Flash descriptor 那段目前只照公開規格寫,尚未對真實廠商 dump
+          驗證。</strong>
         </div>
       </div>
     </div>
