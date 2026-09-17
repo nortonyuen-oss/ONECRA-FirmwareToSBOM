@@ -109,7 +109,7 @@ function Get-Sha256([string] $Path) {
 
 function Read-PinnedHash([string] $Id) {
     if (-not (Test-Path -LiteralPath $PinFile)) { return $null }
-    foreach ($line in Get-Content -LiteralPath $PinFile) {
+    foreach ($line in Get-Content -LiteralPath $PinFile -Encoding UTF8) {
         $trimmed = $line.Trim()
         if ($trimmed -eq '' -or $trimmed.StartsWith('#')) { continue }
         $parts = $trimmed -split '\s+', 2
@@ -163,7 +163,7 @@ foreach ($path in @($ZipWriter, $BatSource)) {
 }
 
 $ToolVersion = 'unknown'
-foreach ($line in Get-Content -LiteralPath (Join-Path $RepoRoot 'fw2sbom.py')) {
+foreach ($line in Get-Content -LiteralPath (Join-Path $RepoRoot 'fw2sbom.py') -Encoding UTF8) {
     if ($line -match '^TOOL_VERSION\s*=\s*"([^"]+)"') {
         $ToolVersion = $Matches[1]
         break

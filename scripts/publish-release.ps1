@@ -58,7 +58,7 @@ function Write-Step([string] $Message) {
 # 1. Work out what we are publishing
 # --------------------------------------------------------------------------- #
 if (-not $Version) {
-    foreach ($line in Get-Content -LiteralPath (Join-Path $RepoRoot 'fw2sbom.py')) {
+    foreach ($line in Get-Content -LiteralPath (Join-Path $RepoRoot 'fw2sbom.py') -Encoding UTF8) {
         if ($line -match '^TOOL_VERSION\s*=\s*"([^"]+)"') { $Version = $Matches[1]; break }
     }
 }
@@ -79,7 +79,13 @@ Write-Step "sha256 $hash"
 # describe this version, the release notes would be inventing something.
 $notes = $null
 if (Test-Path -LiteralPath $Record) {
-    $text = Get-Content -LiteralPath $Record -Raw
+    # -Encoding UTF8 is not optional. Windows PowerShell 5.1 reads with the
+    # system ANSI codepage, which on a Traditional Chinese Windows is Big5:
+    # RELEASE.md is UTF-8, so every Chinese character comes back as mojibake
+    # and the release notes published to customers are garbage. It also
+    # inflates the text - the v1.15.1 section read 1,276 characters that way
+    # against its real 1,129.
+    $text = Get-Content -LiteralPath $Record -Raw -Encoding UTF8
     $pattern = "(?ms)^## $([regex]::Escape($Tag))\r?\n(.*?)(?=^## v|\z)"
     $match = [regex]::Match($text, $pattern)
     if ($match.Success) { $notes = $match.Groups[1].Value.Trim() }
@@ -118,15 +124,32 @@ try {
     Write-Step "release for $Tag already exists (id $($release.id))"
 } catch {
     Write-Step "creating release for $Tag"
-    $body = @{
+    $json = @{
         tag_name = $Tag
         name     = "fw2sbom $Version"
         body     = $notes
         draft    = [bool]$Draft
     } | ConvertTo-Json -Depth 4
+
+    # Send bytes, not a string. Handed a string, Windows PowerShell 5.1 writes
+    # it as UTF-8 while setting Content-Length from the *character* count, so
+    # any non-ASCII body arrives at the server truncated - which GitHub reports
+    # as `{"message":"Problems parsing JSON"}` with no hint of the cause.
+    # Encoding here makes the two agree.
+    $payload = [System.Text.Encoding]::UTF8.GetBytes($json)
     $release = Invoke-RestMethod -Uri "$api/releases" -Headers $headers `
-        -Method Post -Body $body -ContentType 'application/json'
+        -Method Post -Body $payload -ContentType 'application/json; charset=utf-8'
     Write-Step "created (id $($release.id))"
+
+    # The notes are the point of the release. Silently publishing a mangled
+    # copy is worse than failing, because nobody rereads their own changelog
+    # on someone else's site.
+    if ($release.body -ne $notes) {
+        Write-Warning ("the notes GitHub stored differ from RELEASE.md - check " +
+                       "$($release.html_url) before publishing this draft")
+    } else {
+        Write-Step 'notes stored intact (byte-for-byte with RELEASE.md)'
+    }
 }
 
 # --------------------------------------------------------------------------- #
