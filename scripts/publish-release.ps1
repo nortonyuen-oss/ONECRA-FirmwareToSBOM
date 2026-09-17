@@ -162,6 +162,20 @@ try {
     $release = Invoke-RestMethod -Uri "$api/releases/tags/$Tag" -Headers $headers
     Write-Step "release for $Tag already exists (id $($release.id))"
 } catch {
+    # "Get a release by tag name" only finds *published* releases, so a draft
+    # left by an earlier run is invisible to it and a second run would quietly
+    # create a second draft of the same version. Listing releases with this
+    # token does show drafts.
+    $drafts = @(Invoke-RestMethod -Uri "$api/releases?per_page=100" -Headers $headers |
+                Where-Object { $_.tag_name -eq $Tag })
+    if ($drafts.Count -gt 0) {
+        $release = $drafts[0]
+        Write-Step ("reusing the existing draft for $Tag (id $($release.id)) " +
+                    'instead of making a second one')
+    }
+}
+
+if (-not $release) {
     Write-Step "creating release for $Tag"
     $json = @{
         tag_name = $Tag
@@ -217,8 +231,18 @@ if ($asset.size -ne $size) {
 # --------------------------------------------------------------------------- #
 Write-Step 'downloading it back to check the hash'
 $temp = Join-Path ([IO.Path]::GetTempPath()) "fw2sbom-verify-$Version.zip"
+# Through the API, not the public browser_download_url: that URL does not exist
+# until a release is published, so verifying a draft through it fails with a
+# bare "Not Found" after a perfectly good upload. The API URL serves the bytes
+# GitHub actually stored, draft or not.
+$fetch = @{
+    Authorization          = "Bearer $token"
+    Accept                 = 'application/octet-stream'
+    'X-GitHub-Api-Version' = '2022-11-28'
+    'User-Agent'           = 'fw2sbom-publish-release'
+}
 try {
-    Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $temp -UseBasicParsing
+    Invoke-WebRequest -Uri $asset.url -Headers $fetch -OutFile $temp -UseBasicParsing
     $roundTrip = (Get-FileHash -Algorithm SHA256 -LiteralPath $temp).Hash.ToLowerInvariant()
     if ($roundTrip -ne $hash) {
         throw "downloaded asset hashes to $roundTrip, not $hash"
@@ -229,7 +253,14 @@ try {
 }
 
 Write-Host ''
-Write-Host 'Published' -ForegroundColor Green
+if ($release.draft) {
+    Write-Host 'Uploaded to a DRAFT release - nobody else can see it yet' -ForegroundColor Yellow
+    Write-Host '  Look it over, then press "Publish release" on that page.'
+    Write-Host '  Until you do, the download page keeps serving its own copy and'
+    Write-Host '  the download counter stays hidden.'
+} else {
+    Write-Host 'Published' -ForegroundColor Green
+}
 Write-Host "  release   $($release.html_url)"
 Write-Host "  asset     $($asset.browser_download_url)"
 Write-Host "  sha256    $hash"
