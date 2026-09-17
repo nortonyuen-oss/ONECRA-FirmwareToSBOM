@@ -115,9 +115,48 @@ $headers = @{
 }
 
 # --------------------------------------------------------------------------- #
-# 3. Create the release, or reuse one already there
+# 2b. Check the token can actually do this, before trying
 # --------------------------------------------------------------------------- #
+# GitHub answers every one of these problems with the same 403 - "Resource not
+# accessible by personal access token" - which does not say whether the token
+# is the wrong account, the wrong repository, or the right one with too few
+# permissions. Asking two cheap questions first turns that into an answer.
 $api = "https://api.github.com/repos/$Repository"
+try {
+    $whoami = Invoke-WebRequest -Uri 'https://api.github.com/user' `
+        -Headers $headers -UseBasicParsing
+} catch {
+    throw ("the token was rejected by GitHub ($($_.Exception.Response.StatusCode)). " +
+           'Check it was copied whole, and has not expired or been revoked.')
+}
+$account = (ConvertFrom-Json $whoami.Content).login
+$scopes  = $whoami.Headers['X-OAuth-Scopes']
+Write-Step "token belongs to $account$(if ($scopes) { " (classic, scopes: $scopes)" } else { ' (fine-grained)' })"
+
+$owner = $Repository.Split('/')[0]
+try {
+    $repoInfo = Invoke-RestMethod -Uri $api -Headers $headers
+} catch {
+    throw ("this token cannot even see $Repository. " +
+           $(if ($account -ne $owner) {
+               "It belongs to '$account' but the repository belongs to " +
+               "'$owner' - a fine-grained token only reaches repositories " +
+               "owned by the account that created it, so make the token while " +
+               "signed in as '$owner'."
+             } else {
+               'Give it access to this repository under Repository access.'
+             }))
+}
+if (-not $repoInfo.permissions.push) {
+    throw ("the token can read $Repository but not write to it, and creating " +
+           'a release is a write. Fine-grained: Repository permissions -> ' +
+           'Contents -> Read and write. Classic: the `repo` scope (or ' +
+           '`public_repo` for a public repository).' +
+           $(if ($account -ne $owner) {
+               " Note it belongs to '$account', not '$owner'."
+             } else { '' }))
+}
+Write-Step "token can write to $Repository"
 $release = $null
 try {
     $release = Invoke-RestMethod -Uri "$api/releases/tags/$Tag" -Headers $headers
