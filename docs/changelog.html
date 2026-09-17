@@ -154,9 +154,45 @@
 
     <article class="rel">
       <div class="stamp">
+        <span class="ver">1.15.1</span>
+        <span class="date">2026-09-17</span>
+        <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <div class="fixed">
+          <div class="h">修正</div>
+          <p>
+            <strong>廠商 SBOM 比對看不到 BIOS 的模組清單。</strong>一份 BIOS 的
+            廠商 SBOM 列的就是模組,但比對只認得簽章命中、套件資料庫與 ESP32 元件
+            —— 結果 <code>PciBusDxe</code> 被報成「聲明了但映像中未觀察到」,而它
+            就在上面那張清單裡。廠商列幾個模組就錯幾個。
+          </p>
+          <p>
+            這不是「答少了」,是<strong>答錯了</strong>:看起來像一切正常,實際上
+            是根本沒比對成功。修好之後,一個真實的版本衝突也跟著浮出來了。
+            <strong>如果你之前為 BIOS 匯入過廠商 SBOM,值得用這一版重跑。</strong>
+          </p>
+          <p>
+            另外兩項:畫面把 123 個 UEFI 模組全部標成「簽章命中」—— 它們沒有一個
+            是字串比對來的,這個標籤等於逐個講錯;而頁面文案還停在 Phase 4 之前,
+            整頁沒有一句說得出它讀得到 PC BIOS。
+          </p>
+          <p style="opacity:.8">
+            三項都是把一份真實 BIOS 拖進真實頁面才看到的,不是測試跑出來的 ——
+            所以當時三項都沒有一個失敗的測試。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,256,981 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">b126359d97c2a9f6d0340777f77860ced3168fe22f6a06936a12d1925a6bfcf1</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
         <span class="ver">1.15.0</span>
         <span class="date">2026-09-16</span>
-        <span class="tag current">目前版本</span>
       </div>
       <div>
         <h2>PC BIOS:123 個模組,而字串比對一個都找不到</h2>

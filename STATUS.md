@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-16** · 版本 **v1.15.0**
+快照日期:**2026-09-17** · 版本 **v1.15.1**
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -63,7 +63,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 |---|---|
 | 程式碼 | 約 10,000 行(含測試),11 個模組 + 6 個簽章包(36 個簽章) |
 | 依賴 | 無。Python 3.9+ 標準函式庫 |
-| 測試 | 192 個。12 個合成 fixture + 真實廠商韌體 corpus(1 份 router、3 份 ESP32) |
+| 測試 | 194 個。12 個合成 fixture + 真實廠商韌體 corpus(1 份 router、3 份 ESP32) |
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
@@ -104,7 +104,11 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
    切一段出來,不是解壓出來的。結果:**加密的 ESP32 partition 或 Intel ME 區會
    因為「我們有它的 bytes」而被判成明文**。由 Phase 4 揭發,ESP32 那條路徑同樣
    受影響。
-12. **opacity 調和不認得結構性元件** — 剛列完 123 個 BIOS 模組,標題卻寫「無法
+12. **廠商 SBOM 比對看不到 BIOS 模組清單** — 一份 BIOS 的廠商 SBOM 列的就是
+   模組,比對卻只認得簽章命中與套件。`PciBusDxe` 被報成「未觀察到」,而它就在
+   上面那張清單裡。看起來像一切正常,實際上是根本沒比對成功。**由真實 BIOS 拖進
+   真實頁面才發現,測試全綠。**
+13. **opacity 調和不認得結構性元件** — 剛列完 123 個 BIOS 模組,標題卻寫「無法
    靜態識別元件」。調和函式只看得到簽章命中與套件,看不到 UEFI / Espressif 這類
    由結構讀出來的元件。
 
