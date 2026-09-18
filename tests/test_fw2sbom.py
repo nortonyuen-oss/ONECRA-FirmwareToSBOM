@@ -83,36 +83,25 @@ def analyze(name):
 
 
 def _analyze_uncached(name):
+    """The shared pipeline, exactly as the CLI and the service call it.
+
+    This helper used to carry its own copy of the sequence, and it mirrored
+    main() - so it passed while the service, which carried a third copy,
+    dropped every rootfs component found without a package database. A test
+    helper with a private pipeline tests a pipeline the product may not have.
+    """
     data = fixture(name)
-    container = core.detect_packet_container(data)
-    payload = core.deframe(data, container) if container else data
-    arch = core.analyze_architecture(payload)
-    opacity = core.analyze_opacity(payload, arch["label"])
-    standards = core.detect_embedded_standards(payload)
-    # Mirror main(): the architecture reaches segment judgement, and the
-    # headline verdict is summarised from the segments. A helper that skips
-    # either step tests a pipeline the product does not have - which is how a
-    # flat Cortex-M image came to be reported as encrypted without a single
-    # test noticing.
-    segments, rootfs, _warnings = core.analyze_segments(
-        payload, 6, False, arch["label"])
-    strings = [pair for seg in segments for pair in seg.get("strings", [])]
-    hits = core.merge_segment_hits(segments)
-    hits = core.merge_hit_lists(hits, core.scan_rootfs_files(rootfs, 6))
-    packages = core.packages_to_components(rootfs)
-    opacity = core.summarise_opacity(segments, opacity)
-    opacity = core.reconcile_opacity(
-        opacity, hits + packages + core.structural_components(segments),
-        standards)
-    bom = core.build_sbom(name, data, None, arch, hits, 6, len(strings),
-                          container=container, opacity=opacity,
-                          payload=payload, standards=standards,
-                          segments=segments, rootfs=rootfs, packages=packages)
-    spdx = spdx_report.build_spdx(bom, name, core.TOOL_NAME, core.TOOL_VERSION)
-    return {"data": data, "container": container, "payload": payload,
-            "arch": arch, "opacity": opacity, "standards": standards,
-            "strings": strings, "hits": hits, "bom": bom, "spdx": spdx,
-            "segments": segments, "rootfs": rootfs, "packages": packages}
+    source = image_input.detect_and_load(data)
+    result = core.run_analysis(data, source, name)
+    spdx = spdx_report.build_spdx(result["bom"], name, core.TOOL_NAME,
+                                  core.TOOL_VERSION)
+    return {"data": data, "container": result["container"],
+            "payload": result["payload"], "arch": result["arm_info"],
+            "opacity": result["opacity"], "standards": result["standards"],
+            "strings": result["strings"], "hits": result["hits"],
+            "bom": result["bom"], "spdx": spdx,
+            "segments": result["segments"], "rootfs": result["rootfs"],
+            "packages": result["packages"]}
 
 
 def versions(result):
@@ -1463,6 +1452,34 @@ class ServiceTest(unittest.TestCase):
         result = service.analyze_bytes("uefi_volume.bin", fixture("uefi_volume.bin"))
         classes = {row["evidence_class"] for row in result["components"]}
         self.assertEqual(classes, {"uefi-module"})
+
+    def test_the_browser_and_the_command_line_report_the_same_components(self):
+        """They share one pipeline now. They did not before, and for eight
+        releases the browser dropped every component found by scanning a Linux
+        root filesystem that had no package database - most CCTV firmware -
+        while the command line and every test reported them correctly.
+
+        Asked of every fixture, because the drift was invisible on the ones
+        that happened to carry a package database.
+        """
+        for name in SbomStructureTest.ALL:
+            with self.subTest(fixture=name):
+                browser = json.loads(
+                    service.analyze_bytes(name, fixture(name))["sbom_json"])
+                reference = analyze(name)["bom"]
+                self.assertEqual(
+                    sorted((c["name"], c.get("version") or "")
+                           for c in browser["components"]),
+                    sorted((c["name"], c.get("version") or "")
+                           for c in reference["components"]))
+
+    def test_a_rootfs_without_a_package_database_still_yields_components(self):
+        """The specific case that was lost: nothing but the binaries to go on."""
+        result = service.analyze_bytes("cramfs_rootfs.bin",
+                                       fixture("cramfs_rootfs.bin"))
+        names = {row["name"] for row in result["components"]}
+        self.assertIn("busybox", names)
+        self.assertIn("mbedtls", names)
 
     def test_the_screen_list_matches_the_document(self):
         """A customer reads the list in the browser and hands the download to

@@ -2520,6 +2520,87 @@ def build_evidence_context(filename, data, payload, arm_info, container,
 # CLI
 # --------------------------------------------------------------------------- #
 
+def run_analysis(delivered, source, name, min_str_len=6, verbose=False,
+                 vendor_documents=(), no_deframe=False, firmware_version=None,
+                 file_magic=None):
+    """The whole analysis, from reassembled bytes to a CycloneDX document.
+
+    The CLI, the drag-and-drop service and the test suite all call this. They
+    used to each carry their own copy of the sequence, and the copies drifted:
+    per-file rootfs scanning arrived in v1.9.0 in the CLI and the tests and
+    never reached the service, so for eight releases the browser - the thing
+    customers actually use - dropped every component found in a Linux root
+    filesystem that had no package database. Which is most CCTV firmware.
+    That is the third defect of this shape, and one function is the only fix
+    that stops a fourth.
+
+    `delivered` is the file as received and `source` what image_input made of
+    it; reading and reassembling stay with the caller, which knows whether it
+    has a path. Returns every intermediate the callers report on.
+    """
+    data = source["data"]
+
+    container = None if no_deframe else detect_packet_container(data, verbose)
+    payload = deframe(data, container) if container else data
+    if container:
+        log(f"de-framed {len(payload)} payload bytes "
+            f"({len(data) - len(payload)} bytes of framing/header removed)",
+            verbose)
+
+    arm_info = analyze_architecture(payload)
+    log(f"architecture: {arm_info['label'] or 'not identified'}", verbose)
+    for detail in arm_info["details"]:
+        log(f"  {detail}", verbose)
+
+    opacity = analyze_opacity(payload, arm_info["label"])
+    log(f"payload verdict: {opacity['verdict']} "
+        f"(entropy {opacity['entropy']:.3f} bits/byte)", verbose)
+
+    standards = detect_embedded_standards(payload, verbose)
+
+    segments, rootfs, seg_warnings = analyze_segments(
+        payload, min_str_len, verbose, arm_info["label"])
+    for warning in seg_warnings:
+        log(f"container warning: {warning}", True)
+
+    strings = [pair for segment in segments
+               for pair in segment.get("strings", [])]
+    log(f"extracted {len(strings)} strings across {len(segments)} segment(s) "
+        f"(min length {min_str_len})", verbose)
+
+    hits = merge_segment_hits(segments)
+    hits = merge_hit_lists(hits, scan_rootfs_files(rootfs, min_str_len, verbose))
+    packages = packages_to_components(rootfs)
+    for hit in hits:
+        log(f"match: {hit['sig']['name']} confidence={hit['confidence']} "
+            f"version={hit['version']}", verbose)
+    if packages:
+        log(f"{len(packages)} package(s) read from the on-image database",
+            verbose)
+
+    # Components read out of the payload settle the opacity question, and a
+    # package database is the most decisive evidence of all.
+    structural = structural_components(segments)
+    vendor = reconcile_vendor_sboms(vendor_documents, hits, standards,
+                                    packages, verbose, structural)
+    opacity = summarise_opacity(segments, opacity)
+    opacity = reconcile_opacity(opacity, hits + packages + structural,
+                                standards, verbose)
+    bom = build_sbom(name, delivered, file_magic, arm_info, hits,
+                     min_str_len, len(strings),
+                     container=container, opacity=opacity, payload=payload,
+                     standards=standards, firmware_version=firmware_version,
+                     segments=segments, rootfs=rootfs, packages=packages,
+                     vendor=vendor, source=source)
+    return {
+        "source": source, "data": data, "container": container,
+        "payload": payload, "arm_info": arm_info, "opacity": opacity,
+        "standards": standards, "segments": segments, "rootfs": rootfs,
+        "strings": strings, "hits": hits, "packages": packages,
+        "vendor": vendor, "bom": bom,
+    }
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog=TOOL_NAME,
@@ -2604,39 +2685,24 @@ def main(argv=None):
             log("WARNING: input looks like a host executable, not firmware; "
                 "results may be meaningless", True)
 
-    container = None if args.no_deframe else detect_packet_container(data, args.verbose)
-    payload = deframe(data, container) if container else data
-    if container:
-        log(f"de-framed {len(payload)} payload bytes "
-            f"({len(data) - len(payload)} bytes of framing/header removed)",
-            args.verbose)
+    result = run_analysis(
+        delivered, source, args.input, min_str_len=args.min_str_len,
+        verbose=args.verbose, vendor_documents=vendor_documents,
+        no_deframe=args.no_deframe, firmware_version=args.firmware_version,
+        file_magic=file_magic)
+    container, payload = result["container"], result["payload"]
+    arm_info, opacity = result["arm_info"], result["opacity"]
+    standards, segments = result["standards"], result["segments"]
+    rootfs, strings = result["rootfs"], result["strings"]
+    hits, packages = result["hits"], result["packages"]
+    vendor, bom = result["vendor"], result["bom"]
+
     if args.dump_payload:
         try:
             with open(args.dump_payload, "wb") as f:
                 f.write(payload)
         except OSError as e:
             die(f"cannot write payload dump: {e}")
-
-    arm_info = analyze_architecture(payload)
-    log(f"architecture: {arm_info['label'] or 'not identified'}", args.verbose)
-    for detail in arm_info["details"]:
-        log(f"  {detail}", args.verbose)
-
-    opacity = analyze_opacity(payload, arm_info["label"])
-    log(f"payload verdict: {opacity['verdict']} "
-        f"(entropy {opacity['entropy']:.3f} bits/byte)", args.verbose)
-
-    standards = detect_embedded_standards(payload, args.verbose)
-
-    segments, rootfs, seg_warnings = analyze_segments(
-        payload, args.min_str_len, args.verbose, arm_info["label"])
-    for warning in seg_warnings:
-        log(f"container warning: {warning}", True)
-
-    strings = [pair for segment in segments
-               for pair in segment.get("strings", [])]
-    log(f"extracted {len(strings)} strings across {len(segments)} segment(s) "
-        f"(min length {args.min_str_len})", args.verbose)
 
     if args.dump_strings:
         try:
@@ -2646,33 +2712,6 @@ def main(argv=None):
                         f.write(f"0x{off:08x}\t{segment['label']}\t{text}\n")
         except OSError as e:
             die(f"cannot write strings dump: {e}")
-
-    hits = merge_segment_hits(segments)
-    hits = merge_hit_lists(hits, scan_rootfs_files(
-        rootfs, args.min_str_len, args.verbose))
-    packages = packages_to_components(rootfs)
-    for hit in hits:
-        log(f"match: {hit['sig']['name']} confidence={hit['confidence']} "
-            f"version={hit['version']}", args.verbose)
-    if packages:
-        log(f"{len(packages)} package(s) read from the on-image database",
-            args.verbose)
-
-    # Components read out of the payload settle the opacity question, and a
-    # package database is the most decisive evidence of all.
-    vendor = reconcile_vendor_sboms(vendor_documents, hits, standards,
-                                    packages, args.verbose,
-                                    structural_components(segments))
-    opacity = summarise_opacity(segments, opacity)
-    opacity = reconcile_opacity(opacity, hits + packages
-                                + structural_components(segments),
-                                standards, args.verbose)
-    bom = build_sbom(args.input, delivered, file_magic, arm_info, hits,
-                     args.min_str_len, len(strings),
-                     container=container, opacity=opacity, payload=payload,
-                     standards=standards, firmware_version=args.firmware_version,
-                     segments=segments, rootfs=rootfs, packages=packages,
-                     vendor=vendor, source=source)
 
     stem = os.path.splitext(os.path.basename(args.input))[0]
     want_cdx = args.format in ("cyclonedx", "both")

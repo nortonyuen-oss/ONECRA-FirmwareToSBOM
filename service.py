@@ -670,34 +670,15 @@ def analyze_bytes(filename, data, vendor_uploads=None):
         raise ValueError(f"cannot read this file: {e}")
     data = source["data"]
 
-    container = core.detect_packet_container(data)
-    payload = core.deframe(data, container) if container else data
-    arm_info = core.analyze_architecture(payload)
-    opacity = core.analyze_opacity(payload, arm_info["label"])
-    standards = core.detect_embedded_standards(payload)
-    segments, rootfs, _warnings = core.analyze_segments(
-        payload, 6, False, arm_info["label"])
-    strings = [pair for segment in segments
-               for pair in segment.get("strings", [])]
-    hits = core.merge_segment_hits(segments)
-    packages = core.packages_to_components(rootfs)
-    opacity = core.summarise_opacity(segments, opacity)
-    opacity = core.reconcile_opacity(
-        opacity, hits + packages + core.structural_components(segments),
-        standards)
-
     vendor_documents, vendor_errors = read_vendor_sboms(vendor_uploads)
-    vendor = core.reconcile_vendor_sboms(
-        vendor_documents, hits, standards, packages, False,
-        core.structural_components(segments))
-
     name = filename or "firmware.bin"
     stem = os.path.splitext(os.path.basename(name))[0]
-    bom = core.build_sbom(name, delivered, None, arm_info, hits, 6,
-                          len(strings), container=container, opacity=opacity,
-                          payload=payload, standards=standards,
-                          segments=segments, rootfs=rootfs, packages=packages,
-                          vendor=vendor, source=source)
+    result = core.run_analysis(delivered, source, name,
+                               vendor_documents=vendor_documents)
+    container, payload = result["container"], result["payload"]
+    arm_info, opacity = result["arm_info"], result["opacity"]
+    standards, strings = result["standards"], result["strings"]
+    hits, vendor, bom = result["hits"], result["vendor"], result["bom"]
 
     spdx = spdx_report.build_spdx(bom, name, core.TOOL_NAME, core.TOOL_VERSION)
     sbom_filename = stem + "_SBOM.cdx.json"
