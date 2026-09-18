@@ -79,6 +79,8 @@ $PayloadFromRoot = @(
     'vendor_container.py',
     'jffs2.py',
     'lzo.py',
+    'ubi.py',
+    'ubifs.py',
     'onecra_logo.png',
     'onecra_icon.png'
 )

@@ -44,6 +44,8 @@ import esp32
 import cramfs
 import jffs2
 import squashfs
+import ubi
+import ubifs
 import uefi
 import vendor_container
 
@@ -56,7 +58,7 @@ MAX_SEGMENTS = 64
 # was handed. Catching the specific type is how a second filesystem turns into
 # a traceback instead of a warning.
 FILESYSTEM_ERRORS = (squashfs.SquashFSError, cramfs.CramFSError,
-                     jffs2.JFFS2Error)
+                     jffs2.JFFS2Error, ubifs.UBIFSError)
 
 UIMAGE_MAGIC = 0x27051956
 UIMAGE_HEADER_SIZE = 64
@@ -267,7 +269,79 @@ def _uefi_segments(data, detected, say):
     return segments
 
 
-def walk(data, verbose=False, log=None):
+def _ubi_segments(data, image, verbose, log, say, warnings):
+    """Segments for every volume of a UBI image.
+
+    A volume's bytes are reassembled from erase blocks scattered across the
+    flash, so they have no single position in the file. Each segment is placed
+    at the volume's first erase block and says so in its label; offsets inside
+    it are offsets into the reassembled volume.
+    """
+    segments = []
+    say(f"container: UBI image at 0x{image['start']:x}, "
+        f"{image['peb_size'] // 1024} KiB erase blocks, "
+        f"{len(image['volumes'])} volume(s)")
+    for note in image["warnings"]:
+        warnings.append(f"UBI: {note}")
+        say(f"container:   {note}")
+
+    for volume in image["volumes"]:
+        label = f"UBI volume '{volume['name']}'"
+        blob = volume["data"]
+        say(f"container:   {label} ({volume['type']}), {volume['lebs']} "
+            f"logical blocks, {len(blob)} bytes")
+
+        if blob[:4] == ubifs.MAGIC_BYTES:
+            try:
+                fs = ubifs.UBIFS(blob)
+            except ubifs.UBIFSError as e:
+                # A filesystem whose files cannot be listed is recorded as
+                # exactly that. Its bytes are not handed to the walk as a
+                # region: a UBIFS volume is mostly unused space, and judged
+                # byte by byte it reads as erased flash - "empty", which is
+                # the opposite of what was found.
+                reason = f"UBIFS could not be read: {e}"
+                warnings.append(f"{label}: {reason}")
+                say(f"container:   {label}: {reason}")
+                segment = _segment(
+                    "unread-filesystem", volume["first_peb"], len(blob),
+                    f"{label}: UBIFS, files not listed", content=None,
+                    ubi_volume=volume["name"], unread_reason=reason)
+                segment["warnings"].append(reason)
+                segments.append(segment)
+            else:
+                segments.append(_segment(
+                    "filesystem", volume["first_peb"], len(blob),
+                    f"{label}: UBIFS", content=None, filesystem=fs,
+                    ubi_volume=volume["name"]))
+            continue
+
+        # Anything else - a SquashFS rootfs, a kernel, raw data - is read the
+        # way the same bytes would be read outside UBI. One level only: a UBI
+        # image inside a UBI volume is not a thing.
+        inner, inner_warnings = walk(blob, verbose, log, _inside_ubi=True)
+        warnings.extend(f"{label}: {w}" for w in inner_warnings)
+        if not inner and blob.strip(b"\xff"):
+            # Too small for the walk to call it a region; still content.
+            inner = [_segment("unclaimed", 0, len(blob), "volume contents",
+                              content=blob, expanded=False)]
+        for segment in inner:
+            if segment["content"] is None and segment["kind"] != "filesystem":
+                # Its bytes are in the volume, not at any offset in the file:
+                # judged from the file, it would be judged on the wrong bytes.
+                segment["content"] = blob[segment["offset"]:
+                                          segment["offset"] + segment["length"]]
+                segment["expanded"] = False
+            segment["volume_offset"] = segment["offset"]
+            segment["label"] = (f"{label}: {segment['label']} "
+                                f"(at 0x{segment['offset']:x} in the volume)")
+            segment["offset"] = volume["first_peb"]
+            segment["ubi_volume"] = volume["name"]
+            segments.append(segment)
+    return segments
+
+
+def walk(data, verbose=False, log=None, _inside_ubi=False):
     """Segment a firmware image. Returns (segments, warnings).
 
     Segments are returned in image order. Each carries `content` - the bytes
@@ -355,6 +429,23 @@ def walk(data, verbose=False, log=None):
         segments.append(seg)
         claim(start, end)
 
+    # --- 1.5 UBI, before anything looks for a filesystem ---------------------
+    # A SquashFS inside a UBI volume has erase-block headers every 128 KiB of
+    # the raw image. Found there by the filesystem scan below, its superblock
+    # would open and every read past the first block would return headers
+    # instead of data - so UBI claims its region first.
+    if not _inside_ubi:
+        for offset in ubi.find_offsets(data):
+            if any(s <= offset < e for s, e in covered):
+                continue
+            try:
+                image = ubi.read_image(data, offset)
+            except ubi.UBIError:
+                continue
+            segments.extend(_ubi_segments(data, image, verbose, log, say,
+                                          warnings))
+            claim(offset, image["end"])
+
     # --- 2. Filesystems anywhere in the image -------------------------------
     for offset in squashfs.find_offsets(data):
         if any(s <= offset < e for s, e in covered):
@@ -391,6 +482,25 @@ def walk(data, verbose=False, log=None):
         segments.append(_segment(
             "filesystem", offset, end - offset,
             f"CramFS ({image.byte_order})",
+            content=None, filesystem=image))
+        claim(offset, end)
+        if len(segments) >= MAX_SEGMENTS:
+            break
+
+    for offset in ubifs.find_offsets(data):
+        if any(s <= offset < e for s, e in covered):
+            continue
+        try:
+            image = ubifs.UBIFS(data, offset)
+        except ubifs.UBIFSError:
+            continue
+        end = min(len(data), offset + image.leb_count * image.leb_size)
+        say(f"container: UBIFS at 0x{offset:x}, {image.leb_count} logical "
+            f"blocks of {image.leb_size} bytes, {image.default_compressor}")
+        for note in image.warnings:
+            say(f"container:   {note}")
+        segments.append(_segment(
+            "filesystem", offset, end - offset, "UBIFS",
             content=None, filesystem=image))
         claim(offset, end)
         if len(segments) >= MAX_SEGMENTS:
@@ -858,8 +968,14 @@ def unclaimed_files(rootfs, log=None, progress=None):
             continue
         try:
             blob = image.read_file(node)
-        except FILESYSTEM_ERRORS:
+        except FILESYSTEM_ERRORS as e:
+            # Kept, with the reason, so the SBOM can say which files went
+            # unread: a file that could not be decompressed is not a file
+            # with nothing in it.
             skipped += 1
+            rootfs.setdefault("unread_files", {})[path] = {
+                "reason": str(e), "size": size}
+            say(f"rootfs: {path} could not be read: {e}")
             continue
         scanned += len(blob)
         count += 1
@@ -873,7 +989,7 @@ def inspect_filesystem(segment, verbose=False, log=None, progress=None):
     if image is None:
         return None
     try:
-        files = image.files()
+        files = segment.get("files") or image.files()
     except FILESYSTEM_ERRORS as e:
         segment["warnings"].append(f"filesystem could not be walked: {e}")
         return None
@@ -895,4 +1011,4 @@ def inspect_filesystem(segment, verbose=False, log=None, progress=None):
 
     return {"image": image, "files": files, "packages": packages,
             "os_release": os_release, "file_count": len(files),
-            "binaries": binaries}
+            "binaries": binaries, "segment": segment}

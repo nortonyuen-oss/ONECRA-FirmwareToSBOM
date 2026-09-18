@@ -52,7 +52,7 @@ import uefi
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.18.0"
+TOOL_VERSION = "1.19.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1280,6 +1280,7 @@ def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None,
 
     total = sum(weight(segment) for segment in segments) or 1
     done = 0
+    primary = choose_rootfs(segments)
 
     rootfs = None
     for index, segment in enumerate(segments, 1):
@@ -1288,7 +1289,7 @@ def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None,
         detail = {"kind": "segment", "index": index, "count": len(segments),
                   "label": segment["label"]}
         report(low, detail)
-        if segment["kind"] == "filesystem" and rootfs is None:
+        if segment is primary:
             def inner(fraction, sub=None, low=low, high=high, detail=detail):
                 report(low + (high - low) * fraction,
                        dict(detail, **(sub or {})))
@@ -1296,8 +1297,8 @@ def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None,
                                                   progress=inner)
         elif segment["kind"] == "filesystem":
             # A device dump carries a read-only rootfs and, after it, a
-            # writable overlay - JFFS2 on NOR flash. Only the first is read as
-            # the rootfs, but the overlay is where packages installed after
+            # writable overlay - JFFS2 on NOR flash. Only one is read as the
+            # rootfs (choose_rootfs), but the overlay is where packages installed after
             # the factory image land, so its files are scanned too rather than
             # the whole region going unread because it is not first.
             segment["hits"] = secondary_filesystem_hits(segment, min_str_len,
@@ -1319,6 +1320,9 @@ def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None,
                 f"from {len(segment['strings'])} strings", verbose)
         report(high, detail)
 
+    segments.extend(unread_files_segment(segment, segment["unread_files"])
+                    for segment in list(segments)
+                    if segment.get("unread_files"))
     return segments, rootfs, warnings
 
 
@@ -1367,6 +1371,12 @@ def judge_segments(segments, payload, architecture=None, verbose=False,
         if segment["kind"] == "filesystem":
             # Read structurally; entropy of the compressed image says nothing
             # about whether its contents were enumerable.
+            segment["opacity"] = None
+            continue
+        if segment.get("unread_reason"):
+            # Known to hold something that could not be read. Its bytes are
+            # not in the payload at its offset, and judging them would only
+            # risk calling it blank; the reason it was not read is the verdict.
             segment["opacity"] = None
             continue
 
@@ -1493,18 +1503,78 @@ def reconcile_vendor_sboms(documents, hits, standards, packages,
     return report
 
 
+# Paths that mark a filesystem as a device's root rather than a data partition.
+ROOTFS_MARKERS = ("/etc/os-release", "/usr/lib/os-release",
+                  "/usr/lib/opkg/status", "/var/lib/dpkg/status",
+                  "/lib/apk/db/installed", "/bin/busybox", "/sbin/init",
+                  "/etc/inittab", "/bin/sh")
+
+
+def choose_rootfs(segments):
+    """The filesystem that describes the device, when there is more than one.
+
+    Only one filesystem is read as the rootfs - its package database, its
+    release file, its binaries' dependency graph - and the others have their
+    files scanned. On a router the first is normally right; in a UBI image the
+    order is the volume numbering, and a "configuration" volume can come ahead
+    of "rootfs". So the first filesystem that looks like a root wins, and the
+    first one of all only when none does.
+    """
+    filesystems = [s for s in segments if s["kind"] == "filesystem"]
+    if len(filesystems) < 2:
+        return filesystems[0] if filesystems else None
+    for segment in filesystems:
+        image = segment.get("filesystem")
+        try:
+            files = image.files()
+        except container.FILESYSTEM_ERRORS:
+            continue
+        segment["files"] = files          # read once, used again later
+        if any(marker in files for marker in ROOTFS_MARKERS):
+            return segment
+    return filesystems[0]
+
+
+MAX_UNREAD_LISTED = 3
+
+
+def unread_files_segment(filesystem, unread):
+    """A segment standing for the files of a filesystem that could not be read.
+
+    The filesystem itself was walked, so it is not opaque - but a file whose
+    blocks would not decompress (zstd on a Python without it, a damaged node)
+    had nothing matched against it, and "no components found in it" is not
+    what happened. It becomes an opaque component naming the files and why.
+    """
+    paths = sorted(unread)
+    listed = ", ".join(paths[:MAX_UNREAD_LISTED]) + (
+        f" and {len(paths) - MAX_UNREAD_LISTED} more"
+        if len(paths) > MAX_UNREAD_LISTED else "")
+    reason = (f"{len(paths)} file(s) in {filesystem['label']} could not be "
+              f"read: {listed}")
+    return {"kind": "unread-files", "offset": filesystem["offset"],
+            "length": sum(unread[p]["size"] for p in paths),
+            "label": f"{filesystem['label']}: {len(paths)} file(s) not read",
+            "content": None, "expanded": False, "unread_reason": reason,
+            "opacity": None, "strings": [], "hits": [],
+            "warnings": [reason] + [f"{p}: {unread[p]['reason']}"
+                                    for p in paths[:MAX_UNREAD_LISTED - 1]]}
+
+
 def secondary_filesystem_hits(segment, min_str_len=6, verbose=False):
     """Signature hits from every file in a filesystem that is not the rootfs."""
     image = segment.get("filesystem")
     if image is None:
         return []
     try:
-        files = image.files()
+        files = segment.get("files") or image.files()
     except container.FILESYSTEM_ERRORS as e:
         segment["warnings"].append(f"filesystem could not be walked: {e}")
         return []
-    hits = scan_rootfs_files({"image": image, "files": files, "binaries": {}},
-                             min_str_len, verbose)
+    scan = {"image": image, "files": files, "binaries": {}}
+    hits = scan_rootfs_files(scan, min_str_len, verbose)
+    if scan.get("unread_files"):
+        segment["unread_files"] = scan["unread_files"]
     for hit in hits:
         hit["filesystem"] = segment["label"]
     if hits:
@@ -2362,7 +2432,8 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         raw_length = segment["length"]
         ref = f"opaque-segment-{index}"
         reasons = list(verdict.get("reasons") or [])
-        if segment["content"] is None and not verdict:
+        if (segment["content"] is None and not verdict
+                and not segment.get("unread_reason")):
             reasons.append("this region could not be expanded, so its contents "
                            "were never available to analyse")
         for warning in segment.get("warnings", [])[:3]:
@@ -2761,6 +2832,9 @@ def run_analysis(delivered, source, name, min_str_len=6, verbose=False,
     hits = merge_segment_hits(segments)
     hits = merge_hit_lists(hits, scan_rootfs_files(
         rootfs, min_str_len, verbose, progress=progress.span(0.85, 1.0)))
+    if rootfs and rootfs.get("unread_files"):
+        segments.append(unread_files_segment(rootfs["segment"],
+                                             rootfs["unread_files"]))
     packages = packages_to_components(rootfs)
     for hit in hits:
         log(f"match: {hit['sig']['name']} confidence={hit['confidence']} "
@@ -3018,6 +3092,7 @@ def main(argv=None):
             continue
         state = ("expanded" if segment.get("expanded")
                  else "read" if segment["kind"] == "filesystem"
+                 else "not read" if segment.get("unread_reason")
                  else "not expanded")
         print(f"[fw2sbom] segment 0x{segment['offset']:08x} "
               f"{segment['label']} ({state})", file=sys.stderr)

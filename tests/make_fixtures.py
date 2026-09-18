@@ -971,6 +971,295 @@ def build_cramfs_jffs2_flash():
     return head + overlay
 
 
+# --- UBI and UBIFS ----------------------------------------------------------- #
+#
+# The published samples prove the readers decode real toolchain output, and one
+# of them holds 706 LZO-compressed data nodes. What they do not hold is any
+# software: two text files about fruit. And none of them has zlib- or
+# zstd-compressed data, a deleted file, or a UBI image whose volumes come in an
+# order where the first filesystem is not the root. These fixtures do:
+#
+#   * a UBIFS rootfs with data nodes stored raw, zlib, LZO and zstd - the LZO
+#     and zstd streams made by independent implementations, not by the code
+#     under test;
+#   * a deleted binary whose nodes are still on the flash but no longer in the
+#     index, carrying a dropbear banner that must not reach the SBOM;
+#   * a two-level index, so the walk is a walk and not a single list;
+#   * a UBI image whose first volume is a UBIFS data partition and whose second
+#     is a CramFS rootfs, with its erase blocks out of order and one logical
+#     block present twice - the older copy holding a banner that must lose.
+
+UBIFS_MAGIC = 0x06101831
+UBIFS_LEB = 15360                 # 16 KiB erase blocks, 1 KiB of UBI headers
+UBIFS_INO, UBIFS_DATA, UBIFS_DENT, UBIFS_SB, UBIFS_MST, UBIFS_IDX = 0, 1, 2, 6, 7, 9
+UBIFS_KEY_INO, UBIFS_KEY_DATA, UBIFS_KEY_DENT = 0, 1, 2
+
+
+def ubi_crc(data):
+    """UBI's and UBIFS's CRC, written out rather than borrowed from the readers."""
+    return (~zlib.crc32(data, 0)) & 0xFFFFFFFF
+
+
+def zstd_reference():
+    """The zstd frame from tests/zstd_vectors.json, made by CPython 3.14's
+    compression.zstd - so the fixture builds on any Python, including one
+    that cannot read what it builds."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "zstd_vectors.json")
+    with open(path, encoding="utf-8") as f:
+        vector = json.load(f)["vectors"][0]
+    return bytes.fromhex(vector["zstd"]), vector["length"]
+
+
+class UBIFSBuilder:
+    """Lays UBIFS nodes into logical blocks and remembers where each one went."""
+
+    def __init__(self):
+        self.lebs = {}                 # lnum -> bytearray
+        self.sqnum = 0
+        self.lnum, self.offs = 3, 0    # 0 superblock, 1-2 master
+
+    def node(self, node_type, body, lnum=None, size=None):
+        self.sqnum += 1
+        length = 24 + len(body)
+        if size:
+            body += b"\x00" * (size - length)
+            length = size
+        tail = struct.pack("<QIBB2x", self.sqnum, length, node_type, 0) + body
+        raw = struct.pack("<II", UBIFS_MAGIC, ubi_crc(tail)) + tail
+        if lnum is None:
+            if self.offs + len(raw) > UBIFS_LEB:
+                self.lnum, self.offs = self.lnum + 1, 0
+            lnum, offs = self.lnum, self.offs
+            self.offs += len(raw) + (-len(raw) % 8)
+        else:
+            offs = len(self.lebs.get(lnum, b""))
+        leb = self.lebs.setdefault(lnum, bytearray())
+        leb[offs:offs + len(raw)] = raw
+        leb.extend(b"\x00" * (-len(leb) % 8))
+        return (lnum, offs, len(raw))
+
+    def inode(self, inum, mode, size, nlink=1):
+        body = struct.pack("<II", inum, UBIFS_KEY_INO << 29) + b"\x00" * 8
+        body += struct.pack("<QQ", self.sqnum + 1, size)     # creat_sqnum, size
+        body += b"\x00" * 36                                  # times
+        body += struct.pack("<IIII", nlink, 0, 0, mode)
+        return self.node(UBIFS_INO, body + b"\x00" * (160 - 24 - len(body)))
+
+    def dentry(self, parent, name, inum, itype):
+        raw = name.encode("ascii")
+        body = struct.pack("<II", parent, (UBIFS_KEY_DENT << 29) | (zlib.crc32(raw) & 0x1FFFFFFF))
+        body += b"\x00" * 8
+        body += struct.pack("<QBBH4x", inum, 0, itype, len(raw)) + raw + b"\x00"
+        return self.node(UBIFS_DENT, body)
+
+    def data(self, inum, block, plain_size, compr, payload):
+        body = struct.pack("<II", inum, (UBIFS_KEY_DATA << 29) | block) + b"\x00" * 8
+        body += struct.pack("<IHH", plain_size, compr, 0) + payload
+        return self.node(UBIFS_DATA, body)
+
+    def index(self, level, children):
+        body = struct.pack("<HH", len(children), level)
+        for lnum, offs, length in children:
+            body += struct.pack("<III", lnum, offs, length) + b"\x00" * 8
+        return self.node(UBIFS_IDX, body)
+
+    def image(self, root, default_compr):
+        leb_count = self.lnum + 1
+        sb = struct.pack("<2xBBIIII", 0, 0, 0, 512, UBIFS_LEB, leb_count)
+        sb += struct.pack("<IQIIIIII", leb_count, 0, 1, 1, 1, 1, 8, 0)
+        sb += struct.pack("<IH", 4, default_compr)
+        self.node(UBIFS_SB, sb, lnum=0, size=4096)
+        # A stale master first, then the current one: the newest must win.
+        master = lambda root_ref: (struct.pack("<QQII", 16, 1, 0, 3)
+                                   + struct.pack("<III", *root_ref)
+                                   + b"\x00" * (512 - 24 - 36))
+        for lnum in (1, 2):
+            self.node(UBIFS_MST, master((0, 0, 0)), lnum=lnum)
+            self.node(UBIFS_MST, master(root), lnum=lnum)
+        out = bytearray()
+        for lnum in range(leb_count):
+            leb = bytes(self.lebs.get(lnum, b""))
+            out += leb + b"\xff" * (UBIFS_LEB - len(leb))
+        return bytes(out)
+
+
+def build_ubifs(files, deleted=(), default_compr=2):
+    """A UBIFS image holding `files` - [(path, mode, compr, payload, size)] -
+    plus `deleted` files whose nodes are written but left out of the index.
+
+    compr is 0 none, 1 LZO, 2 zlib, 3 zstd; for LZO and zstd the payload is
+    the compressed stream and size the plain length.
+    """
+    b = UBIFSBuilder()
+    leaves = [b.inode(1, 0o040755, 0, nlink=2)]
+    dirs = {"": 1}
+    next_inum = 2
+
+    def directory(path):
+        nonlocal next_inum
+        if path in dirs:
+            return dirs[path]
+        parent, _, name = path.rpartition("/")
+        pinum = directory(parent)
+        inum = dirs[path] = next_inum
+        next_inum += 1
+        leaves.append(b.dentry(pinum, name, inum, 1))
+        leaves.append(b.inode(inum, 0o040755, 0, nlink=2))
+        return inum
+
+    def regular(path, mode, compr, payload, size):
+        nonlocal next_inum
+        parent, _, name = path.rpartition("/")
+        pinum = directory(parent)
+        inum = next_inum
+        next_inum += 1
+        refs = [b.dentry(pinum, name, inum, 0), b.inode(inum, mode, size)]
+        if compr == 2:
+            for block in range(0, size, 4096):
+                chunk = payload[block:block + 4096]
+                squeeze = zlib.compressobj(9, zlib.DEFLATED, -15)
+                refs.append(b.data(inum, block // 4096, len(chunk), 2,
+                                   squeeze.compress(chunk) + squeeze.flush()))
+        else:
+            assert size <= 4096 or compr == 0, "one block per stream"
+            for block in range(0, max(size, 1), 4096):
+                chunk = payload[block:block + 4096] if compr == 0 else payload
+                refs.append(b.data(inum, block // 4096,
+                                   min(4096, size - block), compr, chunk))
+        return refs
+
+    for spec in files:
+        leaves.extend(regular(*spec))
+    for spec in deleted:
+        regular(*spec)                  # on the flash, not in the index
+
+    # Two levels: the leaves split between two index nodes under the root.
+    half = len(leaves) // 2
+    root = b.index(1, [b.index(0, leaves[:half]), b.index(0, leaves[half:])])
+    return b.image(root, default_compr)
+
+
+def ubifs_rootfs_files():
+    busybox = (b"\x7fELF\x01\x01\x01" + b"\x00" * 9
+               + struct.pack("<HH", 2, 40)            # ET_EXEC, EM_ARM
+               + strings_blob(["BusyBox v1.36.1 (2023-11-14 20:19:46 UTC)",
+                               "usage: busybox [function]"])
+               + bytes(range(256)) * 20)              # past one 4 KiB block
+    release = (b'NAME="OpenWrt"\nVERSION="23.05.2"\nID=openwrt\n'
+               b'PRETTY_NAME="OpenWrt 23.05.2"\n')
+    status = (b"Package: dnsmasq\nVersion: 2.89-r1\n"
+              b"Architecture: arm_cortex-a7\nLicense: GPL-2.0-only\n\n")
+    motd, motd_size = lzo_reference("text")
+    notes, notes_size = zstd_reference()
+    return [
+        ("/bin/busybox", 0o100755, 2, busybox, len(busybox)),
+        ("/etc/os-release", 0o100644, 0, release, len(release)),
+        ("/usr/lib/opkg/status", 0o100644, 2, status, len(status)),
+        ("/etc/motd", 0o100644, 1, motd, motd_size),
+        ("/etc/notes", 0o100644, 3, notes, notes_size),
+    ]
+
+
+def ubifs_deleted_files():
+    dropbear = (b"\x7fELF\x01\x01\x01" + b"\x00" * 9
+                + struct.pack("<HH", 2, 40)
+                + strings_blob(["SSH-2.0-dropbear_2022.82",
+                                "dropbear: removed before the last commit"]))
+    return [("/usr/sbin/dropbear", 0o100755, 0, dropbear, len(dropbear))]
+
+
+@fixture("ubifs_rootfs.bin")
+def build_ubifs_rootfs():
+    """A raw UBIFS rootfs, as mkfs.ubifs writes it before ubinize."""
+    return build_ubifs(ubifs_rootfs_files(), ubifs_deleted_files())
+
+
+UBI_PEB = 16384
+UBI_VID_OFFSET, UBI_DATA_OFFSET = 512, 1024
+UBI_LAYOUT_VOLUME = 0x7FFFEFFF
+
+
+def ubi_ec_header():
+    head = struct.pack(">4sB3xQIII32x", b"UBI#", 1, 0, UBI_VID_OFFSET,
+                       UBI_DATA_OFFSET, 0x5EED)
+    return head + struct.pack(">I", ubi_crc(head))
+
+
+def ubi_vid_header(vol_id, lnum, sqnum, vol_type=1, compat=0):
+    head = struct.pack(">4sBBBBII4xIIII4xQ12x", b"UBI!", 1, vol_type, 0, compat,
+                       vol_id, lnum, 0, 0, 0, 0, sqnum)
+    return head + struct.pack(">I", ubi_crc(head))
+
+
+def ubi_peb(vol_id, lnum, sqnum, payload, compat=0):
+    assert len(payload) <= UBI_PEB - UBI_DATA_OFFSET, "payload overflows the block"
+    peb = bytearray(b"\xff" * UBI_PEB)
+    peb[0:64] = ubi_ec_header()
+    peb[UBI_VID_OFFSET:UBI_VID_OFFSET + 64] = ubi_vid_header(vol_id, lnum, sqnum,
+                                                             compat=compat)
+    peb[UBI_DATA_OFFSET:UBI_DATA_OFFSET + len(payload)] = payload
+    return bytes(peb)
+
+
+def ubi_volume_table(volumes):
+    records = b""
+    # As many records as fit in a logical block, up to 128: 89 here.
+    for index in range(min(128, UBIFS_LEB // 172)):
+        if index < len(volumes):
+            name = volumes[index][0].encode("ascii")
+            record = struct.pack(">IIIBBH", volumes[index][1], 1, 0, 1, 0, len(name))
+            record += name + b"\x00" * (128 - len(name)) + b"\x00" * 24
+        else:
+            record = b"\x00" * 168
+        records += record + struct.pack(">I", ubi_crc(record))
+    return records
+
+
+@fixture("ubi_flash.bin")
+def build_ubi_flash():
+    """A NAND UBI image: volume 0 a UBIFS data partition, volume 1 a CramFS
+    rootfs. The rootfs is not first, so taking the first filesystem as the
+    root would read the wrong one."""
+    library = (b"\x7fELF\x01\x01\x01" + b"\x00" * 9
+               + struct.pack("<HH", 3, 40)
+               + strings_blob(["libcurl/8.4.0 OpenSSL/3.0.12",
+                               "installed to the data volume"]))
+    data_volume = build_ubifs([("/lib/libcurl.so.4", 0o100755, 2, library,
+                                len(library))])
+    rootfs = build_cramfs_rootfs()
+    rootfs += b"\xff" * (-len(rootfs) % UBIFS_LEB)
+
+    def lebs(blob):
+        return [blob[i:i + UBIFS_LEB] for i in range(0, len(blob), UBIFS_LEB)]
+
+    sqnum = 0
+    pebs = []
+    table = ubi_volume_table([("data", len(lebs(data_volume))),
+                              ("rootfs", len(lebs(rootfs)))])
+    for lnum in (0, 1):
+        sqnum += 1
+        pebs.append(ubi_peb(UBI_LAYOUT_VOLUME, lnum, sqnum, table, compat=5))
+    # A stale copy of rootfs LEB 0 - an interrupted wear-levelling move -
+    # whose banner must lose to the newer copy written after it.
+    stale = bytearray(lebs(rootfs)[0])
+    stale[-64:] = b"SSH-2.0-dropbear_2019.78 stale copy".ljust(64, b"\x00")
+    sqnum += 1
+    pebs.append(ubi_peb(1, 0, sqnum, bytes(stale)))
+    for vol_id, blob in ((0, data_volume), (1, rootfs)):
+        for lnum, leb in enumerate(lebs(blob)):
+            sqnum += 1
+            pebs.append(ubi_peb(vol_id, lnum, sqnum, leb))
+    pebs.append(b"\xff" * UBI_PEB)                     # an erased block
+    # Wear levelling leaves blocks in no particular order; keep the layout
+    # volume first so the image still starts where a scanner expects.
+    head, rest = pebs[:2], pebs[2:]
+    rng("ubi_flash.bin").shuffle(rest)
+    return b"".join(head + rest)
+
+
+# --------------------------------------------------------------------------- #
+
 # --------------------------------------------------------------------------- #
 
 def main(argv):

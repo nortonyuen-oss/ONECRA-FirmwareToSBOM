@@ -166,6 +166,37 @@ CORPUS = [
         "sha256": "2990007afc9f25cf921049bacb270299a90924ec2f099f7590449db0ad55b4a6",
         "note": "JFFS2, old magic, big-endian, LZO, padded.",
     },
+    {
+        "path": "formats/ubi_fruits.bin",
+        "url": UNBLOB + "filesystem/ubi/ubi/__input__/fruits.ubi",
+        "sha256": "4cd14263eb03cb63d75b97ea376f4c903c55657351dfafb85ed5c2cb69925573",
+        "note": "UBI, a static and a dynamic volume, neither of them UBIFS.",
+    },
+    {
+        "path": "formats/ubi_orange_truncated.bin",
+        "url": UNBLOB + "filesystem/ubi/ubi/__input__/orange.ubi.truncated.img",
+        "sha256": "8dbf22935bc3b694e896c2a2ae922d76672c26a7a387449a475d63bfd087afe9",
+        "note": "UBI cut off mid-block: a UBIFS volume with 706 LZO data nodes, "
+                "and a second whose index lies past the cut.",
+    },
+    {
+        "path": "formats/ubifs_lzo.bin",
+        "url": UNBLOB + "filesystem/ubi/ubifs/__input__/banana.lzo.ubifs",
+        "sha256": "87b05f653d717736b766a9cca10b75656cc14c1d9442c61fdc514cc275a8a634",
+        "note": "Raw UBIFS, LZO by default (the small files are stored raw).",
+    },
+    {
+        "path": "formats/ubifs_zlib.bin",
+        "url": UNBLOB + "filesystem/ubi/ubifs/__input__/banana.zlib.ubifs",
+        "sha256": "e883e7b2ccba4d17dc614dcf816521d3a6178e992965fd175d88a32ed5d54111",
+        "note": "Raw UBIFS, zlib by default.",
+    },
+    {
+        "path": "formats/ubifs_zstd.bin",
+        "url": UNBLOB + "filesystem/ubi/ubifs/__input__/banana.zstd.ubifs",
+        "sha256": "4e3d4fe217be4e232a8a1c8dc134ef5d71da62da42ae43cf1f6f1014085ed8b3",
+        "note": "Raw UBIFS, zstd by default.",
+    },
 ]
 
 TIMEOUT = 300

@@ -51,6 +51,8 @@ import fw2sbom as core                                   # noqa: E402
 import make_fixtures                                     # noqa: E402
 import spdx_report                                       # noqa: E402
 import squashfs                                          # noqa: E402
+import ubi                                              # noqa: E402
+import ubifs                                            # noqa: E402
 import uefi                                             # noqa: E402
 import vendor_container                                 # noqa: E402
 import vendor_sbom                                      # noqa: E402
@@ -495,7 +497,8 @@ class SbomStructureTest(unittest.TestCase):
            "random_flat.bin", "router_uimage.bin", "bare_unknown.bin",
            "encrypted_kernel.bin", "esp32_app.bin", "esp32_flash.bin",
            "uefi_volume.bin", "uefi_flash.bin", "cramfs_rootfs.bin",
-           "jffs2_rootfs.bin", "cramfs_jffs2_flash.bin")
+           "jffs2_rootfs.bin", "cramfs_jffs2_flash.bin", "ubifs_rootfs.bin",
+           "ubi_flash.bin")
 
     def test_is_valid_cyclonedx_16_json(self):
         for name in self.ALL:
@@ -2466,6 +2469,184 @@ class JFFS2Test(unittest.TestCase):
             jffs2.rtime_decompress(b"A", 26)
 
 
+class UBIFSTest(unittest.TestCase):
+    """UBIFS keeps an index, and the index - not a scan of every node on the
+    flash - is what says which nodes are the filesystem. The published samples
+    hold text files and no compressed data but LZO; this fixture holds software,
+    every compressor, and a deleted binary still sitting on the flash."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.image = fixture("ubifs_rootfs.bin")
+        cls.fs = ubifs.UBIFS(cls.image)
+        cls.files = cls.fs.files()
+
+    def test_a_deleted_file_is_not_listed(self):
+        """Its nodes are on the flash with valid CRCs; the index no longer
+        points at them. A reader that scanned nodes would bring it back."""
+        self.assertIn(b"SSH-2.0-dropbear_2022.82", self.image)
+        self.assertEqual(sorted(self.files),
+                         ["/bin/busybox", "/etc/motd", "/etc/notes",
+                          "/etc/os-release", "/usr/lib/opkg/status"])
+
+    def test_a_deleted_binary_does_not_reach_the_sbom(self):
+        names = {c["name"] for c in analyze("ubifs_rootfs.bin")["bom"]["components"]}
+        self.assertIn("busybox", names)
+        self.assertNotIn("dropbear", names)
+
+    def test_every_compressor_reads_back(self):
+        busybox = self.fs.read_file(self.files["/bin/busybox"])      # zlib, 2 blocks
+        self.assertEqual(len(busybox), 5208)
+        self.assertIn(b"BusyBox v1.36.1", busybox)
+        self.assertEqual(busybox[-256:], bytes(range(256)))
+        motd = self.fs.read_file(self.files["/etc/motd"])            # LZO
+        self.assertEqual(motd, make_fixtures.LZO_TEXT)
+        release = self.fs.read_file(self.files["/etc/os-release"])   # none
+        self.assertIn(b'VERSION="23.05.2"', release)
+
+    def test_zstd_reads_where_the_python_has_it(self):
+        with open(os.path.join(HERE, "zstd_vectors.json"), encoding="utf-8") as f:
+            vector = json.load(f)["vectors"][0]
+        node = self.files["/etc/notes"]
+        if ubifs._zstd is None:
+            with self.assertRaises(ubifs.UBIFSError):
+                self.fs.read_file(node)
+            return
+        notes = self.fs.read_file(node)
+        self.assertEqual(hashlib.sha256(notes).hexdigest(), vector["sha256"])
+
+    def test_a_file_that_cannot_be_decompressed_becomes_an_opaque_component(self):
+        """The packaged Python is 3.12, which has no zstd. The file must not
+        just drop out of the scan: it is a file nobody looked inside."""
+        data = fixture("ubifs_rootfs.bin")
+        with mock.patch.object(ubifs, "_zstd", None):
+            result = core.run_analysis(data, image_input.detect_and_load(data),
+                                       "ubifs_rootfs.bin")
+        opaque = [c for c in result["bom"]["components"]
+                  if {"name": "fw2sbom:opaque", "value": "true"}
+                  in c.get("properties", [])]
+        self.assertEqual(len(opaque), 1, [c["name"] for c in opaque])
+        evidence = json.dumps(opaque[0]["evidence"])
+        self.assertIn("/etc/notes", evidence)
+        self.assertIn("zstd", evidence)
+        self.assertNotIn("could not be expanded", evidence)
+        names = {c["name"] for c in result["bom"]["components"]}
+        self.assertIn("busybox", names)            # the rest is still read
+
+    def test_the_newest_master_node_wins(self):
+        """Each master LEB holds a stale copy pointing at the superblock, then
+        the current one. Taking the first would find no index at all."""
+        self.assertIn("/bin/busybox", self.files)
+
+    def test_the_pipeline_reads_it_as_a_rootfs(self):
+        result = analyze("ubifs_rootfs.bin")
+        self.assertEqual(result["rootfs"]["os_release"]["version"], "23.05.2")
+        self.assertEqual([p["name"] for p in result["packages"]], ["dnsmasq"])
+        self.assertIn("ARM", result["rootfs"]["binaries"]["architecture"])
+
+    def test_a_damaged_superblock_is_refused(self):
+        damaged = bytearray(self.image)
+        damaged[40] ^= 0xFF
+        with self.assertRaises(ubifs.UBIFSError):
+            ubifs.UBIFS(bytes(damaged))
+        self.assertEqual([], ubifs.find_offsets(bytes(damaged)))
+
+    def test_a_truncated_image_is_refused_or_read_partially_never_raising_otherwise(self):
+        leb = make_fixtures.UBIFS_LEB
+        for length in (0, 24, 100, 4096, leb, 2 * leb, 3 * leb, 3 * leb + 900):
+            with self.subTest(length=length):
+                try:
+                    partial = ubifs.UBIFS(self.image[:length])
+                except ubifs.UBIFSError:
+                    continue
+                for node in partial.files().values():
+                    try:
+                        partial.read_file(node)
+                    except ubifs.UBIFSError:
+                        pass
+
+
+class UBITest(unittest.TestCase):
+    """UBI reassembles volumes from erase blocks scattered by wear levelling.
+    The fixture's volume 0 is a UBIFS data partition and volume 1 a CramFS
+    rootfs; its blocks are shuffled, and one logical block is present twice."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.data = fixture("ubi_flash.bin")
+        cls.image = ubi.read_image(cls.data)
+
+    def volume(self, name):
+        return next(v for v in self.image["volumes"] if v["name"] == name)
+
+    def test_volumes_are_named_from_the_table_and_empty_slots_ignored(self):
+        self.assertEqual([(v["name"], v["type"]) for v in self.image["volumes"]],
+                         [("data", "dynamic"), ("rootfs", "dynamic")])
+        self.assertEqual(self.image["peb_size"], make_fixtures.UBI_PEB)
+        self.assertEqual([], self.image["warnings"])
+
+    def test_the_newer_copy_of_a_logical_block_wins(self):
+        self.assertIn(b"stale copy", self.data)
+        self.assertNotIn(b"stale copy", self.volume("rootfs")["data"])
+        names = {c["name"] for c in analyze("ubi_flash.bin")["bom"]["components"]}
+        self.assertNotIn("dropbear", names)
+
+    def test_the_volume_bytes_come_out_in_logical_order(self):
+        self.assertEqual(self.volume("rootfs")["data"][:4],
+                         struct.pack("<I", make_fixtures.CRAMFS_MAGIC_LE))
+        self.assertIsNotNone(ubifs.UBIFS(self.volume("data")["data"]))
+
+    def test_the_rootfs_is_chosen_by_its_contents_not_its_position(self):
+        """'data' comes first. Taking the first filesystem as the root would
+        read a partition holding one library as the whole device."""
+        result = analyze("ubi_flash.bin")
+        self.assertEqual(result["rootfs"]["segment"]["ubi_volume"], "rootfs")
+        self.assertEqual(result["rootfs"]["os_release"]["version"], "22.03.4")
+
+    def test_the_other_volume_is_still_scanned(self):
+        names = {c["name"] for c in analyze("ubi_flash.bin")["bom"]["components"]}
+        self.assertIn("busybox", names)          # the rootfs volume
+        self.assertIn("libcurl", names)          # the data volume
+
+    def test_a_filesystem_inside_ubi_is_read_through_ubi(self):
+        """The raw image has erase-block headers every 16 KiB; read in place,
+        a filesystem's blocks past the first would be headers."""
+        labels = [s["label"] for s in analyze("ubi_flash.bin")["segments"]
+                  if s["kind"] == "filesystem"]
+        self.assertEqual(len(labels), 2, labels)
+        self.assertTrue(all(l.startswith("UBI volume '") for l in labels), labels)
+
+    def test_a_missing_logical_block_is_filled_not_closed_up(self):
+        """Closing the gap would shift every later byte of the volume."""
+        pebs = [self.data[i:i + make_fixtures.UBI_PEB]
+                for i in range(0, len(self.data), make_fixtures.UBI_PEB)]
+        kept = []
+        for peb in pebs:
+            vid = ubi.parse_vid_header(peb, make_fixtures.UBI_VID_OFFSET)
+            if vid and (vid["vol_id"], vid["lnum"]) == (0, 1):
+                kept.append(b"\xff" * len(peb))
+                continue
+            kept.append(peb)
+        image = ubi.read_image(b"".join(kept))
+        data = next(v for v in image["volumes"] if v["name"] == "data")
+        self.assertEqual(data["missing_lebs"], [1])
+        self.assertEqual(len(data["data"]), len(self.volume("data")["data"]))
+        self.assertTrue(any("missing" in w for w in image["warnings"]))
+
+    def test_a_truncated_image_says_so_and_keeps_what_it_has(self):
+        cut = self.data[:len(self.data) - make_fixtures.UBI_PEB - 5000]
+        image = ubi.read_image(cut)
+        self.assertTrue(any("ends" in w for w in image["warnings"]),
+                        image["warnings"])
+        self.assertTrue(image["volumes"])
+
+    def test_a_stray_magic_without_a_valid_crc_is_not_an_image(self):
+        noise = b"UBI#" + bytes(range(256)) * 8
+        self.assertEqual([], ubi.find_offsets(noise))
+        with self.assertRaises(ubi.UBIError):
+            ubi.read_image(noise)
+
+
 class LZOTest(unittest.TestCase):
     """A decompressor can only be tested against a compressor that is not
     itself. The reference streams come from lzokay, an independent C++
@@ -2851,6 +3032,49 @@ class RealFormatSampleTest(unittest.TestCase):
         self.assertTrue(payload)
         self.assertTrue(any((s.get("opacity") or {}).get("opaque")
                             for s in payload), [s["label"] for s in payload])
+
+    def test_ubi_volumes_are_reassembled_and_named(self):
+        image = ubi.read_image(self.sample("ubi_fruits.bin"))
+        self.assertEqual([(v["name"], v["type"]) for v in image["volumes"]],
+                         [("apple", "static"), ("data", "dynamic")])
+        apple = image["volumes"][0]["data"]
+        self.assertEqual(apple, b"apple1\n")     # static: exactly its data size
+
+    def test_a_real_ubifs_volume_reads_through_lzo(self):
+        """706 LZO data nodes from the real toolchain, each decoding to exactly
+        its declared size, inside a UBI image cut off mid-block."""
+        image = ubi.read_image(self.sample("ubi_orange_truncated.bin"))
+        self.assertTrue(image["warnings"])
+        volumes = {v["name"]: v for v in image["volumes"]}
+        fs = ubifs.UBIFS(volumes["configuration"]["data"])
+        sizes = {path: len(fs.read_file(node)) for path, node in fs.files().items()}
+        self.assertEqual(sizes, {"/orange1.txt": 1445004, "/orange2.txt": 1445005})
+        with self.assertRaisesRegex(ubifs.UBIFSError, "truncated"):
+            ubifs.UBIFS(volumes["rootfs"]["data"])
+
+    def test_an_unreadable_ubifs_volume_is_opaque_not_blank(self):
+        """The truncated 'rootfs' volume has no index. That is a filesystem we
+        could not list - not erased flash, and not a volume with nothing in it."""
+        blob = self.sample("ubi_orange_truncated.bin")
+        segments, _rootfs, _warnings = core.analyze_segments(blob, 6)
+        opaque = core.opaque_segments(segments)
+        self.assertEqual(len(opaque), 1, [s["label"] for s in opaque])
+        self.assertIn("rootfs", opaque[0]["label"])
+        self.assertIn("truncated", opaque[0]["unread_reason"])
+        self.assertFalse(opaque[0].get("blank"))
+
+    def test_every_raw_ubifs_sample_reads_identically(self):
+        results = {}
+        for name in ("ubifs_lzo.bin", "ubifs_zlib.bin", "ubifs_zstd.bin"):
+            fs = ubifs.UBIFS(self.sample(name))
+            self.assertEqual([], fs.warnings, name)
+            results[name] = {path: fs.read_file(node)
+                             for path, node in fs.files().items()}
+        first = next(iter(results.values()))
+        self.assertEqual(first["/banana1.txt"], b"banana1\n")
+        self.assertEqual(len(first), 4)
+        for name, listing in results.items():
+            self.assertEqual(listing, first, name)
 
 
 class RealBiosTest(unittest.TestCase):

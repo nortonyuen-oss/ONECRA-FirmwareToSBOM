@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-18** · 版本 **v1.18.0**
+快照日期:**2026-09-18** · 版本 **v1.19.0**
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -59,15 +59,16 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | `v1.16.0` | 廠商外層容器(TRX / CHK / SHRS / BNEG / FRM)、CramFS reader |
 | `v1.17.0` | 網頁進度條;CLI / 網頁 / 測試共用同一條分析流程(修正網頁漏掉 rootfs 元件) |
 | `v1.18.0` | JFFS2 reader、純 Python LZO;flash dump 裡 rootfs 之後的 overlay 一樣逐檔掃描 |
+| `v1.19.0` | UBI / UBIFS;rootfs 依內容選擇;讀不到的單一檔案改記為 opaque 元件 |
 | `v1.7.0` | **Phase 2 第一階段**:容器走訪、解壓、SquashFS 4.0 reader、opkg / dpkg / apk 套件資料庫、發行版識別、真實韌體 corpus 測試 |
 
 ### 工程現況
 
 | 項目 | 狀態 |
 |---|---|
-| 程式碼 | 約 11,000 行(含測試),13 個模組 + 6 個簽章包(36 個簽章) |
+| 程式碼 | 約 15,000 行(含測試與腳本),17 個模組 + 6 個簽章包(36 個簽章) |
 | 依賴 | 無。Python 3.9+ 標準函式庫 |
-| 測試 | 247 個。12 個合成 fixture + 真實廠商韌體 corpus(1 份 router、3 份 ESP32) |
+| 測試 | 269 個。19 個合成 fixture + 公開格式樣本 + 真實韌體 corpus(1 份 router、3 份 ESP32、OVMF) |
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |
@@ -135,7 +136,8 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 
 - 更多容器格式:FIT、TP-Link / HiSilicon 等廠商自訂檔頭
   (**TRX / CHK / SHRS / BNEG / FRM 已於 v1.16.0 支援**)
-- 更多檔案系統:UBI / UBIFS(**CramFS 已於 v1.16.0、JFFS2 已於 v1.18.0 支援**)
+- 更多檔案系統:ext2/3/4、YAFFS2(**CramFS 已於 v1.16.0、JFFS2 已於 v1.18.0、
+  UBI / UBIFS 已於 v1.19.0 支援**)
 
 這兩項沒有真實樣本就只能照規格書寫,驗證不到廠商實際的偏差 —— `gcc-arm-none-eabi`
 誤報那次已經示範過合成 fixture 看不出真實問題。

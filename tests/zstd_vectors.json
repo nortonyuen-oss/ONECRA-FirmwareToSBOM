@@ -1,0 +1,11 @@
+{
+ "generator": "compression.zstd (CPython 3.14 standard library)",
+ "vectors": [
+  {
+   "name": "ubifs-data-node",
+   "length": 2320,
+   "sha256": "6b153d3f7a10408d0471ecce4674dc7c51e5568aaa08efd945b0946cd557e679",
+   "zstd": "28b52ffd6010081d0200a4037a7374642d636f6d707265737365642064617461206e6f64652c206173206120554249465320696d616765206d61792063617272792069742e2001003a8dee2b28"
+  }
+ ]
+}

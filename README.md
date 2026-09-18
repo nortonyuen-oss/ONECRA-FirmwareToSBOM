@@ -239,8 +239,8 @@ router 映像可以得到三百多個帶精確版本的元件。
 | 容器 | U-Boot legacy uImage;任意位置的壓縮區段 |
 | 解壓 | gzip、xz、lzma、bzip2(全部 stdlib) |
 | 未支援解壓 | lzo、lz4、zstd —— **會明確報告「未展開」並指名演算法**,不會靜默跳過 |
-| 檔案系統 | SquashFS 4.0(gzip / xz / lzma 壓縮) |
-| 未支援檔案系統 | JFFS2、UBIFS、CramFS |
+| 檔案系統 | SquashFS 4.0(gzip / xz / lzma 壓縮)、CramFS、JFFS2、UBI / UBIFS |
+| 未支援檔案系統 | ext2/3/4、YAFFS2、ROMFS |
 | 套件資料庫 | opkg、dpkg、apk |
 
 ### 對不可信輸入的處理
@@ -458,6 +458,57 @@ JFFS2 則是一份**日誌** —— 檔案每改一次就追加一批節點,每�
 BIOS、ESP32 韌體內容),**零差異**。repo 裡的 `tests/lzo_vectors.json` 收錄一組刻意
 挑選、**合起來覆蓋全部指令種類**的參考串流,測試會檢查覆蓋率本身,避免有人改了向量
 而悄悄漏掉某條路徑。
+
+## UBI / UBIFS
+
+NAND flash 上的韌體很少直接就是一個檔案系統,而是 **UBI**:一連串實體 erase block,
+每塊帶兩個小檔頭,說明它屬於哪個 volume 的第幾個邏輯區塊。真正的內容在 volume 裡 ——
+OpenWrt NAND router 上是 kernel、SquashFS rootfs 與 UBIFS overlay;攝影機上常見是
+設定 volume 與應用程式 volume。**UBIFS** 是住在 UBI volume 裡的可寫檔案系統。
+
+### UBI:先把 volume 拼回來
+
+- **Volume 由散落的 erase block 重組。** Wear leveling 把區塊放在任何位置;同一個
+  邏輯區塊出現兩份時,**sequence number 較新的勝出**,與裝置上的行為一樣。
+- **UBI 先於檔案系統掃描。** 一個 UBI volume 裡的 SquashFS,在原始映像上每 128 KiB
+  就被 erase-block 檔頭打斷一次;直接在原地讀,superblock 打得開,但第一個 block
+  之後讀到的全是檔頭。所以 UBI 先認領自己的範圍,volume 拼好之後再交給原本的走訪
+  —— SquashFS / CramFS / kernel 一律照在 UBI 外面時的讀法處理。
+- **根檔案系統依內容選,不依位置。** Volume 按編號排列,「configuration」可能排在
+  「rootfs」之前。有 `/etc/os-release`、套件資料庫、`/bin/busybox` 等標記的那一個才
+  當成 rootfs;其餘檔案系統的檔案照樣逐一掃描。
+- **缺少或被截斷的區塊如實報告**,並以抹除狀態(0xFF)填補,不會把缺口合起來 ——
+  合起來會讓 volume 後面每一個位元組都錯位。
+- 每個檔頭的 CRC 都驗證;volume table 逐筆驗證自己的 CRC(空欄位照字面讀就是垃圾)。
+
+### UBIFS:走 index,不掃節點
+
+UBIFS 跟 JFFS2 一樣是一串節點,但它有一棵 **index**(B+ tree,根在 master node),
+由 index 決定哪些節點才是檔案系統。這個 reader **走 index 而不是掃描所有節點**:
+掃描會看到每個節點曾經寫過的每一個版本,包括已經刪除的檔案;index 只看到最後一次
+commit 時檔案系統裡有的東西。把已刪除的 binary 復活進 SBOM 是下游完全察覺不到的
+錯誤,走 index 讓它根本不可能發生。
+
+代價如實說明:**最後一次 commit 之後寫入 journal 的變更不會重播。** mkfs.ubifs 產生
+的映像(韌體 release 就是這種)沒有 journal 可重播;從運行中裝置讀出的 dump 可能有。
+
+| 壓縮 | 狀態 |
+|---|---|
+| none / zlib | 讀取 |
+| **LZO** | 讀取,透過 `lzo.py`;公開樣本中 **706 個真實 LZO 資料節點**逐一解出宣告的大小 |
+| zstd | Python 3.14 以上讀取;**套件內附的 3.12 讀不到**,會逐檔報告為 opaque 元件並寫明原因 |
+
+**讀不到的檔案不再默默消失。** 以前任何檔案系統裡解壓失敗的單一檔案都只是被計數
+略過 —— 它沒被掃描,卻也沒出現在 SBOM 的任何地方。現在每個有檔案讀不到的檔案系統
+都會產生一個 opaque 元件,列出是哪些檔案、為甚麼讀不到。
+
+**Index 讀不到時,整個 volume 記為 opaque,不是空白。** 公開樣本裡一個被截斷的映像,
+其 rootfs volume 的 index 根落在截斷點之後;報告會寫明「index 根在邏輯區塊 15,
+映像只有 0-8」,而不是把它判定為抹除過的 flash。
+
+驗證:unblob 專案公開的 UBI / UBIFS 樣本(MIT),加上自建 fixture —— 內含已刪除但
+節點仍在 flash 上的 binary、兩層 index、四種壓縮、以及 rootfs 不排第一個且區塊順序
+打亂、同一邏輯區塊有新舊兩份的 UBI 映像。
 
 ## UEFI / PC BIOS
 
@@ -811,10 +862,10 @@ schema 沒抓下來或沒裝 `jsonschema` 時,該項測試會 skip 而不是假�
 
 - 萃取 ASCII 與 UTF-16LE 字串;不做反組譯、不做 code-similarity(FLIRT/BinDiff
   類)比對
-- 容器走訪目前只認 U-Boot legacy uImage;FIT、TRX 與各家廠商自訂檔頭尚未支援
-- 檔案系統只支援 SquashFS 4.0;JFFS2 / UBIFS / CramFS 會被偵測到但讀不出內容
-- 不做逐個 ELF 的分析(`.comment`、`NEEDED` 依賴);目前 rootfs 的元件全部來自
-  套件資料庫,沒有資料庫的映像只會得到檔案清單
+- 容器走訪認得 U-Boot legacy uImage、UBI 與 TRX / CHK / SHRS / BNEG / FRM;
+  FIT 與其餘廠商自訂檔頭尚未支援
+- 檔案系統支援 SquashFS 4.0、CramFS、JFFS2、UBI / UBIFS;ext2/3/4、YAFFS2 尚未支援
+- UBIFS 不重播 journal:從運行中裝置讀出的 dump,最後一次 commit 之後的變更看不到
 - 指令集判定僅涵蓋 ARM Cortex-M 與 MCS-51;其他架構(RISC-V、Xtensa、8051 以外
   的 8-bit 核心)會回報「未識別」,分析仍會繼續但少了架構這條證據
 - 8051 韌體通常由 Keil C51 等專有工具鏈編譯、內容多為廠商自有程式碼,不一定含
@@ -857,6 +908,8 @@ fw2sbom/
 ├── cramfs.py               # 唯讀 CramFS reader(兩種位元組序)
 ├── jffs2.py                # 唯讀 JFFS2 reader(節點重組、unlink、CRC 驗證)
 ├── lzo.py                  # 純 Python LZO1X 解壓
+├── ubi.py                  # UBI volume 重組(erase block、volume table、sqnum)
+├── ubifs.py                # 唯讀 UBIFS reader(走 index、CRC 驗證)
 ├── vendor_container.py     # TRX / CHK / SHRS / BNEG / FRM 廠商外層檔頭
 ├── image_input.py          # ELF / Intel HEX / S-record / UF2 讀入成平坦映像
 ├── vendor_sbom.py          # 讀入廠商 SBOM 並與分析結果對帳
