@@ -77,6 +77,8 @@ $PayloadFromRoot = @(
     'uefi.py',
     'cramfs.py',
     'vendor_container.py',
+    'jffs2.py',
+    'lzo.py',
     'onecra_logo.png',
     'onecra_icon.png'
 )

@@ -42,6 +42,7 @@ import zlib
 import elf
 import esp32
 import cramfs
+import jffs2
 import squashfs
 import uefi
 import vendor_container
@@ -54,7 +55,8 @@ MAX_SEGMENTS = 64
 # reads packages, binaries and files out of one should not care which reader it
 # was handed. Catching the specific type is how a second filesystem turns into
 # a traceback instead of a warning.
-FILESYSTEM_ERRORS = (squashfs.SquashFSError, cramfs.CramFSError)
+FILESYSTEM_ERRORS = (squashfs.SquashFSError, cramfs.CramFSError,
+                     jffs2.JFFS2Error)
 
 UIMAGE_MAGIC = 0x27051956
 UIMAGE_HEADER_SIZE = 64
@@ -389,6 +391,27 @@ def walk(data, verbose=False, log=None):
         segments.append(_segment(
             "filesystem", offset, end - offset,
             f"CramFS ({image.byte_order})",
+            content=None, filesystem=image))
+        claim(offset, end)
+        if len(segments) >= MAX_SEGMENTS:
+            break
+
+    # JFFS2 has no superblock: a stream is wherever nodes with valid header
+    # CRCs begin, and it ends where the last of them does. On a device dump it
+    # is usually the writable overlay sitting after a read-only rootfs.
+    for offset in jffs2.find_offsets(data):
+        if any(s <= offset < e for s, e in covered):
+            continue
+        try:
+            image = jffs2.JFFS2(data, offset)
+        except jffs2.JFFS2Error:
+            continue
+        end = image.last_node_end
+        say(f"container: JFFS2 at 0x{offset:x}, {image.byte_order}, "
+            f"{image.node_count} nodes, {end - offset} bytes")
+        segments.append(_segment(
+            "filesystem", offset, end - offset,
+            f"JFFS2 ({image.byte_order})",
             content=None, filesystem=image))
         claim(offset, end)
         if len(segments) >= MAX_SEGMENTS:

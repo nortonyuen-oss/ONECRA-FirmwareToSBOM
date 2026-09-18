@@ -21,6 +21,7 @@ import hashlib
 import io
 import json
 import os
+import random
 import shutil
 import struct
 import sys
@@ -41,6 +42,8 @@ sys.path.insert(0, HERE)
 import container                                        # noqa: E402
 import cramfs                                           # noqa: E402
 import image_input                                      # noqa: E402
+import jffs2                                            # noqa: E402
+import lzo                                              # noqa: E402
 import elf                                              # noqa: E402
 import esp32                                            # noqa: E402
 import evidence_report                                  # noqa: E402
@@ -491,7 +494,8 @@ class SbomStructureTest(unittest.TestCase):
            "packet_front.bin", "packet_back.bin", "opaque_encrypted.bin",
            "random_flat.bin", "router_uimage.bin", "bare_unknown.bin",
            "encrypted_kernel.bin", "esp32_app.bin", "esp32_flash.bin",
-           "uefi_volume.bin", "uefi_flash.bin", "cramfs_rootfs.bin")
+           "uefi_volume.bin", "uefi_flash.bin", "cramfs_rootfs.bin",
+           "jffs2_rootfs.bin", "cramfs_jffs2_flash.bin")
 
     def test_is_valid_cyclonedx_16_json(self):
         for name in self.ALL:
@@ -2380,6 +2384,179 @@ class AnalysisJobTest(unittest.TestCase):
 
 # --------------------------------------------------------------------------- #
 
+class JFFS2Test(unittest.TestCase):
+    """JFFS2 is a log, not an image: files are rebuilt from every node that
+    ever wrote part of them, and deleting one writes a node too.
+
+    The published samples cover the compressors and byte orders. These tests
+    cover what makes it a log - the parts a reader written from the node
+    layout alone gets wrong.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.image = fixture("jffs2_rootfs.bin")
+        cls.fs = jffs2.JFFS2(cls.image, 0)
+        cls.files = cls.fs.files()
+
+    def test_a_deleted_file_is_not_listed(self):
+        """An entry pointing at inode 0 is an unlink. Ignoring it resurrects
+        every file the device deleted - and lists software that is not there."""
+        self.assertNotIn("/bin/dropbear", self.files)
+        self.assertEqual(sorted(self.files),
+                         ["/bin/busybox", "/etc/motd", "/etc/os-release"])
+
+    def test_a_deleted_binary_does_not_reach_the_sbom(self):
+        names = {c["name"] for c in analyze("jffs2_rootfs.bin")["bom"]["components"]}
+        self.assertIn("busybox", names)
+        self.assertNotIn("dropbear", names)
+
+    def test_the_newest_version_of_a_file_wins(self):
+        release = self.fs.read_file(self.files["/etc/os-release"])
+        self.assertIn(b'VERSION="22.03.4"', release)
+        self.assertNotIn(b"VendorOS", release)
+
+    def test_every_compressor_in_the_fixture_reads_back(self):
+        motd = self.fs.read_file(self.files["/etc/motd"])          # LZO
+        self.assertEqual(motd, b"The quick brown fox jumps over the lazy dog. " * 60)
+        busybox = self.fs.read_file(self.files["/bin/busybox"])    # zlib
+        self.assertIn(b"BusyBox v1.36.1", busybox)
+
+    def test_a_stray_magic_without_a_valid_crc_is_not_a_node(self):
+        """0x1985 is two bytes and turns up inside compressed data. With no
+        superblock, the header CRC is the only thing that tells them apart."""
+        noise = b"\x19\x85\xe0\x02" + struct.pack(">I", 64) + b"\x00" * 4 \
+            + bytes(range(256)) * 4
+        self.assertEqual([], jffs2.find_offsets(noise))
+        with self.assertRaises(jffs2.JFFS2Error):
+            jffs2.JFFS2(noise, 0)
+
+    def test_a_truncated_image_is_refused_or_read_partially_never_raising_otherwise(self):
+        for length in (0, 4, 11, 12, 40, 200, 700):
+            with self.subTest(length=length):
+                try:
+                    partial = jffs2.JFFS2(self.image[:length], 0)
+                except jffs2.JFFS2Error:
+                    continue
+                for node in partial.files().values():
+                    try:
+                        partial.read_file(node)
+                    except jffs2.JFFS2Error:
+                        pass
+
+    def test_the_architecture_comes_from_the_binaries(self):
+        result = analyze("jffs2_rootfs.bin")
+        self.assertIn("MIPS", result["rootfs"]["binaries"]["architecture"])
+        self.assertIn("big-endian", result["rootfs"]["binaries"]["architecture"])
+
+    def test_an_overlay_after_the_rootfs_is_still_read(self):
+        """A device dump: a read-only rootfs, then a JFFS2 overlay. Only the
+        first is read as the rootfs, and before this the second would have gone
+        unscanned - taking with it every package installed after the factory
+        image."""
+        names = {c["name"] for c in analyze("cramfs_jffs2_flash.bin")["bom"]["components"]}
+        self.assertIn("busybox", names)          # the rootfs
+        self.assertIn("libcurl", names)          # the overlay
+
+    def test_rtime_decompresses_overlapping_repeats(self):
+        """A run of one character compresses to four bytes, because the copy
+        reads what it has just written."""
+        self.assertEqual(jffs2.rtime_decompress(b"A\x00A\x18", 26), b"A" * 26)
+        with self.assertRaises(jffs2.JFFS2Error):
+            jffs2.rtime_decompress(b"A", 26)
+
+
+class LZOTest(unittest.TestCase):
+    """A decompressor can only be tested against a compressor that is not
+    itself. The reference streams come from lzokay, an independent C++
+    implementation; see tests/make_lzo_vectors.py."""
+
+    @classmethod
+    def setUpClass(cls):
+        with open(os.path.join(HERE, "lzo_vectors.json"), encoding="utf-8") as f:
+            cls.vectors = json.load(f)["vectors"]
+
+    def test_every_reference_stream_decodes_exactly(self):
+        for vector in self.vectors:
+            with self.subTest(vector=vector["name"]):
+                out = lzo.decompress(bytes.fromhex(vector["lzo"]), vector["length"])
+                self.assertEqual(len(out), vector["length"])
+                self.assertEqual(hashlib.sha256(out).hexdigest(), vector["sha256"])
+
+    def test_the_references_exercise_every_instruction(self):
+        """A vector set that stopped covering one instruction kind would pass
+        while that path broke. So the coverage is itself asserted."""
+        source = lzo.__file__
+        executed = set()
+
+        def trace(frame, event, arg):
+            if frame.f_code.co_filename == source:
+                executed.add(frame.f_lineno)
+            return trace
+
+        sys.settrace(trace)
+        try:
+            for vector in self.vectors:
+                lzo.decompress(bytes.fromhex(vector["lzo"]), vector["length"])
+        finally:
+            sys.settrace(None)
+        with open(source, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+        for label, needle in {
+                "M1 after a match": "# M1:",
+                "M1 after literals": "match(1 + M2_MAX_OFFSET",
+                "M2": "# M2:", "M3": "# M3:", "M4": "# M4:",
+                "end-of-stream": "# the end-of-stream marker",
+                "length extension": "extra += 255",
+                "overlapping copy": "out.append(out[start + index])",
+                "initial literal run": "t = take() - 17",
+                "trailing literals": "literals(trailing)"}.items():
+            number = next(i + 1 for i, text in enumerate(lines) if needle in text)
+            with self.subTest(instruction=label):
+                self.assertTrue(number in executed or number + 1 in executed)
+
+    def test_hostile_streams_are_refused_rather_than_raising_otherwise(self):
+        good = bytes.fromhex(next(v["lzo"] for v in self.vectors
+                                  if v["name"] == "text"))
+        for label, stream in {
+                "empty": b"",
+                "truncated": good[:len(good) // 2],
+                "one byte": good[:1],
+                "reference before the start": bytes([18, 0x41, 0x7F, 0xFF]),
+                "literal run past the input": bytes([0, 0, 0x40]),
+        }.items():
+            with self.subTest(stream=label):
+                with self.assertRaises(lzo.LZOError):
+                    lzo.decompress(stream, 2700)
+
+    def test_output_is_capped(self):
+        """A few bytes of LZO can claim megabytes of output."""
+        long_run = bytes.fromhex(next(v["lzo"] for v in self.vectors
+                                      if v["name"] == "overlapping-run"))
+        with self.assertRaises(lzo.LZOError):
+            lzo.decompress(long_run, limit=100)
+
+    def test_against_an_independent_implementation_when_available(self):
+        """The full differential check. Skipped unless lzallright is installed
+        - it is a test tool, never shipped - but run by hand when lzo.py
+        changes: pip install lzallright."""
+        try:
+            import lzallright
+        except ImportError:
+            self.skipTest("lzallright not installed")
+        compressor = lzallright.LZOCompressor()
+        generator = random.Random(1985)
+        for index in range(200):
+            alphabet = generator.choice((2, 4, 16, 64, 256))
+            length = generator.choice((1, 17, 300, 4096, 20000, 70000))
+            plain = bytes(generator.randrange(alphabet) for _ in range(length))
+            with self.subTest(case=index, alphabet=alphabet, length=length):
+                packed = compressor.compress(plain)
+                self.assertEqual(lzo.decompress(packed, len(plain)), plain)
+
+
+# --------------------------------------------------------------------------- #
+
 class SpdxTest(unittest.TestCase):
     """SPDX 2.3 is a second rendering of one analysis, not a second analysis."""
 
@@ -2640,6 +2817,22 @@ class RealFormatSampleTest(unittest.TestCase):
                 for part in found["parts"]:
                     self.assertGreaterEqual(part["offset"],
                                             found["header_length"])
+
+    def test_every_jffs2_variant_reads_identically(self):
+        """Both byte orders, both magics, padded or not, and every compressor
+        the samples carry - including LZO, through lzo.py."""
+        results = {}
+        for name in ("jffs2_new_le_zlib.bin", "jffs2_new_be_lzo.bin",
+                     "jffs2_old_le_rtime.bin", "jffs2_new_be_nocomp_padded.bin",
+                     "jffs2_old_be_lzo_padded.bin"):
+            blob = self.sample(name)
+            image = jffs2.JFFS2(blob, 0)
+            results[name] = {path: image.read_file(node)
+                             for path, node in image.files().items()}
+        first = next(iter(results.values()))
+        self.assertEqual(first["/apple.txt"], b"A" * 25 + b"\n")
+        for name, listing in results.items():
+            self.assertEqual(listing, first, name)
 
     def test_a_cramfs_sample_goes_through_the_whole_pipeline(self):
         blob = self.sample("cramfs_le.bin")

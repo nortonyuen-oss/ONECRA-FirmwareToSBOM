@@ -52,7 +52,7 @@ import uefi
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.17.0"
+TOOL_VERSION = "1.18.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -1294,6 +1294,18 @@ def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None,
                        dict(detail, **(sub or {})))
             rootfs = container.inspect_filesystem(segment, verbose, log_fn,
                                                   progress=inner)
+        elif segment["kind"] == "filesystem":
+            # A device dump carries a read-only rootfs and, after it, a
+            # writable overlay - JFFS2 on NOR flash. Only the first is read as
+            # the rootfs, but the overlay is where packages installed after
+            # the factory image land, so its files are scanned too rather than
+            # the whole region going unread because it is not first.
+            segment["hits"] = secondary_filesystem_hits(segment, min_str_len,
+                                                        verbose)
+            segment["strings"] = []
+            done += weight(segment)
+            report(high, detail)
+            continue
         done += weight(segment)
         content = segment["content"]
         if content is None:
@@ -1479,6 +1491,26 @@ def reconcile_vendor_sboms(documents, hits, standards, packages,
                 f"says {conflict['vendor_version']}, the image shows "
                 f"{conflict['our_version']}", True)
     return report
+
+
+def secondary_filesystem_hits(segment, min_str_len=6, verbose=False):
+    """Signature hits from every file in a filesystem that is not the rootfs."""
+    image = segment.get("filesystem")
+    if image is None:
+        return []
+    try:
+        files = image.files()
+    except container.FILESYSTEM_ERRORS as e:
+        segment["warnings"].append(f"filesystem could not be walked: {e}")
+        return []
+    hits = scan_rootfs_files({"image": image, "files": files, "binaries": {}},
+                             min_str_len, verbose)
+    for hit in hits:
+        hit["filesystem"] = segment["label"]
+    if hits:
+        log(f"{segment['label']}: {len(hits)} component(s) from its files",
+            verbose)
+    return hits
 
 
 def scan_rootfs_files(rootfs, min_str_len=6, verbose=False, progress=None):

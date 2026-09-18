@@ -422,6 +422,43 @@ CramFS 是很多小型 Linux 裝置在 router 用 SquashFS 的位置上用的東
 互相驗證,不只是各自對照規格書。12 個變體(兩種位元組序 × 新舊 mkcramfs ×
 crc_swap × padded)全部讀出**完全相同**的檔案清單與內容。
 
+## JFFS2(以及 LZO)
+
+JFFS2 是裝在 raw NOR / NAND flash 上的**可寫**檔案系統:OpenWrt router 的 overlay、
+大量攝影機與工業裝置的設定與應用程式分區。SquashFS 與 CramFS 是一次建好、整份寫入;
+JFFS2 則是一份**日誌** —— 檔案每改一次就追加一批節點,每一段的最新版本勝出。所以一個
+檔案不在任何一個固定位置,而是由所有曾經寫過它某一部分的節點**重新組出來**。
+
+這決定了 reader 的寫法,比規格書本身更重要:
+
+- **檔案按版本從節點重組。** 每個資料節點帶 offset、長度與版本號;重疊時新版蓋掉
+  舊版。公開樣本裡一個 26 bytes 的檔案就被拆成 offset 0 與 22 兩個節點 —— 只取第一個
+  節點的 reader 會把 26 bytes 的檔案讀成 22 bytes。
+- **刪除檔案也是寫一個節點。** 指向 inode 0 的目錄項就是 unlink。忽略它,就會把裝置
+  刪掉的每個檔案都復活 —— SBOM 列出裝置上根本不存在的軟體,而且下游完全察覺不到。
+- **沒有 superblock。** 唯一判斷一段區域是不是 JFFS2 的方法是它解得開,所以每個節點
+  頭的 CRC 都會驗證:`0x1985` 只有兩個位元組,在壓縮資料裡出現的次數足以造成誤判。
+
+**裝置 flash dump 通常同時有唯讀 rootfs 與後面的 JFFS2 overlay。** 只有第一個檔案系統
+會被當成 rootfs 深入分析(套件資料庫、ELF 依賴),但 **overlay 裡的檔案一樣會逐一掃描**
+—— 出廠後才安裝的套件就在那裡。
+
+### 壓縮
+
+| 壓縮 | 狀態 |
+|---|---|
+| none / zero / zlib / rtime | 讀取,公開樣本驗證 |
+| **LZO** | 讀取 —— 透過 `lzo.py`,純 Python 實作(標準函式庫沒有 LZO) |
+| LZMA | 讀取,參數依 kernel 原始碼(lc=0, lp=0, pb=0);**沒有公開樣本可驗證** |
+| rubin / dynrubin | 報告為讀不到(歷史格式,預設不啟用) |
+
+**LZO 是用差分測試驗證的,不是只靠樣本。** 公開 JFFS2 樣本裡唯一的 LZO 串流只有
+9 bytes,幾乎沒有覆蓋到任何指令。所以 `lzo.py` 是對照 **lzokay**(一個獨立的 C++
+實作)做差分測試:開發時跑了 258 個輸入、5.9 MB 的 LZO(其中 240 段是真實 router、
+BIOS、ESP32 韌體內容),**零差異**。repo 裡的 `tests/lzo_vectors.json` 收錄一組刻意
+挑選、**合起來覆蓋全部指令種類**的參考串流,測試會檢查覆蓋率本身,避免有人改了向量
+而悄悄漏掉某條路徑。
+
 ## UEFI / PC BIOS
 
 BIOS 是唯一一類**字串比對幾乎找不到任何東西**的韌體。一份 EDK2 release build
@@ -818,6 +855,8 @@ fw2sbom/
 ├── esp32.py                # Espressif image、app descriptor、partition table
 ├── uefi.py                 # UEFI flash descriptor、firmware volume、模組清單
 ├── cramfs.py               # 唯讀 CramFS reader(兩種位元組序)
+├── jffs2.py                # 唯讀 JFFS2 reader(節點重組、unlink、CRC 驗證)
+├── lzo.py                  # 純 Python LZO1X 解壓
 ├── vendor_container.py     # TRX / CHK / SHRS / BNEG / FRM 廠商外層檔頭
 ├── image_input.py          # ELF / Intel HEX / S-record / UF2 讀入成平坦映像
 ├── vendor_sbom.py          # 讀入廠商 SBOM 並與分析結果對帳

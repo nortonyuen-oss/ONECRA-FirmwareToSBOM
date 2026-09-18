@@ -136,6 +136,35 @@ CORPUS = [
         "url": UNBLOB + "archive/moxa/frm/moxa_frm/__input__/test.frm",
         "sha256": "91d68c12cb810a8b22c957ad7d9e57b0844eec701638acd0a6b450072d5f4e03",
         "note": "Moxa FRM, industrial gateways.",
+    },    {
+        "path": "formats/jffs2_new_le_zlib.bin",
+        "url": UNBLOB + "filesystem/jffs2/jffs2_new/__input__/fruits.new.le.zlib.jffs2",
+        "sha256": "2c1f77e27694761fa6e8e1264318792db43314f1af9d5e3f14f88e862eece44e",
+        "note": "JFFS2, little-endian, zlib. A file split across two nodes at offsets 0 and 22.",
+    },
+    {
+        "path": "formats/jffs2_new_be_lzo.bin",
+        "url": UNBLOB + "filesystem/jffs2/jffs2_new/__input__/fruits.new.be.lzo.jffs2",
+        "sha256": "0bcb08d0b067c9bd86b8e3836858af5e3ef7047b6b13420739b6e23a48150de2",
+        "note": "JFFS2, big-endian, LZO - read through lzo.py.",
+    },
+    {
+        "path": "formats/jffs2_old_le_rtime.bin",
+        "url": UNBLOB + "filesystem/jffs2/jffs2_old/__input__/fruits.old.le.rtime.jffs2",
+        "sha256": "7e2fd74855cd80a93926d9a77287ce15cc356fc10fe4231f04c2988ea3429104",
+        "note": "JFFS2 with the old 0x1984 magic and the rtime compressor.",
+    },
+    {
+        "path": "formats/jffs2_new_be_nocomp_padded.bin",
+        "url": UNBLOB + "filesystem/jffs2/jffs2_new/__input__/fruits.new.be.nocomp.padded.jffs2",
+        "sha256": "3ed98c9e2183f06cf74ae9bc3226c5c73dc8fa4a50ce23e3ded8bba7cb9a0fcd",
+        "note": "JFFS2, uncompressed, padded out with erased flash.",
+    },
+    {
+        "path": "formats/jffs2_old_be_lzo_padded.bin",
+        "url": UNBLOB + "filesystem/jffs2/jffs2_old/__input__/fruits.old.be.lzo.padded.jffs2",
+        "sha256": "2990007afc9f25cf921049bacb270299a90924ec2f099f7590449db0ad55b4a6",
+        "note": "JFFS2, old magic, big-endian, LZO, padded.",
     },
 ]
 

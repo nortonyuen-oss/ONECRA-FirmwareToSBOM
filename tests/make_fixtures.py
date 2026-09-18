@@ -20,6 +20,7 @@ Usage:
 
 import gzip
 import hashlib
+import json
 import lzma
 import zlib
 import os
@@ -825,6 +826,149 @@ def build_cramfs_rootfs():
             image[cursor:cursor + len(block)] = block
             cursor += len(block)
     return bytes(image)
+
+
+# --- JFFS2 ----------------------------------------------------------------- #
+#
+# The published JFFS2 samples prove the reader decodes every compressor in both
+# byte orders. They do not test the three things that make JFFS2 a log rather
+# than a filesystem image, so these fixtures do:
+#
+#   * a deleted file - a later directory entry pointing at inode 0. The
+#     deleted binary carries a dropbear banner, and dropbear must not appear
+#     in the SBOM: listing software that is not on the device is wrong in a way
+#     nobody downstream can detect;
+#   * a file rewritten across versions, where the newer node must win;
+#   * a device dump with a read-only rootfs and a JFFS2 overlay after it, where
+#     the overlay's contents must not vanish just because it is not first.
+
+JFFS2_MAGIC = 0x1985
+DT_DIR, DT_REG = 4, 8
+S_IFDIR_755, S_IFREG_755 = 0o040755, 0o100755
+
+
+def kernel_crc32(data):
+    """crc32_le with no inversion, as JFFS2 writes it. Written out here so the
+    fixtures do not borrow the reader's idea of the checksum they check."""
+    return (~zlib.crc32(data, 0xFFFFFFFF)) & 0xFFFFFFFF
+
+
+def jffs2_node(order, nodetype, body):
+    head = struct.pack(order + "HHI", JFFS2_MAGIC, nodetype, 12 + len(body))
+    node = head + struct.pack(order + "I", kernel_crc32(head)) + body
+    return node + b"\xff" * (-len(node) % 4)
+
+
+def jffs2_dirent(order, pino, version, ino, name, dtype):
+    raw = name.encode("ascii")
+    body = struct.pack(order + "IIIIBBH", pino, version, ino, 0, len(raw),
+                       dtype, 0) + struct.pack(order + "II", 0, 0) + raw
+    return jffs2_node(order, 0xE001, body)
+
+
+def jffs2_inode(order, ino, version, mode, isize, offset, payload, dsize,
+                compr):
+    body = struct.pack(order + "IIIHHIIIIIIIBBHII", ino, version, mode, 0, 0,
+                       isize, 0, 0, 0, offset, len(payload), dsize, compr, 0,
+                       0, 0, 0) + payload
+    return jffs2_node(order, 0xE002, body)
+
+
+def rtime_pack(data):
+    """The simplest valid rtime stream: every byte, then 'no repeat'."""
+    return b"".join(bytes([value, 0]) for value in data)
+
+
+def lzo_reference(name):
+    """A reference LZO stream from tests/lzo_vectors.json, made by an
+    independent implementation. The fixtures cannot compress LZO themselves -
+    the standard library has no LZO - and should not borrow lzo.py to do it."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "lzo_vectors.json")
+    with open(path, encoding="utf-8") as f:
+        vector = next(v for v in json.load(f)["vectors"] if v["name"] == name)
+    return bytes.fromhex(vector["lzo"]), vector["length"]
+
+
+LZO_TEXT = b"The quick brown fox jumps over the lazy dog. " * 60
+
+
+def build_jffs2(order=">"):
+    """A small JFFS2 rootfs, big-endian as on a MIPS router."""
+    busybox = (b"\x7fELF\x01\x02\x01" + b"\x00" * 9
+               + struct.pack(">HH", 2, 8)              # ET_EXEC, EM_MIPS
+               + strings_blob(["BusyBox v1.36.1 (2023-11-14 20:19:46 UTC)",
+                               "usage: busybox [function]"]))
+    dropbear = (b"\x7fELF\x01\x02\x01" + b"\x00" * 9
+                + struct.pack(">HH", 2, 8)
+                + strings_blob(["SSH-2.0-dropbear_2022.82",
+                                "dropbear: removed in a later upgrade"]))
+    old_release = b'NAME="VendorOS"\nVERSION="0.9"\n'
+    release = (b'NAME="OpenWrt"\nVERSION="22.03.4"\nID=openwrt\n'
+               b'PRETTY_NAME="OpenWrt 22.03.4"\n')
+    motd, motd_size = lzo_reference("text")
+
+    nodes = [
+        # directories
+        jffs2_dirent(order, 1, 1, 2, "bin", DT_DIR),
+        jffs2_inode(order, 2, 1, S_IFDIR_755, 0, 0, b"", 0, 0),
+        jffs2_dirent(order, 1, 2, 3, "etc", DT_DIR),
+        jffs2_inode(order, 3, 1, S_IFDIR_755, 0, 0, b"", 0, 0),
+        # /bin/busybox - zlib, as mkfs.jffs2 writes by default
+        jffs2_dirent(order, 2, 3, 4, "busybox", DT_REG),
+        jffs2_inode(order, 4, 1, S_IFREG_755, len(busybox), 0,
+                    zlib.compress(busybox), len(busybox), 0x06),
+        # /bin/dropbear - written, then deleted by a later unlink
+        jffs2_dirent(order, 2, 4, 5, "dropbear", DT_REG),
+        jffs2_inode(order, 5, 1, S_IFREG_755, len(dropbear), 0, dropbear,
+                    len(dropbear), 0x00),
+        # /etc/os-release - an old version, then the current one over it
+        jffs2_dirent(order, 3, 5, 6, "os-release", DT_REG),
+        jffs2_inode(order, 6, 1, 0o100644, len(old_release), 0,
+                    rtime_pack(old_release), len(old_release), 0x02),
+        jffs2_inode(order, 6, 2, 0o100644, len(release), 0, release,
+                    len(release), 0x00),
+        # /etc/motd - LZO, as on devices built for decompression speed
+        jffs2_dirent(order, 3, 6, 7, "motd", DT_REG),
+        jffs2_inode(order, 7, 1, 0o100644, motd_size, 0, motd, motd_size,
+                    0x07),
+        # the unlink: a newer entry for the same name, pointing at inode 0
+        jffs2_dirent(order, 2, 7, 0, "dropbear", DT_REG),
+    ]
+    body = b"".join(nodes)
+    return body + b"\xff" * (-len(body) % 0x10000)     # to an erase block
+
+
+@fixture("jffs2_rootfs.bin")
+def build_jffs2_rootfs():
+    """A JFFS2 root filesystem on its own, as an overlay partition dump."""
+    return build_jffs2(">")
+
+
+@fixture("cramfs_jffs2_flash.bin")
+def build_cramfs_jffs2_flash():
+    """A device dump: a CramFS rootfs, then a JFFS2 overlay after it.
+
+    The overlay is where packages installed after the factory image land, and
+    it carries a library the rootfs does not. Only the first filesystem is read
+    as the rootfs; the second must still have its files scanned.
+    """
+    rootfs = build_cramfs_rootfs()
+    head = rootfs + b"\xff" * (-len(rootfs) % 0x10000)
+    order = "<"
+    library = (b"\x7fELF\x01\x01\x01" + b"\x00" * 9
+               + struct.pack("<HH", 3, 40)           # ET_DYN, EM_ARM
+               + strings_blob(["libcurl/8.4.0 OpenSSL/3.0.12",
+                               "installed to the overlay after first boot"]))
+    overlay = b"".join([
+        jffs2_dirent(order, 1, 1, 2, "usr", DT_DIR),
+        jffs2_inode(order, 2, 1, S_IFDIR_755, 0, 0, b"", 0, 0),
+        jffs2_dirent(order, 2, 2, 3, "libcurl.so.4", DT_REG),
+        jffs2_inode(order, 3, 1, S_IFREG_755, len(library), 0,
+                    zlib.compress(library), len(library), 0x06),
+    ])
+    overlay += b"\xff" * (-len(overlay) % 0x10000)
+    return head + overlay
 
 
 # --------------------------------------------------------------------------- #
