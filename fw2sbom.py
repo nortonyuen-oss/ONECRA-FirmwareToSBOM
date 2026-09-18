@@ -657,11 +657,22 @@ def chi_square_uniform(data):
     return sum((counts.get(b, 0) - expected) ** 2 / expected for b in range(256))
 
 
+_NON_PRINTABLE = bytes(b for b in range(256) if not 0x20 <= b < 0x7F)
+
+
 def longest_identical_run(data):
-    """Length of the longest run of one repeated byte value."""
+    """Length of the longest run of one repeated byte value.
+
+    Only runs of two or more are matched: every byte is a run of one, so a
+    pattern that also matched those built one match object per byte of the
+    image - fourteen million of them for a 14.7 MB router, 2.7 seconds of a
+    customer's wait. In random-looking data a repeat occurs at about one byte
+    in 256, so this finds the same answer from a few thousand matches.
+    """
     if not data:
         return 0
-    return max(len(m.group()) for m in re.finditer(rb"(.)\1*", data, re.DOTALL))
+    return max((len(m.group()) for m in re.finditer(rb"(.)\1+", data, re.DOTALL)),
+               default=1)
 
 
 def _crc8(data, poly, init=0):
@@ -967,7 +978,10 @@ def analyze_opacity(payload, architecture=None):
     entropy = shannon_entropy(payload)
     run = longest_identical_run(payload)
     chi2 = chi_square_uniform(payload)
-    printable = sum(1 for b in payload if 0x20 <= b < 0x7F) / max(1, len(payload))
+    # Deleting the non-printable bytes and measuring what is left counts the
+    # same thing as a per-byte Python loop, in C.
+    printable = (len(payload.translate(None, _NON_PRINTABLE))
+                 / max(1, len(payload)))
 
     duplicates = 0
     if len(payload) >= 32:
