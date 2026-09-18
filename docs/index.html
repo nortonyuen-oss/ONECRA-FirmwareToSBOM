@@ -309,7 +309,7 @@
     <div class="product">fw2sbom</div>
     <div class="links">
       <a href="changelog.html">版本說明</a>
-      <span class="ver">v1.16.0 · 2026-09-17</span>
+      <span class="ver">v1.17.0 · 2026-09-18</span>
     </div>
   </div>
 </header>
@@ -329,12 +329,12 @@
 
     <div class="getit">
       <div class="dl">
-        <a class="dl-btn" id="dl" href="downloads/fw2sbom-portable-1.16.0.zip">
+        <a class="dl-btn" id="dl" href="downloads/fw2sbom-portable-1.17.0.zip">
           下載 Windows 版
-          <span class="sub">fw2sbom-portable-1.16.0.zip · 10.7 MB</span>
+          <span class="sub">fw2sbom-portable-1.17.0.zip · 10.7 MB</span>
         </a>
         <dl>
-          <dt>版本</dt><dd>1.16.0</dd>
+          <dt>版本</dt><dd>1.17.0</dd>
           <dt>直譯器</dt><dd>CPython 3.12.7 (embeddable)</dd>
           <dt>內容</dt><dd>59 個檔案</dd>
           <dt>簽章</dt><dd>無 — 見右</dd>
@@ -355,12 +355,12 @@
           Windows SmartScreen 的「未知發行者」警告,但也因此沒有數位簽章可以驗。
           請改用雜湊核對:
         </p>
-        <div class="hash">SHA-256<br>db0475c2b3d635e85a66dd8ae96b2364453636cd566255eab545961017bda491</div>
+        <div class="hash">SHA-256<br>ec449492b8254beb6cb653bb3bc9c22c570a431786d6816eb0d10a4e8d96925c</div>
         <pre><span class="c"># Windows PowerShell</span>
-Get-FileHash -Algorithm SHA256 .\fw2sbom-portable-1.16.0.zip
+Get-FileHash -Algorithm SHA256 .\fw2sbom-portable-1.17.0.zip
 
 <span class="c"># macOS / Linux</span>
-shasum -a 256 fw2sbom-portable-1.16.0.zip</pre>
+shasum -a 256 fw2sbom-portable-1.17.0.zip</pre>
         <p>
           這個套件是<strong>可重現</strong>的:同一個原始碼版本、同一個官方 CPython,
           任何人在任何機器上重新打包都會得到位元組完全相同的檔案,因此也會得到上面
@@ -575,9 +575,9 @@ shasum -a 256 fw2sbom-portable-1.16.0.zip</pre>
 <footer>
   <div class="wrap">
     <strong>Onecra</strong>
-    <span>fw2sbom v1.16.0 — 韌體 SBOM 產生器</span>
+    <span>fw2sbom v1.17.0 — 韌體 SBOM 產生器</span>
     <a href="changelog.html" style="color:var(--on-dark);text-decoration:none;border-bottom:1px solid var(--on-dark-rule)">版本說明</a>
-    <span class="right">SHA-256 db0475c2…17bda491</span>
+    <span class="right">SHA-256 ec449492…8d96925c</span>
     <span style="flex-basis:100%;font-size:12.5px;opacity:.75">
       © 2026 Onecra. 專有軟體,保留一切權利。套件內含 python.org 官方發佈的
       CPython(PSF 授權),詳見套件中的 <code style="font-family:var(--mono)">THIRD-PARTY-NOTICES.txt</code>。
@@ -603,7 +603,7 @@ shasum -a 256 fw2sbom-portable-1.16.0.zip</pre>
 // releases at all, the page works exactly as it does without JavaScript.
 (function () {
   var REPO = "nortonyuen-oss/ONECRA-FirmwareToSBOM";
-  var ASSET = "fw2sbom-portable-1.16.0.zip";   // must match the hash above
+  var ASSET = "fw2sbom-portable-1.17.0.zip";   // must match the hash above
   var PREFIX = "fw2sbom-portable-";
 
   var button = document.getElementById("dl");

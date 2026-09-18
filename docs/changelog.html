@@ -154,9 +154,59 @@
 
     <article class="rel">
       <div class="stamp">
+        <span class="ver">1.17.0</span>
+        <span class="date">2026-09-18</span>
+        <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>看得到分析做到哪一步</h2>
+        <p>
+          拖檔案進去之後,頁面會顯示目前在哪一個階段、做到哪裡 ——
+          「解析執行檔 546 / 3274」、「判斷區段 2 / 4:Linux kernel (lzma)」——
+          以及已經用了多少時間。
+        </p>
+        <p>
+          <strong>進度條只在真的做完某件事時才前進,從不靠計時器推。</strong>
+          一條自己慢慢爬、然後卡在 90% 的進度條,是為了讓等待感覺短一點而說的
+          小謊。它也只會往前、不會倒退,而且<strong>只顯示已用時間,不顯示預估
+          剩餘時間</strong> —— 同一個階段在 router、BIOS、攝影機韌體上花的時間
+          差好幾倍,任何剩餘時間的估計都只是猜測。
+        </p>
+        <div class="fixed">
+          <div class="h">修正:網頁漏掉了沒有套件資料庫的 Linux 韌體元件</div>
+          <p>
+            從 v1.9.0 起,逐一掃描 root filesystem 檔案的功能<strong>只有命令列版
+            有,網頁版從來沒有</strong>。任何沒有套件資料庫的 Linux 韌體 ——
+            <strong>大部分 CCTV / NVR 韌體就是</strong> —— 在網頁上會漏掉所有從
+            檔案系統裡找到的元件。
+          </p>
+          <p>
+            <strong>如果你之前用網頁分析過這類韌體,請用這一版重跑。</strong>
+            現在命令列、網頁與測試共用同一條分析流程,不會再各自分歧。
+          </p>
+        </div>
+        <div class="fixed">
+          <div class="h">修正:Linux 映像的架構顯示成「未識別」</div>
+          <p>
+            網頁只看檔頭層級的判定,所以一部 MIPS router 顯示「未識別」,但下載到
+            的文件裡寫得清清楚楚。現在會和命令列一樣,從檔案系統裡的程式讀出架構。
+          </p>
+        </div>
+        <p>
+          另外,量度時發現全圖熵值計算做了可以避免的工作,兩項統計分別快了約 9 倍與
+          11 倍,結果完全不變。
+        </p>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,271,978 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">ec449492b8254beb6cb653bb3bc9c22c570a431786d6816eb0d10a4e8d96925c</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
         <span class="ver">1.16.0</span>
         <span class="date">2026-09-17</span>
-        <span class="tag current">目前版本</span>
       </div>
       <div>
         <h2>認得廠商包在外面那層,以及裡面的 CramFS</h2>
