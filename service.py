@@ -50,6 +50,83 @@ _SBOM_STORE = collections.OrderedDict()
 _SBOM_STORE_LOCK = threading.Lock()
 
 
+# Jobs the page is watching. Bounded and expiring like the result store: a
+# long-running service must not accumulate one entry per file anyone ever
+# dropped on it, which is the mistake the result store once made.
+_JOBS = collections.OrderedDict()
+_JOBS_LOCK = threading.Lock()
+JOBS_MAX = 32
+JOBS_TTL_SECONDS = 3600
+
+
+def _job_new():
+    job_id = uuid.uuid4().hex
+    now = time.time()
+    with _JOBS_LOCK:
+        for old in [k for k, v in _JOBS.items()
+                    if now - v["created"] > JOBS_TTL_SECONDS]:
+            del _JOBS[old]
+        _JOBS[job_id] = {"created": now, "state": core.Progress().state(),
+                         "done": False, "error": None, "result": None}
+        while len(_JOBS) > JOBS_MAX:
+            _JOBS.popitem(last=False)
+    return job_id
+
+
+def _job_update(job_id, **fields):
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        if job is not None:
+            job.update(fields)
+
+
+def _job_get(job_id):
+    with _JOBS_LOCK:
+        job = _JOBS.get(job_id)
+        return dict(job) if job is not None else None
+
+
+def _publish(result):
+    """Store a finished analysis and describe it for the page."""
+    sbom_id = uuid.uuid4().hex
+    out_filename = result["sbom_filename"]
+    _store_put(sbom_id, {
+        "json": result["sbom_json"], "json_name": out_filename,
+        "spdx": result["spdx_json"], "spdx_name": result["spdx_filename"],
+        "xlsx": result["evidence_xlsx"],
+        "xlsx_name": result["evidence_filename"],
+    })
+    return {
+        "components": result["components"],
+        "n_strings": result["n_strings"],
+        "cortex_m": result["cortex_m"],
+        "architecture": result["architecture"],
+        "file_size_bytes": result["file_size_bytes"],
+        "container": result["container"],
+        "opacity": result["opacity"],
+        "vendor": result["vendor"],
+        "vendor_errors": result["vendor_errors"],
+        "download_url": f"/download/{sbom_id}",
+        "download_filename": out_filename,
+        "spdx_url": f"/spdx/{sbom_id}",
+        "spdx_filename": result["spdx_filename"],
+        "evidence_url": f"/evidence/{sbom_id}",
+        "evidence_filename": result["evidence_filename"],
+    }
+
+
+def _run_job(job_id, filename, data, vendor_uploads):
+    """The worker thread. Every outcome ends in done=True - a job that dies
+    without saying so leaves the page polling a bar that never moves."""
+    progress = core.Progress(lambda state: _job_update(job_id, state=state))
+    try:
+        result = analyze_bytes(filename, data, vendor_uploads, progress)
+        _job_update(job_id, result=_publish(result), done=True,
+                    state=progress.state())
+    except Exception as e:                      # reported, never swallowed
+        _job_update(job_id, error=f"analysis failed: {e}", done=True)
+
+
 def _store_put(sbom_id, entry):
     """Insert one result, expiring old entries and capping the total."""
     now = time.time()
@@ -197,6 +274,34 @@ PAGE_TEMPLATE = """<!doctype html>
   .notice b { color: var(--heading); }
   .notice ul { margin: .5rem 0 0; padding-left: 1.1rem; color: var(--muted); }
   .notice li { margin: .15rem 0; }
+  .progress {
+    margin-top: 1rem; background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: .9rem 1rem; box-shadow: var(--shadow);
+  }
+  .progress-head, .progress-foot {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 1rem;
+  }
+  .progress-head { font-size: .9rem; margin-bottom: .5rem; }
+  #progress-stage { font-weight: 600; color: var(--heading); }
+  #progress-percent { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .progress-track {
+    height: 8px; border-radius: 999px; overflow: hidden;
+    background: color-mix(in srgb, var(--border) 70%, transparent);
+  }
+  .progress-fill {
+    height: 100%; width: 0%; border-radius: 999px; background: var(--accent);
+    transition: width .25s ease-out;
+  }
+  .progress.done .progress-fill { background: var(--high); }
+  .progress.failed .progress-fill { background: var(--err); }
+  .progress.failed #progress-stage { color: var(--err); }
+  .progress-foot {
+    margin-top: .45rem; font-size: .78rem; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  #progress-detail { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+  #progress-meta { white-space: nowrap; }
+  @media (prefers-reduced-motion: reduce) { .progress-fill { transition: none; } }
   #vendor-zone {
     margin-top: .75rem; border: 1px dashed var(--border); border-radius: 12px;
     padding: .9rem 1rem; background: var(--card); font-size: .85rem;
@@ -264,6 +369,21 @@ PAGE_TEMPLATE = """<!doctype html>
       </p>
       <input type="file" id="vendor-input" accept=".json,application/json" multiple>
       <div id="vendor-list"></div>
+    </div>
+    <div class="progress" id="progress" hidden>
+      <div class="progress-head">
+        <span id="progress-stage">上傳檔案</span>
+        <span id="progress-percent">0%</span>
+      </div>
+      <div class="progress-track" id="progress-track" role="progressbar"
+           aria-labelledby="progress-stage" aria-valuemin="0" aria-valuemax="100"
+           aria-valuenow="0">
+        <div class="progress-fill" id="progress-fill"></div>
+      </div>
+      <div class="progress-foot">
+        <span id="progress-detail"></span>
+        <span id="progress-meta"></span>
+      </div>
     </div>
     <div id="status"></div>
 
@@ -352,10 +472,158 @@ function levelClass(level) {
   return level === 'high' ? 'lvl-high' : level === 'medium' ? 'lvl-medium' : 'lvl-low';
 }
 
+// --- Progress ------------------------------------------------------------
+//
+// The bar moves only when the server reports finished work - never on a
+// timer. A bar that creeps forward by itself and then stalls at 90% is a small
+// lie told to make a wait feel shorter, and a tool whose whole job is to say
+// what it did and did not read has no business telling it. For the same
+// reason it shows the time elapsed and no estimate of the time left: how long
+// a stage takes differs several-fold between a router, a BIOS and a camera,
+// so any estimate would be a guess dressed as a measurement.
+
+const STAGES = {
+  upload: '上傳檔案',
+  reading: '辨識格式、去除封包框',
+  architecture: '判定指令集',
+  entropy: '量度全圖熵值',
+  segments: '拆解與掃描各區段',
+  sbom: '產生 SBOM',
+  evidence: '產生 SPDX 與證據報告',
+  done: '完成',
+};
+const STATISTICS = {
+  entropy: '熵值', runs: '重複位元組', distribution: '位元組分佈', blocks: '重複區塊',
+};
+const UPLOAD_SHARE = 10;          // percent of the bar the upload occupies
+const TOTAL_STEPS = 7;            // the upload plus the server's six stages
+
+const progressBox = document.getElementById('progress');
+const progressFill = document.getElementById('progress-fill');
+const progressTrack = document.getElementById('progress-track');
+const progressStage = document.getElementById('progress-stage');
+const progressPercent = document.getElementById('progress-percent');
+const progressDetail = document.getElementById('progress-detail');
+const progressMeta = document.getElementById('progress-meta');
+
+let currentRun = 0;
+let startedAt = 0;
+let step = 1;
+let clock = null;
+
+function describe(detail) {
+  if (!detail) return '';
+  const where = detail.count ? detail.index + ' / ' + detail.count : '';
+  switch (detail.kind) {
+    case 'walk': return '拆解容器結構…';
+    case 'judge': return '判斷區段 ' + where + '：' + (detail.label || '');
+    case 'statistic':
+      return detail.label
+        ? '判斷區段 ' + where + '（' + (STATISTICS[detail.name] || detail.name) + '）：' + detail.label
+        : '已完成：' + (STATISTICS[detail.name] || detail.name);
+    case 'segment': return '掃描區段 ' + where + '：' + (detail.label || '');
+    case 'binaries': return '解析執行檔 ' + where;
+    case 'files': return '掃描檔案 ' + where;
+    case 'strides': return '嘗試封包框間距 ' + where;
+    default: return '';
+  }
+}
+
+function elapsed() {
+  return ((performance.now() - startedAt) / 1000).toFixed(1);
+}
+
+function drawMeta() {
+  progressMeta.textContent = '第 ' + step + ' 步 / 共 ' + TOTAL_STEPS + ' 步 · 已用 ' + elapsed() + ' 秒';
+}
+
+function drawBar(percent, stage, detail) {
+  const shown = Math.max(0, Math.min(100, percent));
+  progressFill.style.width = shown + '%';
+  progressTrack.setAttribute('aria-valuenow', String(Math.round(shown)));
+  progressPercent.textContent = Math.floor(shown) + '%';
+  progressStage.textContent = STAGES[stage] || stage || '';
+  progressDetail.textContent = describe(detail);
+  progressDetail.title = progressDetail.textContent;
+  drawMeta();
+}
+
+function startProgress() {
+  progressBox.hidden = false;
+  progressBox.classList.remove('done', 'failed');
+  startedAt = performance.now();
+  step = 1;
+  drawBar(0, 'upload', null);
+  clearInterval(clock);
+  // Only the elapsed-time text ticks on its own. The bar does not.
+  clock = setInterval(drawMeta, 100);
+}
+
+function stopProgress(outcome, message) {
+  clearInterval(clock);
+  clock = null;
+  if (outcome === 'done') {
+    progressBox.classList.add('done');
+    step = TOTAL_STEPS;
+    drawBar(100, 'done', null);
+    progressDetail.textContent = '共用 ' + elapsed() + ' 秒';
+    progressMeta.textContent = '';
+  } else {
+    progressBox.classList.add('failed');
+    progressStage.textContent = message;
+    progressDetail.textContent = '';
+    progressMeta.textContent = '於 ' + elapsed() + ' 秒時停止';
+  }
+}
+
+// XMLHttpRequest rather than fetch, because only XHR reports how much of an
+// upload has been sent - and a 64 MB camera dump is not instant even locally.
+function upload(url, form, onProgress) {
+  return new Promise(function (resolve, reject) {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url);
+    xhr.upload.onprogress = function (event) {
+      if (event.lengthComputable) onProgress(event.loaded / event.total);
+    };
+    xhr.onload = function () {
+      let body;
+      try { body = JSON.parse(xhr.responseText); }
+      catch (e) { reject(new Error('伺服器回應格式錯誤')); return; }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body);
+      else reject(new Error(body.error || ('HTTP ' + xhr.status)));
+    };
+    xhr.onerror = function () { reject(new Error('連線失敗')); };
+    xhr.send(form);
+  });
+}
+
+async function watch(job, run) {
+  while (run === currentRun) {
+    const res = await fetch(job.progress_url, { cache: 'no-store' });
+    const body = await res.json();
+    if (!res.ok) throw new Error(body.error || ('HTTP ' + res.status));
+    if (run !== currentRun) return null;
+    const state = body.state || {};
+    step = Math.min(TOTAL_STEPS, (state.step || 0) + 1);
+    drawBar(UPLOAD_SHARE + (100 - UPLOAD_SHARE) * (state.percent || 0) / 100,
+            state.stage, state.detail);
+    if (body.done) {
+      if (body.error) throw new Error(body.error);
+      return body.result;
+    }
+    await new Promise(function (r) { setTimeout(r, 250); });
+  }
+  return null;                    // a newer file superseded this one
+}
+
 async function handleFile(file) {
   if (!file) return;
-  setStatus('分析中: ' + file.name + ' ...');
+  // A new file - or a vendor SBOM added mid-run - supersedes whatever was
+  // running, so the older loop stops drawing instead of fighting this one.
+  const run = ++currentRun;
+  setStatus('');
   card.classList.remove('show');
+  startProgress();
 
   lastFirmware = file;
   const fd = new FormData();
@@ -364,26 +632,21 @@ async function handleFile(file) {
     fd.append('vendor', vendorFile, vendorFile.name);
   }
 
-  let res;
-  try {
-    res = await fetch('/analyze', { method: 'POST', body: fd });
-  } catch (e) {
-    setStatus('連線失敗: ' + e, true);
-    return;
-  }
-
   let data;
   try {
-    data = await res.json();
+    const job = await upload('/analyze/start', fd, function (fraction) {
+      if (run === currentRun) drawBar(UPLOAD_SHARE * fraction, 'upload', null);
+    });
+    if (run !== currentRun) return;
+    data = await watch(job, run);
+    if (data === null) return;
   } catch (e) {
-    setStatus('伺服器回應格式錯誤', true);
+    if (run !== currentRun) return;
+    stopProgress('failed', '錯誤：' + e.message);
+    setStatus('錯誤: ' + e.message, true);
     return;
   }
-
-  if (!res.ok) {
-    setStatus('錯誤: ' + (data.error || res.status), true);
-    return;
-  }
+  stopProgress('done');
 
   setStatus(data.components.length + ' 個 component 已識別（' + file.name + '）');
   meta.innerHTML =
@@ -661,8 +924,12 @@ def vendor_findings(report):
     return findings
 
 
-def analyze_bytes(filename, data, vendor_uploads=None):
-    """Run the fw2sbom pipeline in-process on in-memory bytes."""
+def analyze_bytes(filename, data, vendor_uploads=None, progress=None):
+    """Run the fw2sbom pipeline in-process on in-memory bytes.
+
+    `progress` is a core.Progress; the page watches it through /progress/<id>.
+    """
+    progress = progress or core.Progress()
     delivered = data
     try:
         source = image_input.detect_and_load(data)
@@ -674,12 +941,16 @@ def analyze_bytes(filename, data, vendor_uploads=None):
     name = filename or "firmware.bin"
     stem = os.path.splitext(os.path.basename(name))[0]
     result = core.run_analysis(delivered, source, name,
-                               vendor_documents=vendor_documents)
+                               vendor_documents=vendor_documents,
+                               progress=progress)
     container, payload = result["container"], result["payload"]
     arm_info, opacity = result["arm_info"], result["opacity"]
     standards, strings = result["standards"], result["strings"]
     hits, vendor, bom = result["hits"], result["vendor"], result["bom"]
+    rootfs_architecture = ((result["rootfs"] or {}).get("binaries") or {}).get(
+        "architecture")
 
+    progress.enter("evidence")
     spdx = spdx_report.build_spdx(bom, name, core.TOOL_NAME, core.TOOL_VERSION)
     sbom_filename = stem + "_SBOM.cdx.json"
     context = core.build_evidence_context(
@@ -688,6 +959,7 @@ def analyze_bytes(filename, data, vendor_uploads=None):
     evidence = io.BytesIO()
     evidence_report.build_workbook(context, bom).save(evidence)
     summary = summarise(bom)
+    progress.finish()
     return {
         "sbom_json": json.dumps(bom, indent=2),
         "sbom_filename": sbom_filename,
@@ -698,7 +970,14 @@ def analyze_bytes(filename, data, vendor_uploads=None):
         "components": summary,
         "n_strings": len(strings),
         "cortex_m": arm_info["looks_like_cortex_m"],
-        "architecture": arm_info["label"],
+        # The header-level identification when there is one, and otherwise
+        # what the ELF binaries in the root filesystem say - which is how the
+        # command line has always reported a Linux image. The page used only
+        # the first, so it called a MIPS router "unidentified" while the
+        # document it handed over named the instruction set correctly.
+        "architecture": arm_info["label"] or (
+            f"{rootfs_architecture} (from the ELF binaries in the root filesystem)"
+            if rootfs_architecture else None),
         "file_size_bytes": len(delivered),
         "input_format": source["format"],
         "reassembled": source["converted"],
@@ -729,6 +1008,15 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_get(self, write_body):
         if self.path == "/":
             self._send_html(PAGE, write_body=write_body)
+        elif self.path.startswith("/progress/"):
+            job = _job_get(self.path[len("/progress/"):])
+            if job is None:
+                self._send_json({"error": "no such analysis (it may have "
+                                          "expired)"}, 404)
+            else:
+                self._send_json({"state": job["state"], "done": job["done"],
+                                 "error": job["error"],
+                                 "result": job["result"]})
         elif self.path.startswith("/download/"):
             self._send_attachment(self.path[len("/download/"):], "json",
                                   "application/json", write_body)
@@ -761,7 +1049,9 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
 
     def do_POST(self):
-        if self.path != "/analyze":
+        # /analyze answers when the analysis is done; /analyze/start answers at
+        # once with a job the page can watch. Same upload, same checks.
+        if self.path not in ("/analyze", "/analyze/start"):
             self.send_error(404, "not found")
             return
 
@@ -801,38 +1091,21 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "input file too large"}, 400)
             return
 
+        if self.path == "/analyze/start":
+            job_id = _job_new()
+            threading.Thread(target=_run_job, name=f"analysis-{job_id[:8]}",
+                             args=(job_id, filename, data, vendor_uploads),
+                             daemon=True).start()
+            self._send_json({"job": job_id, "progress_url": f"/progress/{job_id}"},
+                            202)
+            return
+
         try:
             result = analyze_bytes(filename, data, vendor_uploads)
         except Exception as e:
             self._send_json({"error": f"analysis failed: {e}"}, 500)
             return
-
-        sbom_id = uuid.uuid4().hex
-        out_filename = result["sbom_filename"]
-        _store_put(sbom_id, {
-            "json": result["sbom_json"], "json_name": out_filename,
-            "spdx": result["spdx_json"], "spdx_name": result["spdx_filename"],
-            "xlsx": result["evidence_xlsx"],
-            "xlsx_name": result["evidence_filename"],
-        })
-
-        self._send_json({
-            "components": result["components"],
-            "n_strings": result["n_strings"],
-            "cortex_m": result["cortex_m"],
-            "architecture": result["architecture"],
-            "file_size_bytes": result["file_size_bytes"],
-            "container": result["container"],
-            "opacity": result["opacity"],
-            "vendor": result["vendor"],
-            "vendor_errors": result["vendor_errors"],
-            "download_url": f"/download/{sbom_id}",
-            "download_filename": out_filename,
-            "spdx_url": f"/spdx/{sbom_id}",
-            "spdx_filename": result["spdx_filename"],
-            "evidence_url": f"/evidence/{sbom_id}",
-            "evidence_filename": result["evidence_filename"],
-        })
+        self._send_json(_publish(result))
 
     def log_message(self, fmt, *args):
         sys.stderr.write("[fw2sbom-service] " + (fmt % args) + "\n")

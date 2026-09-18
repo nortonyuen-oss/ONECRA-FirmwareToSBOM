@@ -664,7 +664,8 @@ def read_package_file_lists(image, files, manager):
     return owners
 
 
-def analyze_binaries(image, files, package_info=None, verbose=False, log=None):
+def analyze_binaries(image, files, package_info=None, verbose=False, log=None,
+                     progress=None):
     """Parse every ELF in the filesystem and relate them to each other.
 
     Returns the instruction set (a Linux image has no vector table to
@@ -679,8 +680,12 @@ def analyze_binaries(image, files, package_info=None, verbose=False, log=None):
     modules = []
     warnings = []
     scanned = 0
+    report = progress or (lambda *_a, **_k: None)
+    listing = sorted(files.items())
 
-    for path, node in sorted(files.items()):
+    for position, (path, node) in enumerate(listing, 1):
+        report(position / len(listing),
+               {"kind": "binaries", "index": position, "count": len(listing)})
         if len(binaries) >= MAX_BINARIES or scanned > MAX_SCANNED_BYTES:
             warnings.append("stopped reading binaries at the configured cap")
             break
@@ -793,7 +798,7 @@ MAX_SCAN_BYTES = 192 * 1024 * 1024
 MAX_SCAN_FILE_BYTES = 32 * 1024 * 1024
 
 
-def unclaimed_files(rootfs, log=None):
+def unclaimed_files(rootfs, log=None, progress=None):
     """Yield (path, contents) for files no package in the image accounts for.
 
     The package manager's record is authoritative for the files it covers, so
@@ -811,8 +816,12 @@ def unclaimed_files(rootfs, log=None):
     if image is None:
         return
 
+    report = progress or (lambda *_a, **_k: None)
+    listing = sorted(files.items())
     scanned = count = skipped = 0
-    for path, node in sorted(files.items()):
+    for position, (path, node) in enumerate(listing, 1):
+        report(position / len(listing),
+               {"kind": "files", "index": position, "count": len(listing)})
         if count >= MAX_SCAN_FILES or scanned >= MAX_SCAN_BYTES:
             say(f"rootfs: stopped scanning after {count} files")
             return
@@ -834,7 +843,7 @@ def unclaimed_files(rootfs, log=None):
         yield path, blob
 
 
-def inspect_filesystem(segment, verbose=False, log=None):
+def inspect_filesystem(segment, verbose=False, log=None, progress=None):
     """Read what an on-image filesystem can tell us about its contents."""
     say = log or (lambda *_a, **_k: None)
     image = segment.get("filesystem")
@@ -857,7 +866,8 @@ def inspect_filesystem(segment, verbose=False, log=None):
     else:
         say("rootfs: no package database found")
 
-    binaries = analyze_binaries(image, files, packages, verbose, say)
+    binaries = analyze_binaries(image, files, packages, verbose, say,
+                                progress=progress)
     segment["warnings"].extend(binaries["warnings"])
 
     return {"image": image, "files": files, "packages": packages,

@@ -25,9 +25,13 @@ import shutil
 import struct
 import sys
 import tempfile
+import threading
 import time
 import unittest
+import urllib.error
+import urllib.request
 import zipfile
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -1481,6 +1485,19 @@ class ServiceTest(unittest.TestCase):
         self.assertIn("busybox", names)
         self.assertIn("mbedtls", names)
 
+    def test_the_page_names_the_architecture_it_knows(self):
+        """A Linux image has no vector table, so the instruction set comes from
+        the ELF binaries in its root filesystem. The command line always said
+        so; the page used only the header-level answer and called a MIPS
+        router "unidentified" while the document it handed over named it."""
+        result = service.analyze_bytes("cramfs_rootfs.bin",
+                                       fixture("cramfs_rootfs.bin"))
+        self.assertIn("ARM", result["architecture"])
+        self.assertIn("root filesystem", result["architecture"])
+        header = service.analyze_bytes("cortexm_rtos.bin",
+                                       fixture("cortexm_rtos.bin"))
+        self.assertEqual(header["architecture"], "ARM Cortex-M (Thumb)")
+
     def test_the_screen_list_matches_the_document(self):
         """A customer reads the list in the browser and hands the download to
         an auditor. If the two disagree there is no way to tell which is wrong.
@@ -2168,6 +2185,197 @@ class CramFSTest(unittest.TestCase):
         evidence = busybox["evidence"]["identity"][0]["methods"][0]["value"]
         self.assertIn("busybox", evidence)
         self.assertNotIn("opkg-status", evidence)
+
+
+# --------------------------------------------------------------------------- #
+
+class ProgressTest(unittest.TestCase):
+    """The bar a customer watches while their firmware is analysed.
+
+    It moves only when work actually finishes. A bar that creeps forward on a
+    timer and stalls at 90% is a small lie told to make a wait feel shorter,
+    and this tool's whole job is to say plainly what it did and did not do.
+    """
+
+    def trace(self, name):
+        events = []
+        data = fixture(name)
+        core.run_analysis(data, image_input.detect_and_load(data), name,
+                          progress=core.Progress(events.append))
+        return events
+
+    def test_the_bar_never_moves_backwards(self):
+        for name in ("router_uimage.bin", "uefi_volume.bin", "cramfs_rootfs.bin",
+                     "esp32_flash.bin", "cortexm_rtos.bin"):
+            with self.subTest(fixture=name):
+                percents = [e["percent"] for e in self.trace(name)]
+                self.assertTrue(percents)
+                self.assertEqual(percents, sorted(percents))
+                self.assertLessEqual(percents[-1], 100)
+
+    def test_the_stages_arrive_in_order(self):
+        order = [key for key, _share in core.PROGRESS_STAGES]
+        seen = []
+        for event in self.trace("router_uimage.bin"):
+            if event["stage"] not in seen:
+                seen.append(event["stage"])
+        self.assertEqual(seen, order[:len(seen)])
+        self.assertEqual(seen[-1], "sbom")        # the service does the rest
+
+    def test_each_step_is_numbered_against_the_whole(self):
+        for event in self.trace("uefi_volume.bin"):
+            self.assertEqual(event["steps"], len(core.PROGRESS_STAGES))
+            self.assertGreaterEqual(event["step"], 1)
+
+    def test_real_counts_are_reported_while_files_are_read(self):
+        """The router's rootfs is where the long wait is, and a customer
+        watching "312 / 467" knows it is working; one watching a still bar
+        does not."""
+        kinds = {(e["detail"] or {}).get("kind")
+                 for e in self.trace("cramfs_rootfs.bin")}
+        self.assertIn("binaries", kinds)
+        self.assertIn("segment", kinds)
+
+    def test_a_count_never_exceeds_its_total(self):
+        for event in self.trace("cramfs_rootfs.bin"):
+            detail = event["detail"] or {}
+            if "count" in detail:
+                self.assertLessEqual(detail["index"], detail["count"], detail)
+
+    def test_nothing_is_reported_without_a_sink(self):
+        """The command line has its own verbose log and must pay nothing."""
+        progress = core.Progress()
+        progress.enter("reading")
+        progress.within(0.5)
+        progress.finish()
+        self.assertEqual(progress.percent, 100.0)
+
+    def test_the_percentage_is_clamped(self):
+        events = []
+        progress = core.Progress(events.append)
+        progress.enter("segments")
+        progress.within(7.0)
+        progress.within(-3.0)
+        self.assertEqual([e["percent"] for e in events][-1],
+                         events[-2]["percent"])
+        self.assertLessEqual(events[-1]["percent"], 100)
+
+    def test_an_unknown_stage_is_a_mistake_not_a_silent_jump(self):
+        with self.assertRaises(ValueError):
+            core.Progress().enter("decrypting")
+
+    def test_progress_does_not_change_the_answer(self):
+        """Reporting is observation. The document must be identical with it
+        and without it - which is what lets the command line run without."""
+        data = fixture("cramfs_rootfs.bin")
+        source = image_input.detect_and_load(data)
+        quiet = core.run_analysis(data, source, "x")["bom"]["components"]
+        watched = core.run_analysis(data, source, "x",
+                                    progress=core.Progress(lambda _s: None))
+        self.assertEqual(
+            [(c["name"], c.get("version")) for c in quiet],
+            [(c["name"], c.get("version"))
+             for c in watched["bom"]["components"]])
+
+
+class AnalysisJobTest(unittest.TestCase):
+    """The page starts an analysis, then watches it, over HTTP."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = service.Server(("127.0.0.1", 0), service.Handler)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever,
+                                      daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def url(self, path):
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def post(self, path, name, blob):
+        boundary = "fw2sbomjobtest"
+        body = (f"--{boundary}\r\nContent-Disposition: form-data; "
+                f'name="file"; filename="{name}"\r\n'
+                f"Content-Type: application/octet-stream\r\n\r\n").encode()
+        body += blob + f"\r\n--{boundary}--\r\n".encode()
+        request = urllib.request.Request(
+            self.url(path), data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.status, json.loads(response.read())
+
+    def poll(self, progress_url, limit=120):
+        states = []
+        deadline = time.time() + limit
+        while time.time() < deadline:
+            with urllib.request.urlopen(self.url(progress_url),
+                                        timeout=30) as response:
+                body = json.loads(response.read())
+            states.append(body["state"])
+            if body["done"]:
+                return body, states
+            time.sleep(0.05)
+        self.fail("the analysis never reported done")
+
+    def test_starting_answers_at_once_with_a_job(self):
+        status, started = self.post("/analyze/start", "fw.bin",
+                                    fixture("cramfs_rootfs.bin"))
+        self.assertEqual(status, 202)
+        self.assertRegex(started["job"], r"^[0-9a-f]{32}$")
+        self.assertEqual(started["progress_url"], "/progress/" + started["job"])
+        self.poll(started["progress_url"])
+
+    def test_a_job_ends_with_the_same_answer_as_waiting_for_it(self):
+        blob = fixture("cramfs_rootfs.bin")
+        _status, started = self.post("/analyze/start", "fw.bin", blob)
+        final, states = self.poll(started["progress_url"])
+        self.assertIsNone(final["error"])
+        self.assertEqual(final["state"]["percent"], 100.0)
+        self.assertEqual(final["state"]["stage"], "done")
+
+        _status, direct = self.post("/analyze", "fw.bin", blob)
+        self.assertEqual(
+            sorted((c["name"], c["version"]) for c in final["result"]["components"]),
+            sorted((c["name"], c["version"]) for c in direct["components"]))
+        percents = [state["percent"] for state in states]
+        self.assertEqual(percents, sorted(percents))
+
+    def test_the_finished_job_links_to_downloads_that_work(self):
+        _status, started = self.post("/analyze/start", "fw.bin",
+                                     fixture("cramfs_rootfs.bin"))
+        final, _states = self.poll(started["progress_url"])
+        with urllib.request.urlopen(self.url(final["result"]["download_url"]),
+                                    timeout=30) as response:
+            document = json.loads(response.read())
+        self.assertEqual(document["bomFormat"], "CycloneDX")
+
+    def test_a_failure_is_reported_rather_than_left_running(self):
+        """A job that dies without saying so leaves the page polling a bar that
+        never moves again - the worst thing a progress bar can do."""
+        with mock.patch.object(service, "analyze_bytes",
+                               side_effect=RuntimeError("the parser fell over")):
+            _status, started = self.post("/analyze/start", "fw.bin", b"\x00" * 64)
+            final, _states = self.poll(started["progress_url"])
+        self.assertTrue(final["done"])
+        self.assertIn("the parser fell over", final["error"])
+        self.assertIsNone(final["result"])
+
+    def test_an_unknown_job_is_a_404_not_a_hang(self):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(self.url("/progress/" + "0" * 32), timeout=30)
+        self.assertEqual(caught.exception.code, 404)
+
+    def test_the_job_store_is_bounded(self):
+        """A service left running must not keep one entry per file anyone ever
+        dropped on it - the mistake the result store once made."""
+        for _ in range(service.JOBS_MAX + 10):
+            service._job_new()
+        self.assertLessEqual(len(service._JOBS), service.JOBS_MAX)
 
 
 # --------------------------------------------------------------------------- #

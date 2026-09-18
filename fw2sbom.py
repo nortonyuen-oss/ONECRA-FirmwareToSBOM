@@ -52,7 +52,7 @@ import uefi
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.16.0"
+TOOL_VERSION = "1.17.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -846,14 +846,29 @@ def _verify_framing(data, rec_start, stride, const_col, const_val, counter_col):
     return first, records
 
 
-def detect_packet_container(data, verbose=False):
-    """Detect fixed-stride record framing. Returns a layout dict, or None."""
+def detect_packet_container(data, verbose=False, progress=None):
+    """Detect fixed-stride record framing. Returns a layout dict, or None.
+
+    Every stride from 8 to 256 is tried at two probe points, and on most
+    images - which have no framing at all - that search is the whole of the
+    first stage: 3.4 seconds on a 14.7 MB router with nothing to find. So it
+    reports per stride tried, which is the only honest answer to "is it still
+    doing something?" for a search that is going to come back empty.
+    """
     if len(data) < CONTAINER_MIN_STRIDE * CONTAINER_MIN_RECORDS:
         return None
 
+    report = progress or (lambda *_a, **_k: None)
+    probes = sorted({min(4096, len(data) // 8), len(data) // 2})
+    strides = range(CONTAINER_MIN_STRIDE, CONTAINER_MAX_STRIDE + 1)
+    tried, attempts = 0, len(probes) * len(strides)
     best = None
-    for probe in sorted({min(4096, len(data) // 8), len(data) // 2}):
-        for stride in range(CONTAINER_MIN_STRIDE, CONTAINER_MAX_STRIDE + 1):
+    for probe in probes:
+        for stride in strides:
+            tried += 1
+            if tried % 8 == 0:
+                report(tried / attempts, {"kind": "strides", "index": tried,
+                                          "count": attempts})
             available = (len(data) - probe) // stride
             if available < CONTAINER_MIN_RECORDS:
                 continue
@@ -967,7 +982,7 @@ def deframe(data, container):
     return bytes(out)
 
 
-def analyze_opacity(payload, architecture=None):
+def analyze_opacity(payload, architecture=None, progress=None):
     """Decide whether a payload is analyzable plaintext or opaque bytes.
 
     `architecture` is the instruction set identified by analyze_architecture(); a
@@ -975,9 +990,16 @@ def analyze_opacity(payload, architecture=None):
     legitimately reaches ~7.0 bits/byte and would otherwise be misreported as
     packed or partially compressed.
     """
+    # Five statistics, each a full pass over the payload. On a 16 MB region
+    # that is seconds of work, so each reports when it has finished - placed
+    # by its measured share of the time, moved only when it is actually done.
+    report = progress or (lambda *_a, **_k: None)
     entropy = shannon_entropy(payload)
+    report(0.16, {"kind": "statistic", "name": "entropy"})
     run = longest_identical_run(payload)
+    report(0.75, {"kind": "statistic", "name": "runs"})
     chi2 = chi_square_uniform(payload)
+    report(0.91, {"kind": "statistic", "name": "distribution"})
     # Deleting the non-printable bytes and measuring what is left counts the
     # same thing as a per-byte Python loop, in C.
     printable = (len(payload.translate(None, _NON_PRINTABLE))
@@ -988,6 +1010,7 @@ def analyze_opacity(payload, architecture=None):
         blocks = collections.Counter(payload[i:i + 16]
                                      for i in range(0, len(payload) - 15, 16))
         duplicates = sum(c - 1 for c in blocks.values() if c > 1)
+    report(1.0, {"kind": "statistic", "name": "blocks"})
 
     compression = next((name for magic, name in COMPRESSION_MAGICS
                         if payload[:16].startswith(magic)), None)
@@ -1213,7 +1236,8 @@ def confidence_level(c):
 # Segment analysis
 # --------------------------------------------------------------------------- #
 
-def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None):
+def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None,
+                     progress=None):
     """Split a payload into containers and analyse each one separately.
 
     A flat microcontroller image produces exactly one segment covering the
@@ -1226,8 +1250,14 @@ def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None):
     `strings`, `hits` and `opacity`; `rootfs` is the filesystem contents if one
     was readable.
     """
+    report = progress or (lambda *_a, **_k: None)
     log_fn = (lambda msg: log(msg, verbose)) if verbose else None
+    report(0.0, {"kind": "walk"})
     segments, warnings = container.walk(payload, verbose, log_fn)
+    # Judging every segment's entropy is its own real share of the work - on a
+    # BIOS it is most of it, a 16 MB decompressed volume measured byte by byte
+    # - and leaving it unreported held the bar still for 4.5 seconds.
+    WALKED, JUDGED = 0.05, 0.3
 
     # Nothing recognised: treat the payload as one segment, exactly as the
     # tool did before containers existed.
@@ -1236,12 +1266,35 @@ def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None):
                      "label": "firmware image", "content": payload,
                      "expanded": False, "warnings": []}]
 
-    judge_segments(segments, payload, architecture, verbose)
+    judge_segments(segments, payload, architecture, verbose,
+                   progress=lambda f, d=None: report(
+                       WALKED + (JUDGED - WALKED) * f, d))
+
+    # Weighted by size, because extracting strings and matching signatures is
+    # roughly linear in bytes: a 16 MB decompressed volume and a 24-byte header
+    # are not the same amount of work, and counting them as one segment each
+    # would have the bar racing through headers and then sitting still.
+    def weight(segment):
+        body = segment["content"]
+        return max(1, len(body) if body is not None else segment["length"])
+
+    total = sum(weight(segment) for segment in segments) or 1
+    done = 0
 
     rootfs = None
-    for segment in segments:
+    for index, segment in enumerate(segments, 1):
+        low = JUDGED + (1 - JUDGED) * done / total
+        high = JUDGED + (1 - JUDGED) * (done + weight(segment)) / total
+        detail = {"kind": "segment", "index": index, "count": len(segments),
+                  "label": segment["label"]}
+        report(low, detail)
         if segment["kind"] == "filesystem" and rootfs is None:
-            rootfs = container.inspect_filesystem(segment, verbose, log_fn)
+            def inner(fraction, sub=None, low=low, high=high, detail=detail):
+                report(low + (high - low) * fraction,
+                       dict(detail, **(sub or {})))
+            rootfs = container.inspect_filesystem(segment, verbose, log_fn,
+                                                  progress=inner)
+        done += weight(segment)
         content = segment["content"]
         if content is None:
             segment["strings"], segment["hits"] = [], []
@@ -1252,6 +1305,7 @@ def analyze_segments(payload, min_str_len=6, verbose=False, architecture=None):
         if segment["hits"]:
             log(f"segment {segment['label']}: {len(segment['hits'])} component(s) "
                 f"from {len(segment['strings'])} strings", verbose)
+        report(high, detail)
 
     return segments, rootfs, warnings
 
@@ -1273,7 +1327,8 @@ def looks_blank(blob, sample=1 << 20):
     return blank >= BLANK_RATIO * len(window)
 
 
-def judge_segments(segments, payload, architecture=None, verbose=False):
+def judge_segments(segments, payload, architecture=None, verbose=False,
+                   progress=None):
     """Give every segment its own opacity verdict.
 
     A firmware image is not one substance. This one is a 64 MB flash dump
@@ -1289,7 +1344,14 @@ def judge_segments(segments, payload, architecture=None, verbose=False):
     entropy threshold alone calls it encrypted; a recognised vector table
     settles the question that the statistic cannot.
     """
-    for segment in segments:
+    report = progress or (lambda *_a, **_k: None)
+    sizes = [max(1, len(seg["content"]) if seg["content"] is not None
+                 else seg["length"]) for seg in segments]
+    total, done = sum(sizes) or 1, 0
+    for index, segment in enumerate(segments):
+        report(done / total, {"kind": "judge", "index": index + 1,
+                              "count": len(segments), "label": segment["label"]})
+        done += sizes[index]
         if segment["kind"] == "filesystem":
             # Read structurally; entropy of the compressed image says nothing
             # about whether its contents were enumerable.
@@ -1315,8 +1377,14 @@ def judge_segments(segments, payload, architecture=None, verbose=False):
 
         # The whole payload as one segment is the case the architecture rule
         # was written for; a region inside a container is not.
+        span_low, span_high = (done - sizes[index]) / total, done / total
+        segment_detail = {"kind": "judge", "index": index + 1,
+                          "count": len(segments), "label": segment["label"]}
         verdict = analyze_opacity(
-            blob, architecture if segment["kind"] == "image" else None)
+            blob, architecture if segment["kind"] == "image" else None,
+            progress=lambda f, d=None, lo=span_low, hi=span_high,
+            base=segment_detail: report(lo + (hi - lo) * f,
+                                        dict(base, **(d or {}))))
         # Content we successfully expanded is by definition readable, whatever
         # the compressed form scored.
         if expanded and verdict["opaque"] and not verdict["compression"]:
@@ -1413,7 +1481,7 @@ def reconcile_vendor_sboms(documents, hits, standards, packages,
     return report
 
 
-def scan_rootfs_files(rootfs, min_str_len=6, verbose=False):
+def scan_rootfs_files(rootfs, min_str_len=6, verbose=False, progress=None):
     """Signature-match the root filesystem files a package database misses.
 
     Returns hits shaped like match_signatures()' output, each carrying the
@@ -1426,7 +1494,8 @@ def scan_rootfs_files(rootfs, min_str_len=6, verbose=False):
     best = {}
     files = bytes_read = 0
     for path, blob in container.unclaimed_files(
-            rootfs, (lambda m: log(m, verbose)) if verbose else None):
+            rootfs, (lambda m: log(m, verbose)) if verbose else None,
+            progress=progress):
         files += 1
         bytes_read += len(blob)
         # A version string inside an executable is the component's own banner,
@@ -2520,9 +2589,90 @@ def build_evidence_context(filename, data, payload, arm_info, container,
 # CLI
 # --------------------------------------------------------------------------- #
 
+# Stages of one analysis and each one's share of the bar. The shares are an
+# average over a router, a BIOS and an ESP32 flash image, and the true split
+# differs a great deal between them - de-framing is 55% of an ESP32 run and 3%
+# of a BIOS. So the shares only decide how far along the bar a stage sits; how
+# far through a stage the bar moves is always a real count of work done.
+PROGRESS_STAGES = (
+    ("reading", 20),        # recognising and de-framing the container
+    ("architecture", 5),
+    ("entropy", 15),        # whole-image statistics
+    ("segments", 50),       # walking, extracting, matching, filesystems
+    ("sbom", 3),
+    ("evidence", 7),        # SPDX rendering and the Excel workbook
+)
+
+
+class Progress:
+    """Progress through one analysis, reported as work actually completes.
+
+    Never moved by a timer. A bar that creeps forward on its own and then
+    stalls at 90% is a small lie told to make a wait feel shorter, and a tool
+    whose whole job is to say what it did and did not read has no business
+    telling it. The bar is also monotonic: a stage finishing sooner than its
+    share suggested jumps it forward, but nothing ever moves it back.
+
+    With no sink every call is a cheap no-op, so the command line - which has
+    its own verbose log - pays nothing for it.
+    """
+
+    def __init__(self, sink=None):
+        self.sink = sink
+        self.percent = 0.0
+        self.stage = None
+        self.step = 0
+        self.detail = None
+        self._start = 0.0
+        self._weight = 0.0
+
+    def enter(self, key, detail=None):
+        start = 0.0
+        for index, (name, weight) in enumerate(PROGRESS_STAGES):
+            if name == key:
+                self.stage, self.step = key, index + 1
+                self._start, self._weight = start, float(weight)
+                break
+            start += weight
+        else:
+            raise ValueError(f"unknown progress stage {key!r}")
+        self.percent = max(self.percent, self._start)
+        self.detail = detail
+        self._emit()
+
+    def within(self, fraction, detail=None):
+        """Move to `fraction` (0..1) of the way through the current stage."""
+        fraction = min(1.0, max(0.0, fraction))
+        self.percent = max(self.percent, self._start + self._weight * fraction)
+        if detail is not None:
+            self.detail = detail
+        self._emit()
+
+    def span(self, low, high):
+        """A callback that maps a nested task's 0..1 onto [low, high] here."""
+        def report(fraction, detail=None):
+            fraction = min(1.0, max(0.0, fraction))
+            self.within(low + (high - low) * fraction, detail)
+        return report
+
+    def finish(self):
+        self.percent, self.stage, self.step = 100.0, "done", len(PROGRESS_STAGES)
+        self.detail = None
+        self._emit()
+
+    def state(self):
+        return {"stage": self.stage, "step": self.step,
+                "steps": len(PROGRESS_STAGES),
+                "percent": round(self.percent, 1), "detail": self.detail}
+
+    def _emit(self):
+        if self.sink:
+            self.sink(self.state())
+
+
 def run_analysis(delivered, source, name, min_str_len=6, verbose=False,
                  vendor_documents=(), no_deframe=False, firmware_version=None,
-                 file_magic=None):
+                 file_magic=None, progress=None):
     """The whole analysis, from reassembled bytes to a CycloneDX document.
 
     The CLI, the drag-and-drop service and the test suite all call this. They
@@ -2539,27 +2689,35 @@ def run_analysis(delivered, source, name, min_str_len=6, verbose=False,
     has a path. Returns every intermediate the callers report on.
     """
     data = source["data"]
+    progress = progress or Progress()
 
-    container = None if no_deframe else detect_packet_container(data, verbose)
+    progress.enter("reading")
+    container = None if no_deframe else detect_packet_container(
+        data, verbose, progress=progress.span(0.0, 1.0))
     payload = deframe(data, container) if container else data
     if container:
         log(f"de-framed {len(payload)} payload bytes "
             f"({len(data) - len(payload)} bytes of framing/header removed)",
             verbose)
 
+    progress.enter("architecture")
     arm_info = analyze_architecture(payload)
     log(f"architecture: {arm_info['label'] or 'not identified'}", verbose)
     for detail in arm_info["details"]:
         log(f"  {detail}", verbose)
 
-    opacity = analyze_opacity(payload, arm_info["label"])
+    progress.enter("entropy")
+    opacity = analyze_opacity(payload, arm_info["label"],
+                              progress=progress.span(0.0, 1.0))
     log(f"payload verdict: {opacity['verdict']} "
         f"(entropy {opacity['entropy']:.3f} bits/byte)", verbose)
 
     standards = detect_embedded_standards(payload, verbose)
 
+    progress.enter("segments")
     segments, rootfs, seg_warnings = analyze_segments(
-        payload, min_str_len, verbose, arm_info["label"])
+        payload, min_str_len, verbose, arm_info["label"],
+        progress=progress.span(0.0, 0.85))
     for warning in seg_warnings:
         log(f"container warning: {warning}", True)
 
@@ -2569,7 +2727,8 @@ def run_analysis(delivered, source, name, min_str_len=6, verbose=False,
         f"(min length {min_str_len})", verbose)
 
     hits = merge_segment_hits(segments)
-    hits = merge_hit_lists(hits, scan_rootfs_files(rootfs, min_str_len, verbose))
+    hits = merge_hit_lists(hits, scan_rootfs_files(
+        rootfs, min_str_len, verbose, progress=progress.span(0.85, 1.0)))
     packages = packages_to_components(rootfs)
     for hit in hits:
         log(f"match: {hit['sig']['name']} confidence={hit['confidence']} "
@@ -2586,6 +2745,7 @@ def run_analysis(delivered, source, name, min_str_len=6, verbose=False,
     opacity = summarise_opacity(segments, opacity)
     opacity = reconcile_opacity(opacity, hits + packages + structural,
                                 standards, verbose)
+    progress.enter("sbom")
     bom = build_sbom(name, delivered, file_magic, arm_info, hits,
                      min_str_len, len(strings),
                      container=container, opacity=opacity, payload=payload,
@@ -2597,7 +2757,7 @@ def run_analysis(delivered, source, name, min_str_len=6, verbose=False,
         "payload": payload, "arm_info": arm_info, "opacity": opacity,
         "standards": standards, "segments": segments, "rootfs": rootfs,
         "strings": strings, "hits": hits, "packages": packages,
-        "vendor": vendor, "bom": bom,
+        "vendor": vendor, "bom": bom, "progress": progress,
     }
 
 
