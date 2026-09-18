@@ -154,9 +154,49 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.18.0</span>
+        <span class="ver">1.19.0</span>
         <span class="date">2026-09-18</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>讀得懂 UBI / UBIFS —— NAND flash 上的韌體</h2>
+        <p>
+          NAND flash 上的韌體很少直接就是一個檔案系統,而是 <strong>UBI</strong>:
+          一連串 erase block,各自說明屬於哪個 volume 的第幾個邏輯區塊。現在會把
+          volume 按裝置的規則拼回來 —— 區塊次序打亂也可以,同一區塊有新舊兩份時
+          <strong>新的勝出</strong> —— 再把裡面的 SquashFS、CramFS 或
+          <strong>UBIFS</strong> 照常讀出。
+        </p>
+        <p>
+          UBIFS 依它自己的 <strong>index</strong> 讀,而不是掃描 flash 上每一個節點:
+          掃描會把已刪除的檔案一併讀回來,SBOM 就會列出裝置上根本沒有的軟體。
+        </p>
+        <div class="fixed">
+          <div class="h">修正:讀不到的單一檔案不再默默消失</div>
+          <p>
+            以前檔案系統裡解壓失敗的檔案只會被略過 —— 沒有掃描,SBOM 裡也完全沒有它。
+            現在每個有檔案讀不到的檔案系統都會記為 <strong>opaque 元件</strong>,寫明
+            是哪些檔案、為甚麼讀不到。
+          </p>
+        </div>
+        <div class="fixed">
+          <div class="h">修正:根檔案系統依內容選擇</div>
+          <p>
+            UBI 映像裡「configuration」volume 可能排在「rootfs」之前。現在會選有
+            os-release、套件資料庫或 busybox 的那一個,而不是固定取第一個。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,291,539 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">874a98009cae558666f30097af3327d0a7db5c5ccf2e497e50ba1db8db9549f2</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.18.0</span>
+        <span class="date">2026-09-18</span>
       </div>
       <div>
         <h2>讀得懂 JFFS2 —— 攝影機與 router 的可寫分區</h2>

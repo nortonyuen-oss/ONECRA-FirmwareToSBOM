@@ -34,6 +34,93 @@ timestamp,所以嗰啲 exe 嘅 hash 從來只係「嗰一次 build 嘅紀錄」,
 
 ---
 
+## v1.19.0
+
+| | |
+|---|---|
+| Tag | `v1.19.0` |
+| 程式碼 commit | `6ffbec961b681d10b275f01b34ac128869f2f903` |
+| Build 日期 | 2026-09-18 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+### Portable 版(唯一交付形式)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,291,539 bytes |
+| SHA-256 | `874a98009cae558666f30097af3327d0a7db5c5ccf2e497e50ba1db8db9549f2` |
+| 內容 | 63 個檔案(多咗 `ubi.py`、`ubifs.py`) |
+| Reproducible | 是(fresh clone 重新 build,hash 一致) |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `036ec5adb078ef9a8dc1cd68ff182d5879183830aba5ac5fe29fc3a2e9d6372c` |
+| `container.py` | `2245db1d09a6b844a99dc99b54b64f852a41e460ab38a9e136f9a8ba24f6cae8` |
+| `ubi.py` | `a880d43e6f67ecfd44ef3139e9715469caf72f80e6c27fba6dc3f8ab4aab66dd` |
+| `ubifs.py` | `09bf729f53c3f5a010c08e93332f0ee337fa561fd8c15d904766fa6df13a7500` |
+
+其餘檔案與 v1.18.0 相同。
+
+### 新增:UBI
+
+NAND flash 上嘅韌體好少直接係一個檔案系統,而係 **UBI**:一連串 erase block,每塊
+講明自己係邊個 volume 嘅第幾個邏輯區塊。`ubi.py` 將 volume 拼返出嚟:
+
+- 區塊喺 wear leveling 之後任何次序都得;同一個邏輯區塊有兩份時,**sequence number
+  新嗰份勝出**。Fixture 入面舊嗰份帶住 dropbear banner,測試確認佢唔會出現。
+- 每個檔頭同 volume table 每一筆都驗 CRC。
+- 缺少或者被截斷嘅區塊會報告,並用 0xFF 填補 —— 唔會將缺口合埋,合埋會令後面
+  每個 byte 錯位。
+- **UBI 喺檔案系統掃描之前認領範圍。** UBI volume 入面嘅 SquashFS,喺原始映像上每
+  128 KiB 就俾 erase-block 檔頭打斷一次;原地讀嘅話,第一個 block 之後讀到嘅全部
+  係檔頭。
+
+### 新增:UBIFS
+
+`ubifs.py` **行 index,唔掃描節點**。掃描會見到每個節點寫過嘅每個版本,包括已刪除
+嘅檔案;index 只會見到最後一次 commit 時檔案系統入面有嘅嘢。代價照寫:commit 之後
+寫入 journal 嘅變更唔會重播 —— mkfs.ubifs 出嘅 release 映像冇 journal,運行中裝置
+嘅 dump 可能有。
+
+壓縮:none、zlib、LZO(經 `lzo.py`)、zstd(Python 3.14 以上)。
+
+### 修正:rootfs 唔再假設係第一個檔案系統
+
+UBI 映像入面 volume 按編號排,「configuration」可以排喺「rootfs」前面。而家 rootfs
+係揀**有 os-release、套件資料庫、busybox 或 init 嘅嗰個**,冇一個似先用第一個。
+
+### 修正:讀唔到嘅單一檔案唔再無聲無息消失
+
+以前任何檔案系統入面解壓失敗嘅檔案,只係被計數然後略過 —— 冇掃描過,SBOM 入面亦
+完全冇佢。套件用嘅 Python 3.12 冇 zstd,所以即係**每個 zstd 壓縮嘅 UBIFS 檔案**。
+而家每個有檔案讀唔到嘅檔案系統都會產生一個 opaque 元件,寫明係邊啲檔案、點解讀唔到。
+Index 讀唔到嘅 UBIFS volume 一樣記為 opaque 兼寫明原因(例如「index 根喺邏輯區塊
+15,映像只有 0-8」),以前會被判定為抹除過嘅 flash。
+
+### 驗證
+
+- unblob 公開樣本(MIT):兩個 UBI 映像、三個 UBIFS 映像。**706 個真實 LZO 資料
+  節點**逐個解出宣告嘅大小。
+- 公開樣本冇軟體、冇 zlib / zstd 資料、冇已刪除檔案,所以 fixture 補返:四種壓縮
+  (LZO 同 zstd 串流由獨立實作產生)、仍然喺 flash 上嘅已刪除 binary、兩層 index、
+  區塊打亂兼 rootfs 排第二嘅 UBI 映像。
+- 用 3.14、3.13 同套件自帶嘅 3.12.7 行過;打包後嘅套件用佢自己嘅 3.12 實際分析過
+  fixture 同真實樣本。
+
+### 測試
+
+269 個(由 247 增加)。新增 `UBIFSTest` 九項、`UBITest` 九項,`RealFormatSampleTest`
+加咗四項。
+
+### 仍未做
+
+UBIFS journal 重播;ext2/3/4、YAFFS2。
+
+---
+
 ## v1.18.0
 
 | | |
