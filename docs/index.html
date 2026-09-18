@@ -309,7 +309,7 @@
     <div class="product">fw2sbom</div>
     <div class="links">
       <a href="changelog.html">版本說明</a>
-      <span class="ver">v1.17.0 · 2026-09-18</span>
+      <span class="ver">v1.18.0 · 2026-09-18</span>
     </div>
   </div>
 </header>
@@ -329,14 +329,14 @@
 
     <div class="getit">
       <div class="dl">
-        <a class="dl-btn" id="dl" href="downloads/fw2sbom-portable-1.17.0.zip">
+        <a class="dl-btn" id="dl" href="downloads/fw2sbom-portable-1.18.0.zip">
           下載 Windows 版
-          <span class="sub">fw2sbom-portable-1.17.0.zip · 10.7 MB</span>
+          <span class="sub">fw2sbom-portable-1.18.0.zip · 10.8 MB</span>
         </a>
         <dl>
-          <dt>版本</dt><dd>1.17.0</dd>
+          <dt>版本</dt><dd>1.18.0</dd>
           <dt>直譯器</dt><dd>CPython 3.12.7 (embeddable)</dd>
-          <dt>內容</dt><dd>59 個檔案</dd>
+          <dt>內容</dt><dd>61 個檔案</dd>
           <dt>簽章</dt><dd>無 — 見右</dd>
         </dl>
         <p class="count" id="count"></p>
@@ -355,12 +355,12 @@
           Windows SmartScreen 的「未知發行者」警告,但也因此沒有數位簽章可以驗。
           請改用雜湊核對:
         </p>
-        <div class="hash">SHA-256<br>ec449492b8254beb6cb653bb3bc9c22c570a431786d6816eb0d10a4e8d96925c</div>
+        <div class="hash">SHA-256<br>9d2292f70bbf52746e8dd071919d8c825ea507f7a5e5480851a970af22dd42b6</div>
         <pre><span class="c"># Windows PowerShell</span>
-Get-FileHash -Algorithm SHA256 .\fw2sbom-portable-1.17.0.zip
+Get-FileHash -Algorithm SHA256 .\fw2sbom-portable-1.18.0.zip
 
 <span class="c"># macOS / Linux</span>
-shasum -a 256 fw2sbom-portable-1.17.0.zip</pre>
+shasum -a 256 fw2sbom-portable-1.18.0.zip</pre>
         <p>
           這個套件是<strong>可重現</strong>的:同一個原始碼版本、同一個官方 CPython,
           任何人在任何機器上重新打包都會得到位元組完全相同的檔案,因此也會得到上面
@@ -393,7 +393,8 @@ shasum -a 256 fw2sbom-portable-1.17.0.zip</pre>
         <div><span class="state full">支援</span></div>
         <div class="how">
           U-Boot uImage 檔頭、壓縮 kernel(gzip / xz / lzma / bzip2)、SquashFS 4.0
-          與 <strong>CramFS</strong> 根檔案系統。<strong>直接讀出 opkg / dpkg / apk
+          與 <strong>CramFS</strong> 根檔案系統,以及可寫的 <strong>JFFS2</strong>
+          overlay(含 LZO 壓縮)。<strong>直接讀出 opkg / dpkg / apk
           套件資料庫</strong>,得到每個已安裝套件的精確版本。廠商外層容器認得
           <strong>Broadcom TRX、Netgear CHK、D-Link SHRS、Moxa FRM</strong>;
           FIT 與其餘廠商自訂檔頭尚未支援。
@@ -414,7 +415,7 @@ shasum -a 256 fw2sbom-portable-1.17.0.zip</pre>
         <div class="what">CCTV / NVR<span>Linux · 專有 SoC</span></div>
         <div><span class="state part">部分</span></div>
         <div class="how">
-          使用標準 uImage + SquashFS / CramFS 的機型與 router 相同,Instar 攝影機的
+          使用標準 uImage + SquashFS / CramFS / JFFS2 的機型與 router 相同,Instar 攝影機的
           BNEG 外層容器也認得。其餘廠商自訂容器需逐個支援;
           整段加密的機型會被判定為 opaque 並如實標記 —— 這時可以
           <strong>把供應商的 SBOM 一起拖進頁面</strong>,逐項比對出哪些獲映像佐證、
@@ -575,9 +576,9 @@ shasum -a 256 fw2sbom-portable-1.17.0.zip</pre>
 <footer>
   <div class="wrap">
     <strong>Onecra</strong>
-    <span>fw2sbom v1.17.0 — 韌體 SBOM 產生器</span>
+    <span>fw2sbom v1.18.0 — 韌體 SBOM 產生器</span>
     <a href="changelog.html" style="color:var(--on-dark);text-decoration:none;border-bottom:1px solid var(--on-dark-rule)">版本說明</a>
-    <span class="right">SHA-256 ec449492…8d96925c</span>
+    <span class="right">SHA-256 9d2292f7…22dd42b6</span>
     <span style="flex-basis:100%;font-size:12.5px;opacity:.75">
       © 2026 Onecra. 專有軟體,保留一切權利。套件內含 python.org 官方發佈的
       CPython(PSF 授權),詳見套件中的 <code style="font-family:var(--mono)">THIRD-PARTY-NOTICES.txt</code>。
@@ -603,7 +604,7 @@ shasum -a 256 fw2sbom-portable-1.17.0.zip</pre>
 // releases at all, the page works exactly as it does without JavaScript.
 (function () {
   var REPO = "nortonyuen-oss/ONECRA-FirmwareToSBOM";
-  var ASSET = "fw2sbom-portable-1.17.0.zip";   // must match the hash above
+  var ASSET = "fw2sbom-portable-1.18.0.zip";   // must match the hash above
   var PREFIX = "fw2sbom-portable-";
 
   var button = document.getElementById("dl");

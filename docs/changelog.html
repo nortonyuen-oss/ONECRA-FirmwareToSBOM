@@ -154,9 +154,47 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.17.0</span>
+        <span class="ver">1.18.0</span>
         <span class="date">2026-09-18</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>讀得懂 JFFS2 —— 攝影機與 router 的可寫分區</h2>
+        <p>
+          JFFS2 是 raw flash 上的<strong>可寫</strong>檔案系統:OpenWrt router 的 overlay、
+          大量攝影機與工業裝置的設定與應用程式分區。它不是一次建好的映像,而是一份
+          <strong>日誌</strong> —— 檔案每改一次就追加一批節點,最新的版本勝出。所以
+          一個檔案要由所有曾經寫過它的節點重新組出來。
+        </p>
+        <p>
+          最重要的一點:<strong>刪除檔案也是寫一個節點</strong>。忽略它,裝置刪掉的
+          每個檔案都會「復活」,SBOM 會列出裝置上根本不存在的軟體 —— 而且下游完全
+          察覺不到。這個 reader 會正確處理刪除。
+        </p>
+        <p>
+          標準函式庫沒有 LZO 解壓,所以一併附上純 Python 實作。它對照一個獨立的 C++
+          實作做過差分測試:258 個輸入、5.9 MB 資料(大部分是真實韌體內容),
+          <strong>零差異</strong>。
+        </p>
+        <div class="fixed">
+          <div class="h">修正:flash dump 裡 rootfs 之後的檔案系統沒有被掃描</div>
+          <p>
+            從裝置直接讀出的 flash dump 通常有一個唯讀 rootfs,後面跟著一個可寫的
+            overlay。以前<strong>只有第一個檔案系統會被分析</strong>,第二個整個不會被
+            掃描 —— 出廠後才安裝的套件就跟著一起消失。現在每個檔案系統都會逐檔掃描。
+          </p>
+        </div>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,279,946 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">9d2292f70bbf52746e8dd071919d8c825ea507f7a5e5480851a970af22dd42b6</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.17.0</span>
+        <span class="date">2026-09-18</span>
       </div>
       <div>
         <h2>看得到分析做到哪一步</h2>

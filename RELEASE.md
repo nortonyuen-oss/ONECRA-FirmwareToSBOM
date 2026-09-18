@@ -34,6 +34,90 @@ timestamp,所以嗰啲 exe 嘅 hash 從來只係「嗰一次 build 嘅紀錄」,
 
 ---
 
+## v1.18.0
+
+| | |
+|---|---|
+| Tag | `v1.18.0` |
+| 程式碼 commit | `4e3dd5be28e123805dc38b38bcd429ef11ceece1` |
+| Build 日期 | 2026-09-18 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+### Portable 版(唯一交付形式)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,279,946 bytes |
+| SHA-256 | `9d2292f70bbf52746e8dd071919d8c825ea507f7a5e5480851a970af22dd42b6` |
+| 內容 | 61 個檔案(多咗 `jffs2.py`、`lzo.py`) |
+| Reproducible | 是 |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `0dfb7c294a8852dc574f6d01b3f2b47144d5eb02b5e0be2bfe3ca7e2596c1cfd` |
+| `container.py` | `cd175f4e57c8c7f1ba0c33da8ca0f2478ebd7857bb14371270041e46089a75e4` |
+| `jffs2.py` | `a9b1c575c02e25edc283dd033cacffaba6d42fdea858f42787bb1779ee77a174` |
+| `lzo.py` | `d1ba0ae819e6d19649ac810a4739371d39d512486a40049ff5748f2a502d901e` |
+
+其餘檔案與 v1.17.0 相同。
+
+### 新增:JFFS2
+
+JFFS2 係 raw flash 上面嘅**可寫**檔案系統 —— OpenWrt router 嘅 overlay、大量攝影機同
+工業裝置嘅設定同應用程式分區。同 SquashFS / CramFS 唔同,佢係一份**日誌**:檔案每改
+一次就追加一批節點,最新版本勝出。所以一個檔案唔喺任何固定位置,要由所有寫過佢嘅
+節點**重組**出嚟。
+
+- **按版本由節點重組檔案。** 公開樣本入面一個 26 bytes 嘅檔案拆成 offset 0 同 22 兩個
+  節點 —— 淨係攞第一個嘅 reader 會讀出 22 bytes。
+- **處理刪除。** 指向 inode 0 嘅目錄項就係 unlink。唔理佢,裝置刪咗嘅檔案會全部復活,
+  SBOM 列出裝置上根本冇嘅軟體,而且下游完全察覺唔到。Fixture 入面有個已刪除嘅
+  binary 帶住 dropbear banner,測試確認 dropbear **唔會**出現喺 SBOM。
+- **冇 superblock,所以驗每個節點頭嘅 CRC。** `0x1985` 淨係兩個 byte,喺壓縮資料入面
+  出現嘅次數足以造成誤判。
+- 公開樣本 **32 張全部讀出同一個結果**:兩種位元組序、新舊兩種 magic、padded 同唔
+  padded、none / zlib / rtime / LZO。
+
+### 修正:flash dump 入面 rootfs 之後嘅檔案系統冇被掃描
+
+裝置 flash dump 通常有一個唯讀 rootfs,後面跟住一個可寫 overlay。以前只有**第一個**
+檔案系統會被分析 —— 第二個會**成個唔被掃描**,出廠後先安裝嘅套件就跟住一齊消失。
+而家每個檔案系統嘅檔案都會逐一掃描;測試 fixture 入面 overlay 貢獻咗 rootfs 冇嘅
+libcurl 8.4.0。
+
+### 新增:純 Python LZO
+
+標準庫冇 LZO,所以 `lzo.py` 係純 Python 實作。**佢係用差分測試驗證嘅,唔係淨係靠
+樣本**:公開 JFFS2 樣本唯一嘅 LZO 串流得 9 bytes,幾乎冇覆蓋任何指令。所以對照
+**lzokay**(一個獨立嘅 C++ 實作)做差分測試 —— 開發時 258 個輸入、5.9 MB LZO,其中
+240 段係真實 router、BIOS、ESP32 韌體內容,**零差異**。
+
+`tests/lzo_vectors.json` 收錄一組刻意揀選、**合埋覆蓋晒全部指令種類**嘅參考串流,
+測試會檢查覆蓋率本身。完整差分測試喺有裝 lzallright 時先跑(佢係測試工具,唔會入
+產品)。
+
+另外用套件自帶嘅 CPython 3.12.7 實際行過 JFFS2 同 LZO,唔係淨係喺開發機嘅 3.14。
+
+### 一個更正
+
+`lzo.py` 嘅初稿說明寫咗「亦對照真實 UBIFS 資料驗證過」。之後發現公開 UBIFS 樣本
+**根本冇 LZO 壓縮嘅資料**(內容太細,mkfs.ubifs 直接唔壓縮),所以嗰句係錯嘅,已改成
+實際做咗嘅驗證。
+
+### 測試
+
+247 個(由 232 增加)。新增 `JFFS2Test` 九項、`LZOTest` 五項,`RealFormatSampleTest`
+加咗全部 JFFS2 變體嘅一致性測試。
+
+### 仍未做
+
+UBI / UBIFS —— 樣本已經落載好,係下一步。
+
+---
+
 ## v1.17.0
 
 | | |
