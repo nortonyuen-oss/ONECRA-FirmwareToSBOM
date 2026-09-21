@@ -15,7 +15,7 @@ docs/
 ├── onecra_icon.png       # favicon
 ├── .nojekyll             # 關掉 Jekyll:這裡沒有東西需要它處理
 └── downloads/
-    └── fw2sbom-portable-1.19.0.zip      # 只保留最新一版
+    └── fw2sbom-portable-1.20.0.zip      # 只保留最新一版
 ```
 
 ## 為什麼 zip 在版控裡

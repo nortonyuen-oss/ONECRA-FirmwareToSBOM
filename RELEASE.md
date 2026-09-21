@@ -34,6 +34,86 @@ timestamp,所以嗰啲 exe 嘅 hash 從來只係「嗰一次 build 嘅紀錄」,
 
 ---
 
+## v1.20.0
+
+| | |
+|---|---|
+| Tag | `v1.20.0` |
+| 程式碼 commit | `b305610c3d9f768aeac71488a675c2dda104cd03` |
+| Build 日期 | 2026-09-21 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方) |
+
+### Portable 版(唯一交付形式)
+
+| | |
+|---|---|
+| 檔案 | `dist-portable/fw2sbom-portable.zip` |
+| 大小 | 11,302,464 bytes |
+| SHA-256 | `a63d33974da7178349acb29e7842dae7313b7033f8af032bb964ddfb47c82af8` |
+| 內容 | 65 個檔案(多咗 `fit.py`、`cpio.py`) |
+| Reproducible | 是(fresh clone 重新 build,hash 一致) |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `10384715d8085cab9f054cfd2594790bdbe6a1c71f448481df760e2215cdb7f5` |
+| `container.py` | `f94dcd210f498218ee1787c3c5851bef13e5446c9d3d9b4b85a81af0c85444d1` |
+| `vendor_container.py` | `5c0502c8b61ded5efe3a5e8a80cc0bb175fd3a287d84cfa9b620febb3574804a` |
+| `fit.py` | `fdafef5fbdfbb520dfa35d0bd04b2c0d9bbba29ea75bf5c1dfd1c3df31981156` |
+| `cpio.py` | `9bdbc4a0867e37655e86a31a29a4c4a8f0cf74de989a53a56a3f1cec804cb8cf` |
+
+其餘檔案與 v1.19.0 相同。
+
+### 新增:U-Boot FIT
+
+FIT(`.itb`)已經取代大部分 ARM 同較新 MIPS 板嘅 legacy uImage。佢係一棵 device
+tree,每個節點講明一個映像係咩、俾邊個架構、點樣壓縮,仲有自己嘅 hash。`fit.py`:
+
+- 讀資料位置:嵌喺樹入面,或者喺樹後面(`data-position` / `data-offset`)。
+- **用宣告嘅壓縮方式解 kernel。** OpenWrt 23.05.5 recovery 映像嘅 LZMA kernel 第一個
+  byte 係 0x6d,唔係魔數掃描搵嘅 0x5d —— 以前成個 3.7 MB kernel 被判 opaque,連
+  Linux 版本都搵唔到。
+- **重新計算每個 hash**(crc32 / sha1 / sha256 等),唔符就報告「建置後遭損毀或修改」。
+  簽章只記錄存在,唔驗證。
+- 架構由 kernel 映像宣告,優先於統計推測;device tree 嘅 `model` 寫入 SBOM。
+
+### 新增:initramfs(cpio)
+
+好多嵌入式 Linux 嘅成個 rootfs 係一個 initramfs。`cpio.py` 讀 newc 格式,並處理:
+多個 archive 首尾相接、hard link 資料只喺最後一個項目、後面嘅項目覆蓋前面。
+initramfs 會喺 FIT ramdisk、解壓後係 cpio 嘅區段、同埋**解壓後嘅 kernel 入面**搵到
+—— 後者係好多攝影機韌體放成個 userland 嘅方法。Kernel 自帶嗰個冇檔案嘅預設
+initramfs 唔當檔案系統。
+
+### 新增:OpenWrt 映像 metadata
+
+OpenWrt sysupgrade 映像結尾有 build 系統寫嘅 JSON(版本、revision、target、board)。
+rootfs 讀唔到都可以講明係邊版韌體,寫入 `fw2sbom:openwrt_image_*`。CRC 唔係單純
+CRC-32,未確認演算法之前**唔聲稱驗證過**。GL.iNet corpus 映像都有,確認佢係基於
+OpenWrt 22.03.4;元件數目不變。
+
+### 效果
+
+| 映像 | 之前 | 而家 |
+|---|---|---|
+| OpenWrt 23.05.5 AX3000T recovery(FIT + initramfs) | 9 個元件,大多冇版本;kernel 判 opaque | **154 個**,包括 147 個 opkg 套件同 Linux 5.15.167 |
+| OpenWrt 23.05.5 AX3000T sysupgrade(FIT + SquashFS) | 156 個;架構「未識別」;有未識別區段 | 156 個;AArch64 由 FIT 宣告;每個 byte 都有歸屬;6 個 hash 全部驗證通過 |
+
+兩個映像嘅 SHA-256 同 OpenWrt 公佈嘅 `sha256sums` 一致。
+
+### 測試
+
+293 個(由 269 增加)。新增 `FITTest` 九項、`CPIOTest` 九項、`OpenWrtMetadataTest`
+三項、`RealFITTest` 三項。用 3.14、3.13 同套件自帶嘅 3.12.7 行過;打包後嘅套件用佢
+自己嘅 3.12 分析過真實映像。
+
+### 仍未做
+
+TP-Link / HiSilicon 等廠商自訂檔頭;FIT 簽章驗證;ext2/3/4、YAFFS2。
+
+---
+
 ## v1.19.0
 
 | | |

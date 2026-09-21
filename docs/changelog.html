@@ -154,9 +154,45 @@
 
     <article class="rel">
       <div class="stamp">
+        <span class="ver">1.20.0</span>
+        <span class="date">2026-09-21</span>
+        <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>讀得懂 FIT 與 initramfs —— 新一代 router 與攝影機的開機映像</h2>
+        <p>
+          <strong>FIT</strong>(<code class="inline">.itb</code>)已取代大部分 ARM 板子上
+          的舊式 uImage。它會自己說明每個映像是甚麼、用甚麼壓縮,並附上 hash。現在會
+          照它的說明解開 kernel,並<strong>重新計算每一個 hash</strong> —— 不符就報告
+          映像在建置後遭到損毀或修改。
+        </p>
+        <p>
+          很多韌體把整個 root filesystem 做成 <strong>initramfs</strong>,放在 FIT 的
+          ramdisk,或直接編進 kernel(攝影機常見)。現在兩種都讀得出來,包括裡面的
+          套件資料庫。
+        </p>
+        <div class="fixed">
+          <div class="h">實測:OpenWrt 23.05.5 官方 recovery 映像</div>
+          <p>
+            以前只得到 9 個元件,大多沒有版本,kernel 整段被判為無法分析;現在得到
+            <strong>154 個</strong>,包括 147 個套件的精確版本與 Linux 5.15.167。
+          </p>
+        </div>
+        <p>
+          OpenWrt 在映像結尾附上的版本資訊(版本、revision、board)也會寫進 SBOM,
+          即使 root filesystem 讀不到,也能說明這是哪一版韌體。
+        </p>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,302,464 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">a63d33974da7178349acb29e7842dae7313b7033f8af032bb964ddfb47c82af8</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
         <span class="ver">1.19.0</span>
         <span class="date">2026-09-18</span>
-        <span class="tag current">目前版本</span>
       </div>
       <div>
         <h2>讀得懂 UBI / UBIFS —— NAND flash 上的韌體</h2>
