@@ -34,6 +34,67 @@ timestamp,所以嗰啲 exe 嘅 hash 從來只係「嗰一次 build 嘅紀錄」,
 
 ---
 
+## v1.22.0
+
+| | |
+|---|---|
+| Tag | `v1.22.0` |
+| 程式碼 commit | `37f79fd6e0874e7230379178d6bbff40d9697be2` |
+| Build 日期 | 2026-09-21 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方),SHA-256 已釘住並驗證 |
+
+### Portable 版(唯一交付形式)
+
+| | |
+|---|---|
+| 檔案 | `fw2sbom-portable-1.22.0.zip`(GitHub Release asset) |
+| 大小 | 11,322,966 bytes |
+| SHA-256 | `1f32d5f4e81f1f0315412e44026bcbfb62b8fe2b54b47b1f0db25e687d365a7a` |
+| 內容 | 67 個檔案 |
+| Reproducible | 是(fresh clone 重新 build,hash 一致) |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `ad77cc9764aed18cb7a6d498fccd87b3388ed452c6cb17b6eb14ae23baacb5d8` |
+| `service.py` | `72aa606fee8a64afd6482dc2dce08df27a8df0e826c132e2835035ece93d7a86` |
+
+其餘檔案與 v1.21.0 相同。
+
+### 新增:批次分析(CLI)
+
+```
+fw2sbom.py --batch releases/ --recursive -d sbom/
+```
+
+每個檔案各自出 CycloneDX、SPDX 同證據報告,另加 `batch-summary.csv`(Excel 直接開)
+同 `batch-summary.json`:SHA-256、大小、格式、架構、發行版、元件數、無法分析區段數、
+耗時、失敗原因。**一個檔案失敗唔影響其他**,有失敗時 exit code 係 3。同名檔案唔會
+互相覆蓋;重跑唔會將上次嘅輸出當韌體。
+
+### 新增:網頁一次拖入多個檔案或整個資料夾
+
+一個檔案時同以前一樣;多個檔案時出批次表,逐個分析,每行有狀態、元件數、下載連結,
+撳「查看」睇完整結果。**「全部下載(ZIP)」**打包全部交付物同摘要 CSV。廠商 SBOM
+只用於單一檔案。
+
+### 改善:大檔案
+
+- **上傳一邊到一邊解析**,韌體喺記憶體只有一份。實測 100 MiB 上傳,尖峰由約 400 MiB
+  降到約 107 MiB。
+- **仍然唔寫入磁碟**,同頁面嘅承諾一致。
+- **一次只跑一個分析**,第二個會排隊,頁面顯示「排隊等候其他分析完成」。
+- 結果存放區改以總位元組數(512 MB)封頂,唔再只計筆數。
+
+### 測試
+
+336 個(由 320 增加)。新增 `StreamingUploadTest`、`BatchServiceTest`、`ResultStoreTest`、
+`CliBatchTest`。新解析器對隨機輸入、每種 chunk 大小(低至 1 byte)都同舊解析器結果一致。
+用 3.14、3.13 同套件自帶嘅 3.12.7 行過;所有舊映像輸出除版本號外不變。
+
+---
+
 ## v1.21.0
 
 | | |

@@ -154,9 +154,37 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.21.0</span>
+        <span class="ver">1.22.0</span>
         <span class="date">2026-09-21</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>一次處理一整批韌體</h2>
+        <p>
+          CRA 要的是可以持續重跑的 SBOM 流程,而一條產品線常有幾十個韌體版本。現在可以
+          <strong>一次拖入多個檔案或整個資料夾</strong>:逐個分析、每個檔案一列狀態,
+          完成後<strong>一鍵下載 ZIP</strong>,裡面是每個檔案的 SBOM、證據報告,以及一份
+          可以用 Excel 打開的摘要表。
+        </p>
+        <p>
+          命令列也有同樣的功能(<code class="inline">--batch</code>),方便接進自動化流程:
+          一個檔案失敗不影響其他檔案,摘要會寫明原因。
+        </p>
+        <p>
+          大檔案的記憶體用量大幅下降:上傳一邊到達一邊處理,不再先整份讀進來再複製。
+          檔案<strong>仍然不會寫入磁碟</strong>。
+        </p>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,322,966 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">1f32d5f4e81f1f0315412e44026bcbfb62b8fe2b54b47b1f0db25e687d365a7a</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.21.0</span>
+        <span class="date">2026-09-21</span>
       </div>
       <div>
         <h2>讀得懂 ext4 與 YAFFS —— eMMC 設備與舊款 NAND 攝影機</h2>
