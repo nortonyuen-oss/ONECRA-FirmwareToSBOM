@@ -3,16 +3,22 @@
     Publish the built portable package as a GitHub Release asset.
 
 .DESCRIPTION
-    Moves the download off GitHub Pages and onto a release asset. Two things
-    come with that:
+    Publishes the download. Since v1.20.0 the download page's button points
+    straight at the release asset, so this step is part of every release, not
+    an extra - without it the button has nothing to serve. Two things come
+    with serving it from a release:
 
       * GitHub counts downloads of release assets on its own servers, which is
         the only real download number a static site can show. The download
         page picks it up automatically once an asset with the expected
         filename exists.
 
-      * Release assets do not live in git history, so the ~11 MB per release
-        currently committed under docs/downloads/ stops accumulating.
+      * Release assets do not live in git history, so a release no longer
+        adds ~11 MB to the repository.
+
+    Order matters: push the tag, run this, and only then push master. Pages
+    publishes master, and a page pointing at an asset that does not exist yet
+    is a download button that 404s.
 
     **Your token never reaches the script's output or anyone else.** It is read
     from $env:GITHUB_TOKEN, used for the two API calls, and never printed,
@@ -265,8 +271,8 @@ Write-Host "  release   $($release.html_url)"
 Write-Host "  asset     $($asset.browser_download_url)"
 Write-Host "  sha256    $hash"
 Write-Host ''
-Write-Host 'The download page picks this up on its next load: the button repoints'
-Write-Host 'at the release asset and the download counter appears.'
+Write-Host 'Next: push master (git push origin master). Pages then publishes the'
+Write-Host 'download page for this version, whose button points at this asset.'
 if ($Draft) {
     Write-Host ''
     Write-Warning 'This is a DRAFT. It stays invisible to the API until you publish it.'

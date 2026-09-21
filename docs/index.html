@@ -329,7 +329,7 @@
 
     <div class="getit">
       <div class="dl">
-        <a class="dl-btn" id="dl" href="downloads/fw2sbom-portable-1.20.0.zip">
+        <a class="dl-btn" id="dl" href="https://github.com/nortonyuen-oss/ONECRA-FirmwareToSBOM/releases/download/v1.20.0/fw2sbom-portable-1.20.0.zip">
           下載 Windows 版
           <span class="sub">fw2sbom-portable-1.20.0.zip · 10.8 MB</span>
         </a>
@@ -595,12 +595,11 @@ shasum -a 256 fw2sbom-portable-1.20.0.zip</pre>
 // nothing here that can count a download. The one real number available is
 // GitHub's own download_count on release assets, which its servers maintain.
 //
-// That only means something if the button actually serves the release asset,
-// so this does both together or neither: when a release publishes an asset
-// with exactly the filename this page advertises, the button is repointed at
-// it and the count is shown. Otherwise the button keeps serving the copy in
-// the repository and no number is displayed. A count that does not belong to
-// the file being downloaded would be worse than no count at all.
+// The button already points at the release asset for this version (the zip
+// is no longer kept in the repository), so this only adds the count - and
+// only when the release really has an asset with exactly the filename this
+// page advertises. A count that does not belong to the file being
+// downloaded would be worse than no count at all.
 //
 // Everything here is progressive: with no network, a rate-limited API or no
 // releases at all, the page works exactly as it does without JavaScript.
