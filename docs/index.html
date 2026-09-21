@@ -392,12 +392,13 @@ shasum -a 256 fw2sbom-portable-1.19.0.zip</pre>
         <div class="what">Router / Gateway<span>Linux · MIPS / ARM</span></div>
         <div><span class="state full">支援</span></div>
         <div class="how">
-          U-Boot uImage 檔頭、壓縮 kernel(gzip / xz / lzma / bzip2)、SquashFS 4.0
+          U-Boot uImage 與 <strong>FIT</strong>(逐一驗證映像 hash)、壓縮 kernel
+          (gzip / xz / lzma / bzip2)、<strong>initramfs</strong>、SquashFS 4.0
           與 <strong>CramFS</strong> 根檔案系統,可寫的 <strong>JFFS2</strong>
           overlay(含 LZO 壓縮),以及 NAND flash 上的 <strong>UBI / UBIFS</strong>。<strong>直接讀出 opkg / dpkg / apk
           套件資料庫</strong>,得到每個已安裝套件的精確版本。廠商外層容器認得
           <strong>Broadcom TRX、Netgear CHK、D-Link SHRS、Moxa FRM</strong>;
-          FIT 與其餘廠商自訂檔頭尚未支援。
+          其餘廠商自訂檔頭尚未支援。
         </div>
       </div>
       <div class="cov">
@@ -415,7 +416,8 @@ shasum -a 256 fw2sbom-portable-1.19.0.zip</pre>
         <div class="what">CCTV / NVR<span>Linux · 專有 SoC</span></div>
         <div><span class="state part">部分</span></div>
         <div class="how">
-          使用標準 uImage + SquashFS / CramFS / JFFS2 / UBIFS 的機型與 router 相同,Instar 攝影機的
+          使用標準 uImage / FIT + SquashFS / CramFS / JFFS2 / UBIFS 的機型與 router 相同;
+          <strong>把整個 userland 編進 kernel 的 initramfs</strong> 也讀得出來。Instar 攝影機的
           BNEG 外層容器也認得。其餘廠商自訂容器需逐個支援;
           整段加密的機型會被判定為 opaque 並如實標記 —— 這時可以
           <strong>把供應商的 SBOM 一起拖進頁面</strong>,逐項比對出哪些獲映像佐證、

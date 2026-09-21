@@ -81,6 +81,8 @@ $PayloadFromRoot = @(
     'lzo.py',
     'ubi.py',
     'ubifs.py',
+    'fit.py',
+    'cpio.py',
     'onecra_logo.png',
     'onecra_icon.png'
 )

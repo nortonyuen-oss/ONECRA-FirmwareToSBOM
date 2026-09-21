@@ -236,10 +236,10 @@ router 映像可以得到三百多個帶精確版本的元件。
 
 | | 狀態 |
 |---|---|
-| 容器 | U-Boot legacy uImage;任意位置的壓縮區段 |
+| 容器 | U-Boot legacy uImage、FIT;UBI;TRX / CHK / SHRS / BNEG / FRM;任意位置的壓縮區段 |
 | 解壓 | gzip、xz、lzma、bzip2(全部 stdlib) |
 | 未支援解壓 | lzo、lz4、zstd —— **會明確報告「未展開」並指名演算法**,不會靜默跳過 |
-| 檔案系統 | SquashFS 4.0(gzip / xz / lzma 壓縮)、CramFS、JFFS2、UBI / UBIFS |
+| 檔案系統 | SquashFS 4.0(gzip / xz / lzma 壓縮)、CramFS、JFFS2、UBI / UBIFS、initramfs(cpio newc) |
 | 未支援檔案系統 | ext2/3/4、YAFFS2、ROMFS |
 | 套件資料庫 | opkg、dpkg、apk |
 
@@ -509,6 +509,55 @@ commit 時檔案系統裡有的東西。把已刪除的 binary 復活進 SBOM �
 驗證:unblob 專案公開的 UBI / UBIFS 樣本(MIT),加上自建 fixture —— 內含已刪除但
 節點仍在 flash 上的 binary、兩層 index、四種壓縮、以及 rootfs 不排第一個且區塊順序
 打亂、同一邏輯區塊有新舊兩份的 UBI 映像。
+
+## FIT 與 initramfs
+
+**FIT**(Flattened Image Tree,`.itb`)已取代大部分 ARM 與較新 MIPS 板子上的
+legacy uImage:MediaTek Filogic 的 OpenWrt 映像、Qualcomm IPQ 閘道器、很多攝影機。
+它是一棵 device tree(和 `.dtb` 同一種二進位格式),每個節點描述一個 bootloader
+要載入的映像 —— kernel、device tree、ramdisk、root filesystem —— 並寫明它是甚麼、
+給哪個架構、用甚麼壓縮,以及它自己的 hash。
+
+所以 FIT 是**會自我描述的容器**,`fit.py` 只是把這份描述讀出來並加以查核:
+
+- **每個映像的位置。** 資料可以在樹裡面(`data` 屬性),也可以在樹後面
+  (`data-position` 從 FIT 起點算、`data-offset` 從樹的結尾算)。OpenWrt 的
+  sysupgrade 映像放外面,initramfs 映像放裡面,兩種都讀。
+- **宣告的壓縮方式。** 這在實務上很重要:一個 FIT kernel 的 LZMA 串流第一個位元組
+  可以是 0x6d 而不是魔數掃描找的 0x5d。OpenWrt 23.05.5 的 recovery 映像就是這樣 ——
+  沒有 FIT 支援時整個 3.7 MB kernel 被判為 opaque,連 Linux 版本都找不到。
+- **Hash 重新計算。** FIT 帶的 crc32 / sha1 / sha256 等全部重算;不符就報告「建置後
+  遭損毀或修改」。簽章只記錄存在,不驗證(需要廠商的公鑰)。
+- **架構由 kernel 映像宣告**,優先於任何統計推測。
+- Device tree 的 `model` 會寫進 SBOM(例如 *Xiaomi Mi Router AX3000T*)。
+
+### initramfs(cpio)
+
+很多嵌入式 Linux 的整個 root filesystem 是一個 **initramfs**:OpenWrt 的 recovery /
+initramfs 映像、FIT 的 ramdisk、以及大量**把 userland 直接編進 kernel** 的攝影機韌體。
+它是 newc 格式的 cpio,幾乎一定有壓縮。`cpio.py` 讀它,並處理 kernel 會處理、
+天真的 reader 會漏掉的三件事:
+
+- **多個 archive 首尾相接**(例如前面先放 CPU microcode)。只讀第一個,只會找到幾個
+  韌體檔,找不到 userland。
+- **Hard link 的資料只存在最後一個項目**,前面的大小是 0。
+- **同一路徑較後的項目覆蓋較前的**,和 kernel 依序解開時一樣。
+
+initramfs 會在三個地方被找到:FIT 的 ramdisk、解壓出來剛好是 cpio 的壓縮區段、
+以及**解壓後的 kernel 內部**(原樣或再壓縮一次)。每個 kernel 都帶一個只有 `/dev`、
+`/dev/console`、`/root` 的預設 initramfs —— 沒有任何檔案,不當成檔案系統。
+
+### OpenWrt 映像 metadata
+
+OpenWrt 在 sysupgrade 映像**結尾**附加 build 系統寫的 JSON:發行版、版本、revision、
+target、board、支援的裝置。即使 rootfs 讀不到,它也能說明這是哪一版韌體。會以
+`fw2sbom:openwrt_image_*` 寫進 SBOM。它的 CRC 不是單純的 CRC-32,在未能以樣本確認
+演算法之前**不宣稱已驗證**。
+
+驗證:OpenWrt 23.05.5 官方 release 映像(Xiaomi AX3000T),兩種 FIT 形狀各一,
+SHA-256 與 OpenWrt 公佈的 `sha256sums` 一致;兩個映像裡**每一個 hash 都驗證通過**。
+Recovery 映像由 9 個元件(大多是沒有版本的字串比對)變成 154 個,包括 147 個 opkg
+套件與 Linux 5.15.167。
 
 ## UEFI / PC BIOS
 
@@ -862,8 +911,9 @@ schema 沒抓下來或沒裝 `jsonschema` 時,該項測試會 skip 而不是假�
 
 - 萃取 ASCII 與 UTF-16LE 字串;不做反組譯、不做 code-similarity(FLIRT/BinDiff
   類)比對
-- 容器走訪認得 U-Boot legacy uImage、UBI 與 TRX / CHK / SHRS / BNEG / FRM;
-  FIT 與其餘廠商自訂檔頭尚未支援
+- 容器走訪認得 U-Boot legacy uImage、FIT、UBI 與 TRX / CHK / SHRS / BNEG / FRM;
+  TP-Link / HiSilicon 等其餘廠商自訂檔頭尚未支援
+- FIT 的簽章只記錄存在,不驗證;OpenWrt metadata 的 CRC 不驗證
 - 檔案系統支援 SquashFS 4.0、CramFS、JFFS2、UBI / UBIFS;ext2/3/4、YAFFS2 尚未支援
 - UBIFS 不重播 journal:從運行中裝置讀出的 dump,最後一次 commit 之後的變更看不到
 - 指令集判定僅涵蓋 ARM Cortex-M 與 MCS-51;其他架構(RISC-V、Xtensa、8051 以外
@@ -910,6 +960,8 @@ fw2sbom/
 ├── lzo.py                  # 純 Python LZO1X 解壓
 ├── ubi.py                  # UBI volume 重組(erase block、volume table、sqnum)
 ├── ubifs.py                # 唯讀 UBIFS reader(走 index、CRC 驗證)
+├── fit.py                  # U-Boot FIT(device tree 解析、hash 驗證)
+├── cpio.py                 # initramfs(newc cpio,多 archive、hard link)
 ├── vendor_container.py     # TRX / CHK / SHRS / BNEG / FRM 廠商外層檔頭
 ├── image_input.py          # ELF / Intel HEX / S-record / UF2 讀入成平坦映像
 ├── vendor_sbom.py          # 讀入廠商 SBOM 並與分析結果對帳

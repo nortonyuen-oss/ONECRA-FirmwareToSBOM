@@ -1258,6 +1258,290 @@ def build_ubi_flash():
     return b"".join(head + rest)
 
 
+# --- FIT, cpio and OpenWrt's image metadata ----------------------------------- #
+#
+# The OpenWrt release images these readers were verified against prove they
+# read real toolchain output. What those two images do not hold: the
+# `data-offset` placement, a kernel stored uncompressed, a hash that fails, an
+# initramfs built into a kernel, or the cpio details the kernel honours -
+# concatenated archives, hard links whose data sits on the last entry, a
+# later entry replacing an earlier one. These fixtures do.
+
+def fdt_blob(tree):
+    """A flattened device tree from nested dicts: a bytes value is a
+    property, a dict a child node. Written out here rather than borrowed
+    from fit.py, so the fixture does not share the reader's understanding."""
+    strings, offsets = b"", {}
+    struct_ = bytearray()
+
+    def name_offset(name):
+        nonlocal strings
+        if name not in offsets:
+            offsets[name] = len(strings)
+            strings += name.encode("ascii") + b"\x00"
+        return offsets[name]
+
+    def pad():
+        struct_.extend(b"\x00" * (-len(struct_) % 4))
+
+    def node(name, body):
+        struct_.extend(struct.pack(">I", 1) + name.encode("ascii") + b"\x00")
+        pad()
+        for key, value in body.items():
+            if isinstance(value, dict):
+                continue
+            struct_.extend(struct.pack(">III", 3, len(value), name_offset(key)))
+            struct_.extend(value)
+            pad()
+        for key, value in body.items():
+            if isinstance(value, dict):
+                node(key, value)
+        struct_.extend(struct.pack(">I", 2))
+
+    node("", tree)
+    struct_.extend(struct.pack(">I", 9))
+    off_rsvmap = 40
+    off_struct = off_rsvmap + 16                     # one empty reservation
+    off_strings = off_struct + len(struct_)
+    total = off_strings + len(strings)
+    header = struct.pack(">10I", 0xD00DFEED, total, off_struct, off_strings,
+                         off_rsvmap, 17, 16, 0, len(strings), len(struct_))
+    return header + b"\x00" * 16 + bytes(struct_) + strings
+
+
+def fdt_str(text):
+    return text.encode("ascii") + b"\x00"
+
+
+def fdt_u32(value):
+    return struct.pack(">I", value)
+
+
+def fit_hashes(blob, algos=("crc32", "sha1")):
+    nodes = {}
+    for index, algo in enumerate(algos, 1):
+        value = (struct.pack(">I", zlib.crc32(blob) & 0xFFFFFFFF) if algo == "crc32"
+                 else hashlib.new(algo, blob).digest())
+        nodes[f"hash-{index}"] = {"value": value, "algo": fdt_str(algo)}
+    return nodes
+
+
+def cpio_newc(entries):
+    """A newc cpio archive from (name, mode, data, ino, nlink) entries."""
+    out = bytearray()
+    for name, mode, data, ino, nlink in entries + [("TRAILER!!!", 0, b"", 0, 1)]:
+        raw = name.encode("ascii") + b"\x00"
+        fields = [ino, mode, 0, 0, nlink, 0, len(data), 0, 0, 0, 0, len(raw), 0]
+        out += b"070701" + "".join(f"{f:08X}" for f in fields).encode("ascii")
+        out += raw
+        out.extend(b"\x00" * (-len(out) % 4))
+        out += data
+        out.extend(b"\x00" * (-len(out) % 4))
+    return bytes(out)
+
+
+def aarch64_elf(strings):
+    return (b"\x7fELF\x02\x01\x01" + b"\x00" * 9
+            + struct.pack("<HH", 2, 183)                # ET_EXEC, EM_AARCH64
+            + strings_blob(strings) + bytes(128))       # past the 64-byte floor
+
+
+def initramfs_archives():
+    """An early archive, NUL padding, then the real one - as a kernel with
+    CPU microcode prepended receives it."""
+    early = cpio_newc([
+        ("kernel", 0o040755, b"", 1, 2),
+        ("kernel/x86/microcode/GenuineIntel.bin", 0o100644, b"\x01" * 64, 2, 1),
+        ("etc/os-release", 0o100644, b'NAME="Replaced"\nVERSION="0.1"\n', 3, 1),
+    ])
+    busybox = aarch64_elf(["BusyBox v1.36.1 (2024-09-01 00:00:00 UTC)",
+                           "usage: busybox [function]"])
+    release = (b'NAME="OpenWrt"\nVERSION="23.05.5"\nID=openwrt\n'
+               b'PRETTY_NAME="OpenWrt 23.05.5"\n')
+    status = (b"Package: dnsmasq\nVersion: 2.90-r3\n"
+              b"Architecture: aarch64_cortex-a53\n\n"
+              b"Package: uhttpd\nVersion: 2023.06.25~34a8a74d-r4\n"
+              b"Architecture: aarch64_cortex-a53\n\n")
+    main = cpio_newc([
+        (".", 0o040755, b"", 10, 2),
+        ("./bin", 0o040755, b"", 11, 2),
+        # A hard-link pair: the data is on the last entry only.
+        ("./bin/sh", 0o100755, b"", 12, 2),
+        ("./bin/busybox", 0o100755, busybox, 12, 2),
+        ("./sbin", 0o040755, b"", 13, 2),
+        ("./sbin/init", 0o120777, b"/bin/busybox", 14, 1),
+        ("./etc", 0o040755, b"", 15, 2),
+        ("./etc/os-release", 0o100644, release, 16, 1),
+        ("./usr", 0o040755, b"", 17, 2),
+        ("./usr/lib", 0o040755, b"", 18, 2),
+        ("./usr/lib/opkg", 0o040755, b"", 19, 2),
+        ("./usr/lib/opkg/status", 0o100644, status, 20, 1),
+        ("./.profile", 0o100644, b"export PATH=/bin:/sbin\n", 21, 1),
+        ("./dev", 0o040755, b"", 22, 2),
+        ("./dev/console", 0o020600, b"", 23, 1),
+    ])
+    return early + b"\x00" * 512 + main
+
+
+def fixture_kernel(version):
+    r = rng("fit-kernel-" + version)
+    return strings_blob([
+        f"Linux version {version} (builder@fixture) (aarch64-openwrt-linux-musl-gcc) #0 SMP",
+        "Kernel command line: console=ttyS0,115200n1",
+    ]) * 4 + filler(r, 8192)
+
+
+def fixture_dtb(model):
+    return fdt_blob({"model": fdt_str(model),
+                     "compatible": fdt_str("fw2sbom,test-board"),
+                     "#address-cells": fdt_u32(1)})
+
+
+@fixture("fit_initramfs.bin")
+def build_fit_initramfs():
+    """A FIT with its images inside the tree, as OpenWrt's initramfs images
+    are built: an LZMA kernel, an xz ramdisk, a device tree.
+
+    The kernel is compressed with lc=1, lp=2, pb=2, so its first byte is 0x6d
+    rather than the 0x5d a magic scan looks for; only the FIT's declared
+    compression says what it is.
+    """
+    kernel = lzma.compress(fixture_kernel("5.15.167"), format=lzma.FORMAT_ALONE,
+                           filters=[{"id": lzma.FILTER_LZMA1, "lc": 1, "lp": 2,
+                                     "pb": 2, "dict_size": 1 << 20}])
+    assert kernel[0] == 0x6D
+    ramdisk = lzma.compress(initramfs_archives(), format=lzma.FORMAT_XZ)
+    dtb = fixture_dtb("fw2sbom Test Board (initramfs)")
+    tree = {
+        "timestamp": fdt_u32(1726000000),
+        "description": fdt_str("ARM64 OpenWrt FIT (Flattened Image Tree)"),
+        "#address-cells": fdt_u32(1),
+        "images": {
+            "kernel-1": dict({"description": fdt_str("ARM64 OpenWrt Linux-5.15.167"),
+                              "data": kernel, "type": fdt_str("kernel"),
+                              "arch": fdt_str("arm64"), "os": fdt_str("linux"),
+                              "compression": fdt_str("lzma")},
+                             **fit_hashes(kernel, ("crc32", "sha1"))),
+            # No compression property: U-Boot hands the ramdisk on untouched
+            # and the kernel decompresses it.
+            "initrd-1": dict({"description": fdt_str("ARM64 OpenWrt initrd"),
+                              "data": ramdisk, "type": fdt_str("ramdisk"),
+                              "arch": fdt_str("arm64"), "os": fdt_str("linux")},
+                             **fit_hashes(ramdisk, ("crc32", "sha256"))),
+            "fdt-1": dict({"description": fdt_str("ARM64 OpenWrt device tree blob"),
+                           "data": dtb, "type": fdt_str("flat_dt"),
+                           "arch": fdt_str("arm64"), "compression": fdt_str("none")},
+                          **fit_hashes(dtb)),
+        },
+        "configurations": {
+            "default": fdt_str("config-1"),
+            "config-1": {"description": fdt_str("OpenWrt fw2sbom test board"),
+                         "kernel": fdt_str("kernel-1"), "fdt": fdt_str("fdt-1"),
+                         "ramdisk": fdt_str("initrd-1")},
+        },
+    }
+    image = fdt_blob(tree)
+    return image + b"\xff" * (-len(image) % 0x10000)
+
+
+def fwtool_trailer(metadata):
+    """OpenWrt's metadata and signature blocks, each with its 16-byte trailer."""
+    block = json.dumps(metadata, indent=1).encode("ascii") + b"\n"
+    out = block + struct.pack(">4sIB3xI", b"FWx0", 0, 1, len(block) + 16)
+    signature = b"# fake certificate"
+    out += signature + struct.pack(">4sIB3xI", b"FWx0", 0, 0, len(signature) + 16)
+    return out
+
+
+@fixture("fit_sysupgrade.bin")
+def build_fit_sysupgrade():
+    """A FIT with its images after the tree, as OpenWrt's sysupgrade images
+    are built: a gzip kernel and a device tree placed by `data-position`, a
+    CramFS rootfs by `data-offset`, and OpenWrt's metadata at the end."""
+    kernel = gzip.compress(fixture_kernel("6.6.52"), 9)
+    dtb = fixture_dtb("fw2sbom Test Board (sysupgrade)")
+    rootfs = build_cramfs_rootfs()
+    header_size = 0x1000
+
+    def aligned(n):
+        return n + (-n % 0x1000)
+
+    kernel_at = header_size
+    dtb_at = aligned(kernel_at + len(kernel))
+    rootfs_at = aligned(dtb_at + len(dtb))
+
+    def tree(rootfs_offset):
+        return {
+            "timestamp": fdt_u32(1726000000),
+            "description": fdt_str("ARM64 OpenWrt FIT (Flattened Image Tree)"),
+            "images": {
+                "kernel-1": dict({"data-size": fdt_u32(len(kernel)),
+                                  "data-position": fdt_u32(kernel_at),
+                                  "description": fdt_str("ARM64 OpenWrt Linux-6.6.52"),
+                                  "type": fdt_str("kernel"), "arch": fdt_str("arm64"),
+                                  "os": fdt_str("linux"), "compression": fdt_str("gzip")},
+                                 **fit_hashes(kernel)),
+                "fdt-1": dict({"data-size": fdt_u32(len(dtb)),
+                               "data-position": fdt_u32(dtb_at),
+                               "description": fdt_str("device tree blob"),
+                               "type": fdt_str("flat_dt"), "arch": fdt_str("arm64"),
+                               "compression": fdt_str("none")},
+                              **fit_hashes(dtb)),
+                # data-offset counts from the end of the tree, 4-aligned.
+                "rootfs-1": dict({"data-size": fdt_u32(len(rootfs)),
+                                  "data-offset": fdt_u32(rootfs_offset),
+                                  "description": fdt_str("ARM64 OpenWrt rootfs"),
+                                  "type": fdt_str("filesystem"), "arch": fdt_str("arm64"),
+                                  "compression": fdt_str("none")},
+                                 **fit_hashes(rootfs)),
+            },
+            "configurations": {"default": fdt_str("config-1"),
+                               "config-1": {"kernel": fdt_str("kernel-1"),
+                                            "fdt": fdt_str("fdt-1"),
+                                            "loadables": fdt_str("rootfs-1")}},
+        }
+
+    probe = fdt_blob(tree(0))                      # fixed-size fields: same size
+    rootfs_offset = rootfs_at - ((len(probe) + 3) & ~3)
+    header = fdt_blob(tree(rootfs_offset))
+    assert len(header) == len(probe) and len(header) <= header_size
+    image = bytearray(b"\xff" * aligned(rootfs_at + len(rootfs)))
+    image[0:len(header)] = header
+    image[kernel_at:kernel_at + len(kernel)] = kernel
+    image[dtb_at:dtb_at + len(dtb)] = dtb
+    image[rootfs_at:rootfs_at + len(rootfs)] = rootfs
+    return bytes(image) + fwtool_trailer({
+        "metadata_version": "1.1", "compat_version": "1.0",
+        "supported_devices": ["fw2sbom,test-board"],
+        "version": {"dist": "OpenWrt", "version": "23.05.5",
+                    "revision": "r24106-10cc5fcd00", "target": "mediatek/filogic",
+                    "board": "fw2sbom_test-board"}})
+
+
+@fixture("kernel_initramfs.bin")
+def build_kernel_initramfs():
+    """A uImage whose kernel carries its whole userland as a built-in,
+    gzip-compressed initramfs - the way a lot of camera firmware ships, with
+    no separate root filesystem anywhere in the image."""
+    archive = cpio_newc([
+        ("bin", 0o040755, b"", 1, 2),
+        ("bin/busybox", 0o100755,
+         aarch64_elf(["BusyBox v1.35.0 (2023-02-01 00:00:00 UTC)"]), 2, 1),
+        ("etc", 0o040755, b"", 3, 2),
+        ("etc/os-release", 0o100644,
+         b'NAME="CameraOS"\nVERSION="4.2"\nID=cameraos\n', 4, 1),
+        ("usr/bin/ipcam", 0o100755,
+         aarch64_elf(["SSH-2.0-dropbear_2020.81", "ipcam main loop"]), 5, 1),
+    ])
+    kernel = (fixture_kernel("4.9.37") + b"\x00" * 64
+              + gzip.compress(archive, 9) + b"\x00" * 64 + filler(rng("ki"), 2048))
+    compressed = lzma.compress(kernel, format=lzma.FORMAT_ALONE)
+    header = struct.pack(">IIIIIIII", 0x27051956, 0, 0, len(compressed),
+                         0x80008000, 0x80008000, 0, 0x05160203)   # arm64, lzma
+    header += b"ARM64 camera Linux-4.9.37".ljust(32, b"\x00")
+    return header + compressed + b"\xff" * 2048
+
+
 # --------------------------------------------------------------------------- #
 
 # --------------------------------------------------------------------------- #

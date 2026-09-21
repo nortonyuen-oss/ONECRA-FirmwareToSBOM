@@ -41,6 +41,8 @@ import zlib
 
 import elf
 import esp32
+import fit
+import cpio
 import cramfs
 import jffs2
 import squashfs
@@ -58,7 +60,7 @@ MAX_SEGMENTS = 64
 # was handed. Catching the specific type is how a second filesystem turns into
 # a traceback instead of a warning.
 FILESYSTEM_ERRORS = (squashfs.SquashFSError, cramfs.CramFSError,
-                     jffs2.JFFS2Error, ubifs.UBIFSError)
+                     jffs2.JFFS2Error, ubifs.UBIFSError, cpio.CPIOError)
 
 UIMAGE_MAGIC = 0x27051956
 UIMAGE_HEADER_SIZE = 64
@@ -341,6 +343,186 @@ def _ubi_segments(data, image, verbose, log, say, warnings):
     return segments
 
 
+# Compression a ramdisk or kernel may use, recognised from its first bytes -
+# a FIT ramdisk often declares "none" because U-Boot passes it on untouched
+# and the kernel does the decompressing.
+LEADING_MAGICS = [
+    (b"\x1f\x8b\x08", "gzip"),
+    (b"\xfd7zXZ\x00", "xz"),
+    (b"BZh", "bzip2"),
+    (b"\x28\xb5\x2f\xfd", "zstd"),
+    (b"\x02\x21\x4c\x18", "lz4"),
+    (b"\x89LZO", "lzo"),
+]
+FIT_COMPRESSION = {"none": None, "gzip": "gzip", "lzma": "lzma", "xz": "xz",
+                   "bzip2": "bzip2", "lzo": "lzo", "lz4": "lz4", "zstd": "zstd"}
+MAX_INITRAMFS_PROBES = 48
+
+
+def _sniff_compression(blob):
+    for magic, algorithm in LEADING_MAGICS:
+        if blob.startswith(magic):
+            return algorithm
+    return None
+
+
+def _cpio_segment(archive, offset, length, label, **extra):
+    return _segment("filesystem", offset, length, label, content=None,
+                    filesystem=archive, **extra)
+
+
+def _find_initramfs(blob):
+    """A cpio archive inside an expanded kernel, or None.
+
+    Linux can carry its initramfs built into the kernel image: raw, or
+    compressed a second time inside the already-decompressed kernel. That is
+    how a lot of camera firmware ships its entire userland, and without
+    looking for it the root filesystem is never found at all.
+    """
+    at = cpio.find_offset(blob)
+    if at is not None:
+        archive = cpio.CPIO(blob, at)
+        # The kernel's own default initramfs - /dev, /dev/console, /root - is
+        # a real archive with no files in it, and not a root filesystem.
+        if archive.files():
+            return archive, f"at 0x{at:x}"
+    probes = 0
+    for magic, algorithm in SCAN_MAGICS:
+        at = blob.find(magic)
+        while at != -1 and probes < MAX_INITRAMFS_PROBES:
+            probes += 1
+            try:
+                inner = _expand(algorithm, blob[at:])
+            except ValueError:
+                inner = None
+            if inner and cpio.looks_like_cpio(inner):
+                try:
+                    archive = cpio.CPIO(inner)
+                except cpio.CPIOError:
+                    archive = None
+                if archive is not None and archive.files():
+                    return archive, f"{algorithm} at 0x{at:x}"
+            at = blob.find(magic, at + 1)
+    return None
+
+
+def _device_tree_model(blob):
+    """A .dtb's own "model" and first "compatible", when it has them."""
+    try:
+        tree = fit.parse_fdt(blob)
+    except fit.FITError:
+        return None
+    root = tree["root"]
+    model = fit._string(blob, root, "model")
+    compatible = fit._string(blob, root, "compatible")
+    return model or compatible
+
+
+def _fit_segments(data, image, say, warnings, claim):
+    """Segments for a FIT image, each image read as it declares itself."""
+    segments = []
+    start = image["offset"]
+    say(f"container: FIT image at 0x{start:x}, {len(image['images'])} image(s): "
+        f"{image['description'] or 'no description'}")
+    for note in image["warnings"]:
+        warnings.append(f"FIT: {note}")
+        say(f"container:   {note}")
+
+    # The tree itself. With external data it is a few KiB in front of the
+    # images; with embedded data it wraps them, and only the part before the
+    # first image is header. Filesystem images are left unclaimed so the
+    # filesystem scan below finds them exactly as it would anywhere else.
+    embedded = sorted(i["offset"] for i in image["images"]
+                      if i["placement"] == "embedded" and i["present"])
+    header_end = embedded[0] if embedded else image["header_end"]
+    segments.append(_segment(
+        "boot-header", start, header_end - start,
+        f"FIT header ({image['description'] or 'no description'})",
+        content=data[start:header_end], expanded=False, fit=image))
+    keep_open = [(i["offset"], i["offset"] + i["size"]) for i in image["images"]
+                 if i["type"] == "filesystem" and i["present"]]
+    pieces, position = [], start
+    for low, high in sorted(keep_open):
+        if low > position:
+            pieces.append((position, min(low, image["header_end"])))
+        position = max(position, high)
+    if position < image["header_end"]:
+        pieces.append((position, image["header_end"]))
+    for low, high in pieces:
+        if high > low:
+            claim(low, high)
+
+    for entry in image["images"]:
+        verified = [c["algo"] for c in entry["checks"] if c["ok"]]
+        failed = [c["algo"] for c in entry["checks"] if c["ok"] is False]
+        state = (f"{', '.join(verified)} verified" if verified else "no hash checked")
+        if failed:
+            state += f"; {', '.join(failed)} MISMATCH"
+        say(f"container:   {entry['name']}: {entry['type']}, {entry['arch']}, "
+            f"{entry['compression'] or 'no compression declared'}, "
+            f"{entry['size']} bytes ({entry['placement']}; {state})")
+        if not entry["present"] or entry["type"] == "filesystem":
+            continue
+        low, high = entry["offset"], entry["offset"] + entry["size"]
+        blob = data[low:high]
+        name = f"FIT image '{entry['name']}'"
+        extra = {"fit_image": entry}
+
+        if entry["type"] == "flat_dt":
+            model = _device_tree_model(blob)
+            if model:
+                say(f"container:   {entry['name']}: device tree for {model!r}")
+            segments.append(_segment(
+                "device-tree", low, high - low,
+                f"{name}: device tree" + (f" ({model})" if model else ""),
+                content=blob, expanded=False, device_tree_model=model, **extra))
+            claim(low, high)
+            continue
+
+        algorithm = FIT_COMPRESSION.get(entry["compression"] or "none",
+                                        entry["compression"])
+        if algorithm is None:
+            algorithm = _sniff_compression(blob)
+        content, note, expanded = blob, None, False
+        if algorithm:
+            try:
+                content, expanded = _expand(algorithm, blob), True
+                say(f"container:   {entry['name']}: expanded {len(blob)} -> "
+                    f"{len(content)} bytes ({algorithm})")
+            except ValueError as e:
+                content, note = None, str(e)
+                warnings.append(f"{name}: {e}")
+                say(f"container:   {entry['name']}: NOT expanded: {e}")
+
+        if content is not None and cpio.looks_like_cpio(content):
+            try:
+                archive = cpio.CPIO(content)
+            except cpio.CPIOError as e:
+                say(f"container:   {entry['name']}: cpio did not read: {e}")
+            else:
+                say(f"container:   {entry['name']}: initramfs, "
+                    f"{len(archive.entries)} entries")
+                segments.append(_cpio_segment(
+                    archive, low, high - low,
+                    f"{name}: initramfs (cpio{', ' + algorithm if algorithm else ''})",
+                    **extra))
+                claim(low, high)
+                continue
+
+        kind = "kernel" if entry["type"] == "kernel" else "fit-image"
+        seg = _segment(kind, low, high - low,
+                       f"{name}: {entry['description'] or entry['type']} "
+                       f"({algorithm or 'raw'})",
+                       content=content, expanded=expanded, **extra)
+        if note:
+            seg["warnings"].append(note)
+        for algo in failed:
+            seg["warnings"].append(f"{algo} does not match the image's data")
+        segments.append(seg)
+        claim(low, high)
+    return segments
+
+
 def walk(data, verbose=False, log=None, _inside_ubi=False):
     """Segment a firmware image. Returns (segments, warnings).
 
@@ -390,6 +572,35 @@ def walk(data, verbose=False, log=None, _inside_ubi=False):
             content=data[start:end], expanded=False,
             **({"vendor_container": chain} if index == 0 else {})))
         claim(start, end)
+
+    # --- 0.6 OpenWrt's metadata, appended to the end of a sysupgrade image --
+    trailer = None if _inside_ubi else vendor_container.read_openwrt_metadata(data)
+    if trailer:
+        version = (trailer["metadata"] or {}).get("version") or {}
+        described = " ".join(str(version[k]) for k in ("dist", "version", "revision")
+                             if version.get(k)) or "metadata not parsed"
+        board = version.get("board")
+        say(f"container: OpenWrt image metadata: {described}"
+            + (f", board {board}" if board else "")
+            + (", signature block present" if trailer["signature_block"] else ""))
+        start = trailer["start"]
+        segments.append(_segment(
+            "image-metadata", start, len(data) - start,
+            f"OpenWrt image metadata ({described}"
+            + (f", board {board})" if board else ")"),
+            content=data[start:], expanded=False,
+            openwrt_metadata=trailer["metadata"]))
+        claim(start, len(data))
+
+    # --- 0.7 FIT images: a boot container that documents itself ------------
+    for offset in fit.find_offsets(data):
+        if any(s <= offset < e for s, e in covered):
+            continue
+        try:
+            image = fit.read_fit(data, offset)
+        except fit.FITError:
+            continue
+        segments.extend(_fit_segments(data, image, say, warnings, claim))
 
     # --- 1. A boot header at offset 0 ---------------------------------------
     header = parse_uimage(data)
@@ -541,13 +752,42 @@ def walk(data, verbose=False, log=None, _inside_ubi=False):
                 if expanded and len(expanded) >= 1024:
                     say(f"container: {algorithm} region at 0x{at:x} expanded to "
                         f"{len(expanded)} bytes")
-                    segments.append(_segment(
-                        "compressed", at, len(data) - at,
-                        f"{algorithm} region", content=expanded,
-                        algorithm=algorithm))
+                    archive = None
+                    if cpio.looks_like_cpio(expanded):
+                        try:
+                            archive = cpio.CPIO(expanded)
+                        except cpio.CPIOError:
+                            archive = None
+                    if archive is not None:
+                        say(f"container:   an initramfs, {len(archive.entries)} "
+                            "entries")
+                        segments.append(_cpio_segment(
+                            archive, at, len(data) - at,
+                            f"initramfs (cpio, {algorithm})",
+                            algorithm=algorithm))
+                    else:
+                        segments.append(_segment(
+                            "compressed", at, len(data) - at,
+                            f"{algorithm} region", content=expanded,
+                            algorithm=algorithm))
                     claim(at, len(data))
                     break
             at = data.find(magic, at + 1)
+
+    # --- 3.5 An initramfs built into an expanded kernel ---------------------
+    for segment in list(segments):
+        if segment["kind"] not in ("kernel", "compressed", "fit-image") \
+                or not segment.get("expanded") or not segment["content"]:
+            continue
+        found = _find_initramfs(segment["content"])
+        if found is None:
+            continue
+        archive, where = found
+        say(f"container: initramfs inside {segment['label']} ({where}), "
+            f"{len(archive.entries)} entries")
+        segments.append(_cpio_segment(
+            archive, segment["offset"], segment["length"],
+            f"initramfs (cpio) inside {segment['label']}"))
 
     # --- 4. Whatever is left ------------------------------------------------
     segments.sort(key=lambda s: s["offset"])

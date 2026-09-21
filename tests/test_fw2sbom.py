@@ -40,6 +40,7 @@ sys.path.insert(0, ROOT)
 sys.path.insert(0, HERE)
 
 import container                                        # noqa: E402
+import cpio                                             # noqa: E402
 import cramfs                                           # noqa: E402
 import image_input                                      # noqa: E402
 import jffs2                                            # noqa: E402
@@ -47,6 +48,7 @@ import lzo                                              # noqa: E402
 import elf                                              # noqa: E402
 import esp32                                            # noqa: E402
 import evidence_report                                  # noqa: E402
+import fit                                              # noqa: E402
 import fw2sbom as core                                   # noqa: E402
 import make_fixtures                                     # noqa: E402
 import spdx_report                                       # noqa: E402
@@ -498,7 +500,8 @@ class SbomStructureTest(unittest.TestCase):
            "encrypted_kernel.bin", "esp32_app.bin", "esp32_flash.bin",
            "uefi_volume.bin", "uefi_flash.bin", "cramfs_rootfs.bin",
            "jffs2_rootfs.bin", "cramfs_jffs2_flash.bin", "ubifs_rootfs.bin",
-           "ubi_flash.bin")
+           "ubi_flash.bin", "fit_initramfs.bin", "fit_sysupgrade.bin",
+           "kernel_initramfs.bin")
 
     def test_is_valid_cyclonedx_16_json(self):
         for name in self.ALL:
@@ -2645,6 +2648,239 @@ class UBITest(unittest.TestCase):
         self.assertEqual([], ubi.find_offsets(noise))
         with self.assertRaises(ubi.UBIError):
             ubi.read_image(noise)
+
+
+class FITTest(unittest.TestCase):
+    """A FIT documents its own images; the reader's job is to believe the
+    documentation where it can be checked, and check it."""
+
+    def test_embedded_images_are_read_as_declared(self):
+        image = fit.read_fit(fixture("fit_initramfs.bin"))
+        kinds = {i["name"]: (i["type"], i["compression"], i["placement"])
+                 for i in image["images"]}
+        self.assertEqual(kinds, {"kernel-1": ("kernel", "lzma", "embedded"),
+                                 "initrd-1": ("ramdisk", None, "embedded"),
+                                 "fdt-1": ("flat_dt", "none", "embedded")})
+        for entry in image["images"]:
+            self.assertTrue(entry["checks"])
+            self.assertTrue(all(c["ok"] for c in entry["checks"]), entry["name"])
+        self.assertEqual(image["default_configuration"], "config-1")
+
+    def test_both_external_placements_are_read(self):
+        """data-position counts from the start of the FIT, data-offset from
+        the end of the tree. Getting either wrong shifts the image and its
+        hash stops matching - which is exactly what the check catches."""
+        image = fit.read_fit(fixture("fit_sysupgrade.bin"))
+        for entry in image["images"]:
+            self.assertEqual(entry["placement"], "external")
+            self.assertTrue(all(c["ok"] for c in entry["checks"]), entry["name"])
+        rootfs = next(i for i in image["images"] if i["name"] == "rootfs-1")
+        self.assertEqual(rootfs["offset"], 0x5000)
+
+    def test_a_kernel_is_expanded_by_its_declared_compression(self):
+        """The fixture's LZMA kernel starts 0x6d, not the 0x5d a magic scan
+        looks for: only the FIT's own word says what it is."""
+        blob = fixture("fit_initramfs.bin")
+        kernel = next(i for i in fit.read_fit(blob)["images"] if i["type"] == "kernel")
+        self.assertEqual(blob[kernel["offset"]], 0x6D)
+        names = {c["name"]: c.get("version")
+                 for c in analyze("fit_initramfs.bin")["bom"]["components"]}
+        self.assertEqual(names.get("linux-kernel"), "5.15.167")
+
+    def test_a_damaged_image_is_reported_by_its_hash(self):
+        blob = bytearray(fixture("fit_sysupgrade.bin"))
+        blob[0x1000 + 100] ^= 0xFF                     # inside the kernel
+        image = fit.read_fit(bytes(blob))
+        kernel = next(i for i in image["images"] if i["name"] == "kernel-1")
+        self.assertTrue(any(c["ok"] is False for c in kernel["checks"]))
+        self.assertTrue(any("does not match" in w for w in image["warnings"]))
+
+    def test_the_architecture_is_declared_by_the_fit(self):
+        result = analyze("fit_sysupgrade.bin")
+        self.assertEqual(result["arch"]["architecture"], "arm64")
+        self.assertTrue(any(d.startswith("fit:") for d in result["arch"]["details"]))
+
+    def test_the_sbom_records_what_the_fit_declares(self):
+        props = {p["name"]: p["value"] for p in
+                 analyze("fit_sysupgrade.bin")["bom"]["metadata"]["component"]["properties"]}
+        self.assertIn("crc32 verified", props["fw2sbom:fit_image_kernel-1"])
+        self.assertEqual(props["fw2sbom:device_tree_model"],
+                         "fw2sbom Test Board (sysupgrade)")
+
+    def test_a_filesystem_image_is_left_to_the_filesystem_scan(self):
+        result = analyze("fit_sysupgrade.bin")
+        kinds = [(s["kind"], s["label"]) for s in result["segments"]]
+        self.assertIn(("filesystem", "CramFS (little-endian)"), kinds)
+        self.assertEqual(result["rootfs"]["os_release"]["version"], "22.03.4")
+
+    def test_a_plain_device_tree_is_not_a_fit(self):
+        dtb = make_fixtures.fixture_dtb("board")
+        with self.assertRaisesRegex(fit.FITError, "not a FIT"):
+            fit.read_fit(dtb)
+        self.assertEqual([], fit.find_offsets(dtb))
+
+    def test_a_truncated_or_damaged_tree_never_raises_anything_else(self):
+        blob = fixture("fit_initramfs.bin")
+        for length in (0, 8, 40, 100, 300, 1000, 5000, 9000):
+            with self.subTest(length=length):
+                try:
+                    fit.read_fit(blob[:length])
+                except fit.FITError:
+                    pass
+        rng = random.Random(7)
+        for trial in range(200):
+            damaged = bytearray(blob[:0x2915])
+            for _ in range(4):
+                damaged[rng.randrange(0x40, 0xec)] = rng.randrange(256)
+            try:
+                fit.read_fit(bytes(damaged))
+            except fit.FITError:
+                pass
+
+
+class CPIOTest(unittest.TestCase):
+    """The initramfs details the kernel honours and a naive reader misses."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.archive = cpio.CPIO(make_fixtures.initramfs_archives())
+        cls.files = cls.archive.files()
+
+    def test_every_concatenated_archive_is_read(self):
+        """Microcode first, the userland after it. Stopping at the first
+        trailer finds one firmware blob and no root filesystem."""
+        self.assertEqual(self.archive.archives, 2)
+        self.assertIn("/kernel/x86/microcode/GenuineIntel.bin", self.files)
+        self.assertIn("/usr/lib/opkg/status", self.files)
+
+    def test_a_later_entry_replaces_an_earlier_one(self):
+        release = self.archive.read_file(self.files["/etc/os-release"])
+        self.assertIn(b"OpenWrt", release)
+        self.assertNotIn(b"Replaced", release)
+
+    def test_hard_links_share_the_data_on_the_last_entry(self):
+        sh = self.archive.read_file(self.files["/bin/sh"])
+        busybox = self.archive.read_file(self.files["/bin/busybox"])
+        self.assertTrue(sh)
+        self.assertEqual(sh, busybox)
+
+    def test_names_are_normalised_without_eating_dot_files(self):
+        self.assertIn("/.profile", self.files)
+        self.assertNotIn("/profile", self.files)
+        self.assertEqual(self.archive.entries["/sbin/init"]["target"], "/bin/busybox")
+        self.assertEqual(self.archive.entries["/dev/console"]["type"], "other")
+
+    def test_a_truncated_archive_keeps_what_it_read(self):
+        data = make_fixtures.initramfs_archives()
+        for length in (0, 50, 110, 200, 600, len(data) // 2, len(data) - 10):
+            with self.subTest(length=length):
+                try:
+                    partial = cpio.CPIO(data[:length])
+                except cpio.CPIOError:
+                    continue
+                for node in partial.files().values():
+                    partial.read_file(node)
+
+    def test_six_printable_characters_are_not_an_archive(self):
+        self.assertIsNone(cpio.find_offset(b"serial 070701 and some text" * 20))
+
+    def test_a_kernel_built_in_initramfs_is_found_and_read(self):
+        """No separate rootfs anywhere: the userland is a gzip cpio inside the
+        LZMA kernel. It is how a lot of camera firmware ships."""
+        result = analyze("kernel_initramfs.bin")
+        self.assertIn("inside", next(s["label"] for s in result["segments"]
+                                     if s["kind"] == "filesystem"))
+        names = {c["name"]: c.get("version") for c in result["bom"]["components"]}
+        self.assertEqual(names.get("busybox"), "1.35.0")
+        self.assertEqual(names.get("dropbear"), "2020.81")
+        self.assertIn("AArch64", result["rootfs"]["binaries"]["architecture"])
+
+    def test_the_kernels_own_empty_initramfs_is_not_a_rootfs(self):
+        """/dev, /dev/console and /root, and no files: every kernel carries
+        one, and listing it as a filesystem would be noise."""
+        empty = make_fixtures.cpio_newc([("dev", 0o040755, b"", 1, 2),
+                                         ("dev/console", 0o020600, b"", 2, 1),
+                                         ("root", 0o040700, b"", 3, 2)])
+        kernel = b"Linux version 6.1.0\x00" * 50 + empty + bytes(1024)
+        self.assertIsNone(container._find_initramfs(kernel))
+
+    def test_an_initramfs_ramdisk_is_the_rootfs(self):
+        result = analyze("fit_initramfs.bin")
+        self.assertEqual(result["rootfs"]["os_release"]["version"], "23.05.5")
+        self.assertEqual(sorted(p["name"] for p in result["packages"]),
+                         ["dnsmasq", "uhttpd"])
+
+
+class OpenWrtMetadataTest(unittest.TestCase):
+
+    def test_the_metadata_blocks_are_read_from_the_end(self):
+        found = vendor_container.read_openwrt_metadata(fixture("fit_sysupgrade.bin"))
+        self.assertEqual(found["metadata"]["version"]["version"], "23.05.5")
+        self.assertTrue(found["signature_block"])
+        self.assertEqual(found["start"], 0x6000)
+
+    def test_the_sbom_records_the_declared_version(self):
+        props = {p["name"]: p["value"] for p in
+                 analyze("fit_sysupgrade.bin")["bom"]["metadata"]["component"]["properties"]}
+        self.assertEqual(props["fw2sbom:openwrt_image_version"], "23.05.5")
+        self.assertEqual(props["fw2sbom:openwrt_image_board"], "fw2sbom_test-board")
+
+    def test_an_image_without_it_has_none(self):
+        self.assertIsNone(vendor_container.read_openwrt_metadata(
+            fixture("router_uimage.bin")))
+        broken = fixture("fit_sysupgrade.bin")[:-1]
+        self.assertIsNone(vendor_container.read_openwrt_metadata(broken))
+
+
+class RealFITTest(unittest.TestCase):
+    """OpenWrt 23.05.5 release images for one board, in both FIT shapes.
+
+    Their hashes match the sha256sums OpenWrt publishes, so these are the
+    images anyone can download - not something rebuilt here.
+    """
+
+    DIRECTORY = os.path.join(ROOT, "corpus", "fit")
+    SYSUPGRADE = ("openwrt-23.05.5-mediatek-filogic-xiaomi_mi-router-ax3000t-"
+                  "ubootmod-squashfs-sysupgrade.itb")
+    RECOVERY = ("openwrt-23.05.5-mediatek-filogic-xiaomi_mi-router-ax3000t-"
+                "ubootmod-initramfs-recovery.itb")
+
+    def load(self, name):
+        path = os.path.join(self.DIRECTORY, name)
+        if not os.path.exists(path):
+            self.skipTest(f"{name} missing; run python scripts/fetch-corpus.py")
+        with open(path, "rb") as f:
+            return f.read()
+
+    def test_every_hash_in_both_images_verifies(self):
+        for name in (self.SYSUPGRADE, self.RECOVERY):
+            image = fit.read_fit(self.load(name))
+            self.assertEqual([], image["warnings"], name)
+            for entry in image["images"]:
+                self.assertEqual([c["ok"] for c in entry["checks"]], [True, True],
+                                 (name, entry["name"]))
+
+    def test_the_recovery_image_is_read_through_its_initramfs(self):
+        """Before FIT and cpio support this image gave nine components, most
+        of them version-less string matches: the LZMA kernel went unexpanded
+        and the initramfs was a blob. It holds a full opkg database."""
+        data = self.load(self.RECOVERY)
+        result = core.run_analysis(data, image_input.detect_and_load(data),
+                                   self.RECOVERY)
+        self.assertEqual(result["rootfs"]["os_release"]["version"], "23.05.5")
+        self.assertEqual(len(result["packages"]), 147)
+        names = {c["name"]: c.get("version") for c in result["bom"]["components"]}
+        self.assertEqual(names.get("linux-kernel"), "5.15.167")
+        self.assertEqual(result["arm_info"]["architecture"], "arm64")
+
+    def test_every_byte_of_the_sysupgrade_image_is_accounted_for(self):
+        data = self.load(self.SYSUPGRADE)
+        segments, _rootfs, _w = core.analyze_segments(data, 6)
+        self.assertFalse([s["label"] for s in segments if s["kind"] == "unclaimed"
+                          and not s.get("blank")])
+        metadata = next(s for s in segments if s["kind"] == "image-metadata")
+        self.assertEqual(metadata["openwrt_metadata"]["version"]["revision"],
+                         "r24106-10cc5fcd00")
 
 
 class LZOTest(unittest.TestCase):

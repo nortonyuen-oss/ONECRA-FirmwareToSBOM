@@ -256,3 +256,51 @@ def detect_chain(data):
             break
         at = inner[0]["offset"]
     return chain
+
+
+# --- OpenWrt image metadata (fwtool) ---------------------------------------- #
+# OpenWrt appends blocks to the *end* of a sysupgrade image, each followed by a
+# 16-byte trailer: "FWx0", a CRC, a type (1 metadata, 0 signature) and the
+# block's size including the trailer. The metadata is JSON the build system
+# wrote - distribution, version, revision, target, board - so it names the
+# firmware even when the rootfs cannot be read. The CRC is not checked here:
+# fwtool's CRC is not a plain CRC-32 of the block, and a check we have not
+# confirmed against a sample would be a claim we cannot back.
+FWTOOL_MAGIC = b"FWx0"
+FWTOOL_TRAILER = 16
+FWTOOL_MAX_BLOCK = 64 * 1024
+
+
+def read_openwrt_metadata(data):
+    """The fwtool blocks at the end of `data`, or None if there are none.
+
+    Returns {start, metadata, signature_block}: `start` is where the blocks
+    begin, so
+    the walk can account for those bytes; `metadata` is the parsed JSON, or
+    None if it would not parse.
+    """
+    import json
+
+    end, blocks = len(data), []
+    while end >= FWTOOL_TRAILER and data[end - FWTOOL_TRAILER:end - 12] == FWTOOL_MAGIC:
+        _magic, _crc, kind, size = struct.unpack_from(">4sIB3xI", data,
+                                                      end - FWTOOL_TRAILER)
+        if not FWTOOL_TRAILER <= size <= min(end, FWTOOL_MAX_BLOCK):
+            break
+        blocks.append((kind, data[end - size:end - FWTOOL_TRAILER]))
+        end -= size
+        if len(blocks) > 8:
+            break
+    if not blocks:
+        return None
+    metadata = None
+    for kind, block in blocks:
+        if kind == 1:
+            try:
+                metadata = json.loads(block.strip(b"\x00").decode("utf-8"))
+            except (ValueError, UnicodeDecodeError):
+                metadata = None
+    return {"start": end, "metadata": metadata if isinstance(metadata, dict) else None,
+            # A signature block is present; whether it holds a real
+            # signature (an unsigned build writes a placeholder) is not judged.
+            "signature_block": any(kind == 0 for kind, _ in blocks)}

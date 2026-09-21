@@ -32,6 +32,24 @@ UNBLOB = ("https://raw.githubusercontent.com/onekey-sec/unblob/"
 
 CORPUS = [
     {
+        "path": "fit/openwrt-23.05.5-mediatek-filogic-xiaomi_mi-router-ax3000t-ubootmod-squashfs-sysupgrade.itb",
+        "url": "https://downloads.openwrt.org/releases/23.05.5/targets/mediatek/filogic/"
+               "openwrt-23.05.5-mediatek-filogic-xiaomi_mi-router-ax3000t-ubootmod-squashfs-sysupgrade.itb",
+        "sha256": "b133d4e92b521f8d7e8e90b1cc76d8602613da76f1e7ce37b7f5728682230248",
+        "note": "OpenWrt 23.05.5, Xiaomi AX3000T, AArch64. FIT with external data: "
+                "gzip kernel, device tree, xz SquashFS; OpenWrt metadata at the end. "
+                "Hash as published in OpenWrt's sha256sums.",
+    },
+    {
+        "path": "fit/openwrt-23.05.5-mediatek-filogic-xiaomi_mi-router-ax3000t-ubootmod-initramfs-recovery.itb",
+        "url": "https://downloads.openwrt.org/releases/23.05.5/targets/mediatek/filogic/"
+               "openwrt-23.05.5-mediatek-filogic-xiaomi_mi-router-ax3000t-ubootmod-initramfs-recovery.itb",
+        "sha256": "5965b37358088ca6e6481bf4c82d2bf725f629b06e9007c43cca9f6ab9550384",
+        "note": "The same board's recovery image: FIT with embedded data, an LZMA "
+                "kernel whose first byte is 0x6d, and the whole rootfs as an xz "
+                "cpio initramfs. Hash as published in OpenWrt's sha256sums.",
+    },
+    {
         "path": "router/openwrt-mt300n-v2-4.3.25.bin",
         "url": "https://fw.gl-inet.com/firmware/mt300n-v2/release4/"
                "openwrt-mt300n-v2-4.3.25-0318-1742298825.bin",

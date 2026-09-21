@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 import container
 import elf
 import esp32
+import fit
 import image_input
 import evidence_report
 import spdx_report
@@ -52,7 +53,7 @@ import uefi
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.19.0"
+TOOL_VERSION = "1.20.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -400,6 +401,8 @@ def analyze_architecture(data):
     firmware = uefi.detect(data)
     machine = (firmware or {}).get("machine")
     espressif = esp32.detect(data)
+    fit_image = fit.detect(data)
+    fit_arch = fit.declared_architecture(fit_image["images"]) if fit_image else None
     declared = []
     if machine:
         declared.append(
@@ -414,6 +417,11 @@ def analyze_architecture(data):
         architecture = ("xtensa" if espressif["core"].startswith("Xtensa")
                         else "riscv")
         label = f"{espressif['core']} ({espressif['chip']})"
+    elif fit_arch:
+        declared.append(
+            f"fit: the image tree declares its kernel for {fit_arch[1]} - read "
+            "from the image, not inferred from the bytes")
+        architecture, label = fit_arch
     elif firmware:
         # A BIOS whose modules we could not reach: still not a Cortex-M image,
         # and letting a vector-table heuristic claim it would be worse than
@@ -1755,6 +1763,48 @@ def uefi_component_type(module_type):
     return "firmware"
 
 
+def boot_container_properties(segments):
+    """What a FIT image and OpenWrt's metadata declare about the firmware.
+
+    Both are written by the build system, so they are recorded as declared
+    facts: the image tree's own description of each image and whether its
+    hashes still match, the board the device tree is for, and the version the
+    build stamped on the image - which names the firmware even when its root
+    filesystem cannot be read.
+    """
+    props = []
+    for segment in segments:
+        image = segment.get("fit")
+        if image:
+            props.append({"name": "fw2sbom:fit_description",
+                          "value": image["description"] or ""})
+            for entry in image["images"]:
+                checked = [c for c in entry["checks"] if c["ok"] is not None]
+                state = ("; ".join(f"{c['algo']} {'verified' if c['ok'] else 'MISMATCH'}"
+                                   for c in checked) or "no hash checked")
+                props.append({
+                    "name": f"fw2sbom:fit_image_{entry['name']}",
+                    "value": f"{entry['type']}, {entry['arch'] or 'no arch'}, "
+                             f"{entry['compression'] or 'no compression declared'}, "
+                             f"{entry['size']} bytes, {entry['placement']}: "
+                             f"{entry['description'] or ''} ({state})"})
+        if segment.get("device_tree_model"):
+            props.append({"name": "fw2sbom:device_tree_model",
+                          "value": segment["device_tree_model"]})
+        metadata = segment.get("openwrt_metadata")
+        if metadata:
+            version = metadata.get("version") or {}
+            for key in ("dist", "version", "revision", "target", "board"):
+                if version.get(key):
+                    props.append({"name": f"fw2sbom:openwrt_image_{key}",
+                                  "value": str(version[key])})
+            devices = metadata.get("supported_devices")
+            if isinstance(devices, list) and devices:
+                props.append({"name": "fw2sbom:openwrt_supported_devices",
+                              "value": ", ".join(str(d) for d in devices[:16])})
+    return props
+
+
 def espressif_image(segments):
     """The Espressif image that describes the firmware, or None.
 
@@ -1964,6 +2014,8 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
             if application.get(key):
                 fw_props.append({"name": f"fw2sbom:espressif_{label}",
                                  "value": application[key]})
+
+    fw_props.extend(boot_container_properties(segments or []))
 
     for i, segment in enumerate(segments or [], 1):
         detail = (f"{segment['kind']} at 0x{segment['offset']:x}, "
