@@ -236,11 +236,11 @@ router 映像可以得到三百多個帶精確版本的元件。
 
 | | 狀態 |
 |---|---|
-| 容器 | U-Boot legacy uImage、FIT;UBI;TRX / CHK / SHRS / BNEG / FRM;任意位置的壓縮區段 |
+| 容器 | U-Boot legacy uImage、FIT;UBI;TRX / CHK / SHRS / BNEG / FRM;MBR / GPT 分區表;任意位置的壓縮區段(內容若是映像會再走訪一層) |
 | 解壓 | gzip、xz、lzma、bzip2(全部 stdlib) |
 | 未支援解壓 | lzo、lz4、zstd —— **會明確報告「未展開」並指名演算法**,不會靜默跳過 |
-| 檔案系統 | SquashFS 4.0(gzip / xz / lzma 壓縮)、CramFS、JFFS2、UBI / UBIFS、initramfs(cpio newc) |
-| 未支援檔案系統 | ext2/3/4、YAFFS2、ROMFS |
+| 檔案系統 | SquashFS 4.0(gzip / xz / lzma 壓縮)、CramFS、JFFS2、UBI / UBIFS、initramfs(cpio newc)、ext2/3/4、YAFFS2 / YAFFS1 |
+| 未支援檔案系統 | ROMFS、FAT、NTFS、F2FS |
 | 套件資料庫 | opkg、dpkg、apk |
 
 ### 對不可信輸入的處理
@@ -558,6 +558,46 @@ target、board、支援的裝置。即使 rootfs 讀不到,它也能說明這是
 SHA-256 與 OpenWrt 公佈的 `sha256sums` 一致;兩個映像裡**每一個 hash 都驗證通過**。
 Recovery 映像由 9 個元件(大多是沒有版本的字串比對)變成 154 個,包括 147 個 opkg
 套件與 Linux 5.15.167。
+
+## ext2/3/4、YAFFS 與磁碟映像
+
+### ext2 / ext3 / ext4
+
+韌體放在**區塊裝置**而不是 raw flash 上時,rootfs 幾乎都是 ext4:eMMC 型的 NVR 與
+閘道器、x86 設備、OpenWrt 的 x86 映像。`ext.py` 一個 reader 涵蓋三代:
+
+- ext2/3 的 block map(直接、single / double / triple indirect)與 ext4 的 extent tree
+  都讀;hole 與未初始化的 extent 讀成零,和裝置上一樣。
+- htree 索引目錄以線性方式走訪即可完整列出(索引藏在線性走訪會跳過的 entry 裡)。
+- fast / slow symlink、inline data(小檔案直接存在 inode 與 `system.data` xattr)。
+- **不讀、並且明說的**:fscrypt 加密的檔案逐個記為 opaque 元件並寫明原因;journal
+  **不重播** —— 標記為「需要 recovery」的檔案系統會附上警告。
+
+驗證:OpenWrt 23.05.5 x86-64 官方映像的 rootfs 分區,**1,069 個檔案逐一與同版本的
+SquashFS rootfs 比對,13.5 MB 內容零差異** —— 一個 reader 對照另一個 reader,在真實
+資料上。
+
+### YAFFS2 / YAFFS1
+
+YAFFS 比 UBI 早,仍見於較舊與較簡單的 NAND 裝置:攝影機、DVR、機上盒。映像是 NAND
+頁加上每頁的 spare area,tag 就在 spare 裡。**映像本身沒有記錄它的幾何** —— 頁大小、
+spare 大小、tag 位置、位元組序、YAFFS 版本都隨 flash 與建置工具而變,所以 `yaffs.py`
+逐一嘗試,採用「讀起來是一致檔案系統」的那一組,**從不假設**。
+
+和 JFFS2 一樣是日誌:同一 chunk 寫過多次時以 sequence / serial number 取最新;移入
+「unlinked」或「deleted」目錄的物件不列出;parent 指向檔案(而非目錄)的損壞項目
+被捨棄 —— 穿過檔案的路徑不是路徑。
+
+驗證:unblob 公開的 **79 個 YAFFS 樣本全部讀出**,與 unblob 的預期輸出逐一相符:
+72 種 YAFFS2 幾何(頁 2–16 KiB、spare 16–512 bytes、兩種位元組序、tag 在 0 或 2)、
+YAFFS1 兩種位元組序、hard / soft link、以及刻意損壞的映像。
+
+### 壓縮過的磁碟映像與分區表
+
+OpenWrt 的 x86 映像、很多設備的更新檔,是**整個磁碟映像再 gzip**。以前解壓出來的
+126 MB 只被當成一大塊字串掃描;現在解壓後的內容會**再走訪一層**(只一層,而且只在
+裡面找到結構時才採用),MBR / GPT 分區表會被讀出並標示。OpenWrt 23.05.5 x86-64 的
+`.img.gz` 因此直接得到 150 個套件與 x86-64 架構。
 
 ## UEFI / PC BIOS
 
@@ -914,8 +954,11 @@ schema 沒抓下來或沒裝 `jsonschema` 時,該項測試會 skip 而不是假�
 - 容器走訪認得 U-Boot legacy uImage、FIT、UBI 與 TRX / CHK / SHRS / BNEG / FRM;
   TP-Link / HiSilicon 等其餘廠商自訂檔頭尚未支援
 - FIT 的簽章只記錄存在,不驗證;OpenWrt metadata 的 CRC 不驗證
-- 檔案系統支援 SquashFS 4.0、CramFS、JFFS2、UBI / UBIFS;ext2/3/4、YAFFS2 尚未支援
-- UBIFS 不重播 journal:從運行中裝置讀出的 dump,最後一次 commit 之後的變更看不到
+- 檔案系統支援 SquashFS 4.0、CramFS、JFFS2、UBI / UBIFS、initramfs、ext2/3/4、YAFFS;
+  ROMFS、FAT、F2FS 尚未支援
+- UBIFS 與 ext3/4 都不重播 journal:從運行中裝置讀出的 dump,最後一次 commit 之後的
+  變更看不到
+- ext4 的 fscrypt 加密檔案讀不到,會逐個記為 opaque 元件
 - 指令集判定僅涵蓋 ARM Cortex-M 與 MCS-51;其他架構(RISC-V、Xtensa、8051 以外
   的 8-bit 核心)會回報「未識別」,分析仍會繼續但少了架構這條證據
 - 8051 韌體通常由 Keil C51 等專有工具鏈編譯、內容多為廠商自有程式碼,不一定含
@@ -962,6 +1005,8 @@ fw2sbom/
 ├── ubifs.py                # 唯讀 UBIFS reader(走 index、CRC 驗證)
 ├── fit.py                  # U-Boot FIT(device tree 解析、hash 驗證)
 ├── cpio.py                 # initramfs(newc cpio,多 archive、hard link)
+├── ext.py                  # 唯讀 ext2/3/4 reader(block map、extent、inline data)
+├── yaffs.py                # YAFFS2 / YAFFS1 reader(幾何逐一嘗試判斷)
 ├── vendor_container.py     # TRX / CHK / SHRS / BNEG / FRM 廠商外層檔頭
 ├── image_input.py          # ELF / Intel HEX / S-record / UF2 讀入成平坦映像
 ├── vendor_sbom.py          # 讀入廠商 SBOM 並與分析結果對帳

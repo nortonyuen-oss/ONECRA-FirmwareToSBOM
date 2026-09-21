@@ -1518,6 +1518,377 @@ def build_fit_sysupgrade():
                     "board": "fw2sbom_test-board"}})
 
 
+# --- ext2 / ext3 / ext4 --------------------------------------------------------
+#
+# The OpenWrt x86-64 release image this reader was checked against has 1,069
+# files, every one identical to the same release's SquashFS - but they are
+# all extent-mapped at depth 0, and none is inline, encrypted, sparse or
+# indirect-mapped. The unblob samples hold three six-byte files. These do.
+
+EXT_BLOCK = 1024
+
+
+class ExtBuilder:
+    """A single-group ext filesystem laid out by hand, 1 KiB blocks."""
+
+    def __init__(self, inode_size=128, inodes=64, name="fw2sbom"):
+        self.inode_size = inode_size
+        self.inodes_count = inodes
+        self.name = name
+        self.blocks = {}                       # number -> bytes
+        table_blocks = inodes * inode_size // EXT_BLOCK
+        self.inode_table = 5                    # 1 sb, 2 gdt, 3-4 bitmaps
+        self.next_block = self.inode_table + table_blocks
+        self.inodes = {}                        # number -> bytearray
+        self.next_inode = 11
+        self.children = {2: []}                 # dir inode -> [(name, ino, type)]
+        self.paths = {"": 2}
+
+    def alloc(self, count=1):
+        first = self.next_block
+        self.next_block += count
+        return first
+
+    def put(self, number, data):
+        assert len(data) <= EXT_BLOCK
+        self.blocks[number] = data.ljust(EXT_BLOCK, b"\0")
+
+    def new_inode(self, mode, size, flags=0, links=1):
+        number = self.next_inode
+        self.next_inode += 1
+        raw = bytearray(self.inode_size)
+        struct.pack_into("<HHI", raw, 0, mode, 0, size & 0xFFFFFFFF)
+        struct.pack_into("<HI I", raw, 26, links, 0, flags)
+        struct.pack_into("<I", raw, 108, size >> 32)
+        if self.inode_size > 128:
+            struct.pack_into("<H", raw, 128, 32)          # i_extra_isize
+        self.inodes[number] = raw
+        return number
+
+    def link(self, path, number, kind):
+        parent, _, name = path.rpartition("/")
+        self.children[self.paths[parent]].append((name, number, kind))
+
+    def mkdir(self, path, indexed=False):
+        number = self.new_inode(0o040755, 0, flags=0x1000 if indexed else 0, links=2)
+        self.link(path, number, 2)
+        self.paths[path] = number
+        self.children[number] = []
+        if indexed:
+            self.indexed = getattr(self, "indexed", set()) | {number}
+        return number
+
+    def blockmap_file(self, path, data, holes=()):
+        """ext2/3 block pointers: direct, single, double indirect."""
+        count = -(-len(data) // EXT_BLOCK)
+        pointers = []
+        for logical in range(count):
+            if logical in holes:
+                pointers.append(0)
+                continue
+            block = self.alloc()
+            self.put(block, data[logical * EXT_BLOCK:(logical + 1) * EXT_BLOCK])
+            pointers.append(block)
+        per = EXT_BLOCK // 4
+        i_block = pointers[:12] + [0] * (12 - len(pointers[:12]))
+        rest = pointers[12:]
+        single, rest = rest[:per], rest[per:]
+        i_block.append(self._pointer_block(single) if single else 0)
+        if rest:
+            children = [self._pointer_block(rest[i:i + per])
+                        for i in range(0, len(rest), per)]
+            i_block.append(self._pointer_block(children))
+        else:
+            i_block.append(0)
+        i_block.append(0)
+        number = self.new_inode(0o100755, len(data))
+        self.inodes[number][40:100] = struct.pack("<15I", *i_block)
+        self.link(path, number, 1)
+        return number
+
+    def _pointer_block(self, pointers):
+        block = self.alloc()
+        self.put(block, struct.pack(f"<{len(pointers)}I", *pointers))
+        return block
+
+    def extent_file(self, path, data, uninitialised=(), tree=False, flags=0):
+        """ext4 extents, one per block run; `tree` puts them in a leaf block
+        under a depth-1 index, as a fragmented file's extents are."""
+        count = -(-len(data) // EXT_BLOCK)
+        extents = []
+        for logical in range(count):
+            block = self.alloc()
+            self.put(block, data[logical * EXT_BLOCK:(logical + 1) * EXT_BLOCK])
+            length = 1 | (0x8000 if logical in uninitialised else 0)
+            extents.append(struct.pack("<IHHI", logical, length, 0, block))
+        header = lambda n, depth: struct.pack("<HHHHI", 0xF30A, n, 4 if depth else 84, depth, 0)
+        if tree:
+            leaf = self.alloc()
+            self.put(leaf, header(len(extents), 0) + b"".join(extents))
+            i_block = header(1, 1) + struct.pack("<IIHH", 0, leaf, 0, 0)
+        else:
+            assert len(extents) <= 4
+            i_block = header(len(extents), 0) + b"".join(extents)
+        number = self.new_inode(0o100755, len(data), flags=0x80000 | flags)
+        self.inodes[number][40:40 + len(i_block)] = i_block
+        self.link(path, number, 1)
+        return number
+
+    def inline_file(self, path, data):
+        """ext4 inline data: 60 bytes in i_block, the rest in system.data."""
+        assert self.inode_size >= 256 and len(data) <= 60 + 28
+        number = self.new_inode(0o100644, len(data), flags=0x10000000)
+        raw = self.inodes[number]
+        raw[40:40 + min(60, len(data))] = data[:60]
+        rest = data[60:]
+        struct.pack_into("<I", raw, 160, 0xEA020000)
+        struct.pack_into("<BBHII I", raw, 164, 4, 7, 64, 0, len(rest), 0)
+        raw[180:184] = b"data"
+        raw[164 + 64:164 + 64 + len(rest)] = rest
+        self.link(path, number, 1)
+        return number
+
+    def symlink(self, path, target):
+        raw = target.encode("ascii")
+        if len(raw) < 60:
+            number = self.new_inode(0o120777, len(raw))
+            self.inodes[number][40:40 + len(raw)] = raw
+        else:
+            block = self.alloc()
+            self.put(block, raw)
+            number = self.new_inode(0o120777, len(raw))
+            struct.pack_into("<I", self.inodes[number], 40, block)
+        self.link(path, number, 7)
+        return number
+
+    def deleted_entry(self, directory, name):
+        """A directory entry whose inode is 0: what a removal leaves."""
+        self.children[self.paths[directory]].append((name, 0, 1))
+
+    def _directory_blocks(self, number):
+        def entry(name, ino, kind, rec_len=None):
+            raw = name.encode("ascii")
+            length = rec_len or (8 + len(raw) + 3) & ~3
+            return struct.pack("<IHBB", ino, length, len(raw), kind) + raw.ljust(length - 8, b"\0")
+
+        parent = next((p for p, kids in self.children.items()
+                       if any(k[1] == number for k in kids)), 2)
+        dots = [(".", number, 2), ("..", parent, 2)]
+        entries = sorted(self.children[number])
+        blocks = []
+        if number in getattr(self, "indexed", set()):
+            # An htree root: ".", then ".." spanning the block with the index
+            # hidden inside it, as the kernel writes one.
+            root = entry(".", number, 2, 12) + entry("..", parent, 2, EXT_BLOCK - 12)
+            blocks.append(root)
+            dots = []
+        current = b""
+        for name, ino, kind in dots + entries:
+            e = entry(name, ino, kind)
+            if len(current) + len(e) > EXT_BLOCK:
+                blocks.append(current)
+                current = b""
+            current += e
+        blocks.append(current)
+        out = []
+        for block in blocks:
+            if len(block) < EXT_BLOCK:
+                # The last entry's rec_len runs to the end of the block.
+                at, last = 0, 0
+                while at < len(block):
+                    last = at
+                    at += struct.unpack_from("<H", block, at + 4)[0]
+                block = bytearray(block.ljust(EXT_BLOCK, b"\0"))
+                struct.pack_into("<H", block, last + 4, EXT_BLOCK - last)
+            out.append(bytes(block))
+        return out
+
+    def image(self, incompat=0x2, compat=0x0, ro_compat=0x1):
+        # Directories last, so every entry is known.
+        for number in list(self.children):
+            blocks = self._directory_blocks(number)
+            first = self.alloc(len(blocks))
+            for i, block in enumerate(blocks):
+                self.put(first + i, block)
+            raw = self.inodes.setdefault(number, bytearray(self.inode_size))
+            if number == 2:
+                struct.pack_into("<H", raw, 0, 0o040755)
+                struct.pack_into("<H", raw, 26, 2)
+                if self.inode_size > 128:
+                    struct.pack_into("<H", raw, 128, 32)
+            struct.pack_into("<I", raw, 4, len(blocks) * EXT_BLOCK)
+            pointers = list(range(first, first + len(blocks)))
+            raw[40:40 + 4 * len(pointers)] = struct.pack(f"<{len(pointers)}I", *pointers)
+        total = self.next_block + 1
+        sb = bytearray(1024)
+        struct.pack_into("<IIIIIII", sb, 0, self.inodes_count, total, 0, 0, 0, 1, 0)
+        struct.pack_into("<I", sb, 32, 8192)
+        struct.pack_into("<I", sb, 40, self.inodes_count)
+        struct.pack_into("<HH", sb, 56, 0xEF53, 1)
+        struct.pack_into("<I", sb, 76, 1)
+        struct.pack_into("<IH", sb, 84, 11, self.inode_size)
+        struct.pack_into("<III", sb, 92, compat, incompat, ro_compat)
+        sb[120:136] = self.name.encode("ascii").ljust(16, b"\0")
+        out = bytearray(total * EXT_BLOCK)
+        out[1024:2048] = sb
+        struct.pack_into("<III", out, 2 * EXT_BLOCK, 3, 4, self.inode_table)
+        for number, raw in self.inodes.items():
+            at = self.inode_table * EXT_BLOCK + (number - 1) * self.inode_size
+            out[at:at + self.inode_size] = raw
+        for number, block in self.blocks.items():
+            out[number * EXT_BLOCK:(number + 1) * EXT_BLOCK] = block
+        return bytes(out)
+
+
+def x86_64_elf(strings, pad=0):
+    return (b"\x7fELF\x02\x01\x01" + b"\x00" * 9
+            + struct.pack("<HH", 2, 62)                 # ET_EXEC, EM_X86_64
+            + strings_blob(strings) + bytes(128 + pad))
+
+
+@fixture("ext2_rootfs.bin")
+def build_ext2_rootfs():
+    """ext2 with block maps: a 300 KiB binary reaches single and double
+    indirect blocks, a sparse file has a hole, symlinks are fast and slow,
+    and a removed file leaves an entry with inode 0 behind."""
+    b = ExtBuilder()
+    for d in ("/bin", "/sbin", "/etc", "/usr", "/usr/lib", "/usr/lib/opkg", "/var"):
+        b.mkdir(d)
+    busybox = x86_64_elf(["BusyBox v1.36.1 (2024-09-01 00:00:00 UTC)"],
+                         pad=300 * 1024)
+    busybox = busybox[:-64] + b"banner at the very end: BusyBox v1.36.1\0".ljust(64, b"\0")
+    b.blockmap_file("/bin/busybox", busybox)
+    sparse = b"head of a sparse file\n".ljust(EXT_BLOCK, b"\0") * 3
+    b.blockmap_file("/var/sparse.db", sparse, holes={1})
+    b.blockmap_file("/etc/os-release",
+                    b'NAME="Debian GNU/Linux"\nVERSION_ID="12"\nID=debian\n'
+                    b'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\n')
+    b.blockmap_file("/usr/lib/opkg/status",
+                    b"Package: openssh-server\nVersion: 9.2p1-2\n"
+                    b"Architecture: x86_64\n\n")
+    b.symlink("/sbin/init", "/bin/busybox")
+    b.symlink("/etc/long-link",
+              "/usr/share/a/deliberately/long/target/path/beyond/sixty/bytes/x")
+    b.deleted_entry("/bin", "dropbear")
+    return b.image(incompat=0x2)
+
+
+def build_ext4_rootfs():
+    b = ExtBuilder(inode_size=256, name="rootfs")
+    for d in ("/bin", "/etc", "/usr", "/usr/lib", "/usr/lib/opkg", "/opt"):
+        b.mkdir(d)
+    b.mkdir("/usr/share", indexed=True)
+    library = x86_64_elf(["libcurl/8.4.0 OpenSSL/3.0.12"], pad=4000)
+    b.extent_file("/usr/lib/libcurl.so.4", library, tree=True)
+    b.extent_file("/opt/preallocated.bin", b"written part\n".ljust(EXT_BLOCK, b"\0") * 2,
+                  uninitialised={1})
+    b.inline_file("/etc/os-release",
+                  b'NAME="OpenWrt"\nVERSION="23.05.5"\nID=openwrt\n'
+                  b'PRETTY_NAME="OpenWrt 23.05.5"\n')
+    b.extent_file("/usr/lib/opkg/status",
+                  b"Package: dnsmasq\nVersion: 2.90-r3\nArchitecture: x86_64\n\n")
+    b.extent_file("/bin/busybox", x86_64_elf(["BusyBox v1.36.1 (2024-09-01)"]))
+    for i in range(40):                          # enough to fill the htree block
+        b.extent_file(f"/usr/share/data-file-{i:02d}.txt", b"x" * 20)
+    b.extent_file("/etc/secret.conf", b"\x9c" * 700, flags=0x800)   # fscrypt
+    # FILETYPE | RECOVER | EXTENTS | INLINE_DATA; has_journal.
+    return b.image(incompat=0x2 | 0x4 | 0x40 | 0x8000, compat=0x4, ro_compat=0x1)
+
+
+def build_ext4_boot():
+    b = ExtBuilder(name="kernel")
+    b.mkdir("/boot")
+    b.blockmap_file("/boot/vmlinuz", b"Linux version 6.6.52 (fixture) #1 SMP\0" * 20)
+    return b.image()
+
+
+@fixture("ext4_disk.img.gz")
+def build_ext4_disk():
+    """A disk image shipped gzipped, as OpenWrt's x86 images are: an MBR,
+    a boot partition, then the ext4 rootfs holding every ext4 feature the
+    release sample does not."""
+    boot, rootfs = build_ext4_boot(), build_ext4_rootfs()
+    boot_at = 64 * 512
+    root_at = boot_at + len(boot) + (-len(boot) % 4096)
+    size = root_at + len(rootfs) + (-len(rootfs) % 4096)
+    disk = bytearray(size)
+    disk[0:3] = b"\xeb\x63\x90"
+    for index, (start, length) in enumerate(((boot_at, len(boot)), (root_at, len(rootfs)))):
+        entry = struct.pack("<B3sB3sII", 0x80 if index == 0 else 0, b"\0" * 3, 0x83,
+                            b"\0" * 3, start // 512, -(-length // 512))
+        disk[446 + 16 * index:462 + 16 * index] = entry
+    disk[510:512] = b"\x55\xaa"
+    disk[boot_at:boot_at + len(boot)] = boot
+    disk[root_at:root_at + len(rootfs)] = rootfs
+    return gzip.compress(bytes(disk), 9, mtime=0)
+
+
+# --- YAFFS2 ----------------------------------------------------------------------
+#
+# The unblob samples cover every geometry and both byte orders, and hold fruit.
+# This one holds software, a deleted binary still on the flash, and a chunk
+# written twice where the newer copy must win.
+
+YAFFS_PAGE, YAFFS_SPARE = 2048, 64
+
+
+def yaffs2_chunk(order, data, seq, obj_id, chunk_id, n_bytes):
+    page = data.ljust(YAFFS_PAGE, b"\xff")
+    tags = struct.pack(order + "IIII", seq, obj_id, chunk_id, n_bytes)
+    spare = (b"\xff\xff" + tags).ljust(YAFFS_SPARE, b"\xff")     # tags at 2
+    return page + spare
+
+
+def yaffs2_header(order, kind, parent, name, mode, size=0xFFFFFFFF, alias=b""):
+    head = struct.pack(order + "II", kind, parent) + b"\xff\xff"
+    head += name.encode("ascii").ljust(256, b"\0")
+    head += b"\xff\xff"                                        # to 268
+    head += struct.pack(order + "IIIIIIIi", mode, 0, 0, 0, 0, 0, size, -1)
+    head += alias.ljust(160, b"\0")
+    return head.ljust(512, b"\xff")
+
+
+@fixture("yaffs2_rootfs.bin")
+def build_yaffs2_rootfs():
+    """A big-endian YAFFS2 rootfs, 2 KiB pages and 64-byte spare, tags after
+    the bad-block marker - the layout of a MIPS camera's NAND."""
+    o = ">"
+    busybox = (b"\x7fELF\x01\x02\x01" + b"\x00" * 9 + struct.pack(">HH", 2, 8)
+               + strings_blob(["BusyBox v1.31.1 (2020-05-01 00:00:00 UTC)"])
+               + bytes(3000))                                   # two chunks
+    dropbear = (b"\x7fELF\x01\x02\x01" + b"\x00" * 9 + struct.pack(">HH", 2, 8)
+                + strings_blob(["SSH-2.0-dropbear_2019.78"]) + bytes(200))
+    old_release = b'NAME="VendorOS"\nVERSION="0.1"\n'
+    release = b'NAME="HiLinux"\nVERSION="2.0.4"\nID=hilinux\nPRETTY_NAME="HiLinux 2.0.4"\n'
+    status = b"Package: lighttpd\nVersion: 1.4.59-1\nArchitecture: mips_24kc\n\n"
+    chunks = []
+    add = lambda *a: chunks.append(yaffs2_chunk(o, *a))
+    seq = 0x1000
+    add(yaffs2_header(o, 3, 1, "bin", 0o40755), seq, 0x101, 0, 0xFFFF)
+    add(yaffs2_header(o, 3, 1, "etc", 0o40755), seq, 0x102, 0, 0xFFFF)
+    add(yaffs2_header(o, 3, 1, "usr", 0o40755), seq, 0x103, 0, 0xFFFF)
+    add(yaffs2_header(o, 3, 0x103, "lib", 0o40755), seq, 0x104, 0, 0xFFFF)
+    add(yaffs2_header(o, 3, 0x104, "opkg", 0o40755), seq, 0x105, 0, 0xFFFF)
+    add(yaffs2_header(o, 1, 0x101, "busybox", 0o100755, len(busybox)), seq, 0x110, 0, 0xFFFF)
+    add(busybox[:YAFFS_PAGE], seq, 0x110, 1, YAFFS_PAGE)
+    add(busybox[YAFFS_PAGE:], seq, 0x110, 2, len(busybox) - YAFFS_PAGE)
+    add(yaffs2_header(o, 1, 0x102, "os-release", 0o100644, len(release)), seq, 0x111, 0, 0xFFFF)
+    add(old_release, seq, 0x111, 1, len(old_release))          # superseded below
+    add(yaffs2_header(o, 1, 0x105, "status", 0o100644, len(status)), seq, 0x112, 0, 0xFFFF)
+    add(status, seq, 0x112, 1, len(status))
+    add(yaffs2_header(o, 2, 0x101, "sh", 0o120777, alias=b"busybox"), seq, 0x113, 0, 0xFFFF)
+    add(yaffs2_header(o, 1, 0x101, "dropbear", 0o100755, len(dropbear)), seq, 0x114, 0, 0xFFFF)
+    add(dropbear, seq, 0x114, 1, len(dropbear))
+    # A later block: os-release rewritten, dropbear deleted (moved under the
+    # "deleted" directory, object 4), as YAFFS does on the device.
+    seq = 0x1001
+    add(release, seq, 0x111, 1, len(release))
+    add(yaffs2_header(o, 1, 4, "dropbear", 0o100755, len(dropbear)), seq, 0x114, 0, 0xFFFF)
+    image = b"".join(chunks)
+    erased = (b"\xff" * (YAFFS_PAGE + YAFFS_SPARE)) * 4
+    return image + erased
+
+
 @fixture("kernel_initramfs.bin")
 def build_kernel_initramfs():
     """A uImage whose kernel carries its whole userland as a built-in,

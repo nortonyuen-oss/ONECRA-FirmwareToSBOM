@@ -215,6 +215,92 @@ CORPUS = [
         "sha256": "4e3d4fe217be4e232a8a1c8dc134ef5d71da62da42ae43cf1f6f1014085ed8b3",
         "note": "Raw UBIFS, zstd by default.",
     },
+    {
+        "path": "ext/openwrt-23.05.5-x86-64-generic-ext4-combined.img.gz",
+        "url": "https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-23.05.5-x86-64-generic-ext4-combined.img.gz",
+        "sha256": "f5c77659a33bd43cba105cf2f75e56d054fa9e0b9a73dc9f2a5bcb0e126ff7d5",
+        "note": "OpenWrt 23.05.5 x86-64, gzipped disk image: MBR, ext4 boot and "
+                "rootfs partitions. Hash as published in OpenWrt's sha256sums.",
+    },
+    {
+        "path": "ext/openwrt-23.05.5-x86-64-generic-squashfs-rootfs.img.gz",
+        "url": "https://downloads.openwrt.org/releases/23.05.5/targets/x86/64/openwrt-23.05.5-x86-64-generic-squashfs-rootfs.img.gz",
+        "sha256": "478601ab0f5176372e6e0079614240dd25049c74167572ca9bc1b91e9261fe17",
+        "note": "The same release's rootfs as SquashFS: the ext4 reader's files "
+                "are checked against it, byte for byte.",
+    },
+    {
+        "path": "formats/ext2_1024.bin",
+        "url": UNBLOB + "filesystem/extfs/__input__/ext2.1024.img",
+        "sha256": "217a2eac24381eab669c8268929409de7735f4cb59b69e99b98a4cfba4d59c8c",
+        "note": "ext2, 1 KiB blocks.",
+    },
+    {
+        "path": "formats/ext3_2048.bin",
+        "url": UNBLOB + "filesystem/extfs/__input__/ext3.2048.img",
+        "sha256": "fd7fc5ff2830061e04a2a397b4a0cf2837b75c2677d267d3910f39ed6a23b866",
+        "note": "Made as ext3, 2 KiB blocks; carries no journal, so it reads as ext2.",
+    },
+    {
+        "path": "formats/ext4_4096.bin",
+        "url": UNBLOB + "filesystem/extfs/__input__/ext4.4096.img",
+        "sha256": "ccc49d73c71d17dc67495228467adcfff3018aa1c05c582ccbb273f29931d5c9",
+        "note": "ext4, 4 KiB blocks, extents, 64-bit descriptors, metadata checksums.",
+    },
+    {
+        "path": "formats/ext2_badsymlinks.bin",
+        "url": UNBLOB + "filesystem/extfs/__input__/f_badsymlinks.img",
+        "sha256": "f5db6b45d5ce63976001aba342e9928dff1f75ee2ce3033269ca2fcaf5b9f80a",
+        "note": "e2fsprogs' deliberately broken symlinks: sizes past 4 GiB, blocks outside the fs.",
+    },
+    {
+        "path": "formats/ext2_at_1024.bin",
+        "url": UNBLOB + "filesystem/extfs/__input__/debugfs.quoting.img",
+        "sha256": "81284672a5b37e87016bdc6b2066bbef7cf9c3775b52aa84bc8fd80ecdb1d9aa",
+        "note": "An ext2 filesystem that starts 1 KiB into the file.",
+    },
+    {
+        "path": "formats/yaffs2_2048_64_le.bin",
+        "url": UNBLOB + "filesystem/yaffs/__input__/sample.2048.64.le.yaffs2",
+        "sha256": "aa74cd0043b73b485b2b4be67577895af666a8972104411123a025eb1ea809df",
+        "note": "YAFFS2, 2 KiB pages, 64-byte spare, tags after the bad-block marker.",
+    },
+    {
+        "path": "formats/yaffs2_4096_128_be.bin",
+        "url": UNBLOB + "filesystem/yaffs/__input__/sample.4096.128.ecc.be.yaffs2",
+        "sha256": "d3e93fb6741dee22915c97e1bb3a776957fc12c790faa4ecbbbccf09085cb084",
+        "note": "YAFFS2, 4 KiB pages, 128-byte spare, big-endian, tags at 0.",
+    },
+    {
+        "path": "formats/yaffs2_16384_16_le.bin",
+        "url": UNBLOB + "filesystem/yaffs/__input__/sample.16384.16.le.yaffs2",
+        "sha256": "572c45d619a2d70bc04e0f6eff2065b9c8cf7e2260515af9862f67477ff9e913",
+        "note": "YAFFS2, 16 KiB pages and a 16-byte spare: the tags are cut short.",
+    },
+    {
+        "path": "formats/yaffs1_le.bin",
+        "url": UNBLOB + "filesystem/yaffs/__input__/fruits.dir.le.yffs",
+        "sha256": "30ac92e89b1bc5a9260ca69093093537574e14a4dcb87a79259538762b9f8060",
+        "note": "YAFFS1, 512-byte pages, bit-packed tags, little-endian.",
+    },
+    {
+        "path": "formats/yaffs1_be.bin",
+        "url": UNBLOB + "filesystem/yaffs/__input__/fruits.dir.be.yffs",
+        "sha256": "b07b888a645dd30b0891d1147505fb35a27f1df52b3710c40dc7d9ed418e60c9",
+        "note": "YAFFS1 big-endian: the tag bitfields pack from the other end.",
+    },
+    {
+        "path": "formats/yaffs1_links.bin",
+        "url": UNBLOB + "filesystem/yaffs/__input__/links.yaffs",
+        "sha256": "93e487e7ed1a160db8c599cc1fdca058baa6024dd27c329f1d55f823bee9215b",
+        "note": "YAFFS1 with hard and symbolic links.",
+    },
+    {
+        "path": "formats/yaffs2_malformed_be.bin",
+        "url": UNBLOB + "filesystem/yaffs/__input__/malformed.2048.16.ecc.be.yaffs2",
+        "sha256": "5a875b71da819a189dd9c21386851cb95095931b549ce3181051ecd3f4d2afa2",
+        "note": "YAFFS2 with a file whose parent field points at another file.",
+    },
 ]
 
 TIMEOUT = 300

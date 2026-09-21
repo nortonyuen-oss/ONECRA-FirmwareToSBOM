@@ -32,6 +32,7 @@ import unittest
 import urllib.error
 import urllib.request
 import zipfile
+import zlib
 from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -47,6 +48,7 @@ import jffs2                                            # noqa: E402
 import lzo                                              # noqa: E402
 import elf                                              # noqa: E402
 import esp32                                            # noqa: E402
+import ext                                              # noqa: E402
 import evidence_report                                  # noqa: E402
 import fit                                              # noqa: E402
 import fw2sbom as core                                   # noqa: E402
@@ -58,6 +60,7 @@ import ubifs                                            # noqa: E402
 import uefi                                             # noqa: E402
 import vendor_container                                 # noqa: E402
 import vendor_sbom                                      # noqa: E402
+import yaffs                                            # noqa: E402
 import service                                           # noqa: E402
 
 
@@ -501,7 +504,8 @@ class SbomStructureTest(unittest.TestCase):
            "uefi_volume.bin", "uefi_flash.bin", "cramfs_rootfs.bin",
            "jffs2_rootfs.bin", "cramfs_jffs2_flash.bin", "ubifs_rootfs.bin",
            "ubi_flash.bin", "fit_initramfs.bin", "fit_sysupgrade.bin",
-           "kernel_initramfs.bin")
+           "kernel_initramfs.bin", "ext2_rootfs.bin", "ext4_disk.img.gz",
+           "yaffs2_rootfs.bin")
 
     def test_is_valid_cyclonedx_16_json(self):
         for name in self.ALL:
@@ -2883,6 +2887,243 @@ class RealFITTest(unittest.TestCase):
                          "r24106-10cc5fcd00")
 
 
+class ExtTest(unittest.TestCase):
+    """ext2/3/4: the parts of the format the release sample does not reach."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.ext2 = ext.Ext(fixture("ext2_rootfs.bin"))
+        cls.ext2_files = cls.ext2.files()
+        disk = zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(
+            fixture("ext4_disk.img.gz"))
+        table = container.parse_partition_table(disk)
+        cls.ext4 = ext.Ext(disk, table["partitions"][1]["offset"])
+        cls.ext4_files = cls.ext4.files()
+
+    def test_indirect_and_double_indirect_blocks_are_followed(self):
+        """300 KiB in 1 KiB blocks: 12 direct, 256 through the single
+        indirect block, the rest through the double. The banner is in the
+        last block, which only the double indirect reaches."""
+        busybox = self.ext2.read_file(self.ext2_files["/bin/busybox"])
+        self.assertEqual(len(busybox), self.ext2_files["/bin/busybox"]["size"])
+        self.assertGreater(len(busybox), (12 + 256) * 1024)
+        self.assertIn(b"banner at the very end: BusyBox v1.36.1", busybox[-64:])
+
+    def test_a_hole_reads_as_zeros(self):
+        sparse = self.ext2.read_file(self.ext2_files["/var/sparse.db"])
+        self.assertEqual(sparse[1024:2048], bytes(1024))
+        self.assertTrue(sparse[2048:].startswith(b"head of a sparse file"))
+
+    def test_fast_and_slow_symlinks(self):
+        links = {p: n.get("target") for p, n in self.ext2.walk() if n["type"] == "symlink"}
+        self.assertEqual(links["/sbin/init"], "/bin/busybox")
+        self.assertTrue(links["/etc/long-link"].startswith("/usr/share/a/deliberately"))
+        self.assertGreater(len(links["/etc/long-link"]), 60)
+
+    def test_a_removed_entry_is_not_listed(self):
+        self.assertNotIn("/bin/dropbear", self.ext2_files)
+
+    def test_an_extent_tree_below_the_inode_is_followed(self):
+        library = self.ext4.read_file(self.ext4_files["/usr/lib/libcurl.so.4"])
+        self.assertIn(b"libcurl/8.4.0", library)
+        self.assertEqual(len(library), self.ext4_files["/usr/lib/libcurl.so.4"]["size"])
+
+    def test_an_uninitialised_extent_reads_as_zeros(self):
+        data = self.ext4.read_file(self.ext4_files["/opt/preallocated.bin"])
+        self.assertTrue(data.startswith(b"written part"))
+        self.assertEqual(data[1024:], bytes(1024))
+
+    def test_inline_data_is_read_from_the_inode_and_its_xattr(self):
+        release = self.ext4.read_file(self.ext4_files["/etc/os-release"])
+        self.assertGreater(len(release), 60)             # past i_block's 60 bytes
+        self.assertTrue(release.endswith(b'PRETTY_NAME="OpenWrt 23.05.5"\n'))
+
+    def test_an_indexed_directory_is_listed_completely(self):
+        listed = [p for p in self.ext4_files if p.startswith("/usr/share/")]
+        self.assertEqual(len(listed), 40)
+
+    def test_an_encrypted_file_is_reported_not_read(self):
+        with self.assertRaisesRegex(ext.ExtError, "encrypted"):
+            self.ext4.read_file(self.ext4_files["/etc/secret.conf"])
+        opaque = [c for c in analyze("ext4_disk.img.gz")["bom"]["components"]
+                  if {"name": "fw2sbom:opaque", "value": "true"} in c.get("properties", [])]
+        self.assertEqual(len(opaque), 1)
+        self.assertIn("/etc/secret.conf", json.dumps(opaque[0]["evidence"]))
+
+    def test_a_journal_needing_recovery_is_reported(self):
+        self.assertTrue(any("recovery" in w for w in self.ext4.warnings))
+
+    def test_a_gzipped_disk_image_is_walked_to_its_rootfs(self):
+        """OpenWrt ships its x86 images gzipped. Scanned as one expanded blob
+        it would give noise; walked, the partition table and both
+        filesystems come out, and the rootfs is the one with a root in it."""
+        result = analyze("ext4_disk.img.gz")
+        kinds = [s["kind"] for s in result["segments"]]
+        self.assertIn("partition-table", kinds)
+        self.assertEqual(kinds.count("filesystem"), 2)
+        self.assertEqual(result["rootfs"]["os_release"]["version"], "23.05.5")
+        names = {c["name"]: c.get("version") for c in result["bom"]["components"]}
+        self.assertEqual(names.get("libcurl"), "8.4.0")
+        self.assertEqual(names.get("linux-kernel"), "6.6.52")   # boot partition
+
+    def test_a_fat_boot_sector_is_not_a_partition_table(self):
+        sector = bytearray(1024)
+        sector[0:3] = b"\xeb\x3c\x90"
+        sector[446:462] = bytes(range(16))              # boot code, not entries
+        sector[510:512] = b"\x55\xaa"
+        self.assertIsNone(container.parse_partition_table(bytes(sector)))
+
+    def test_a_damaged_filesystem_never_raises_anything_else(self):
+        blob = fixture("ext2_rootfs.bin")
+        rng = random.Random(11)
+        for length in (0, 1100, 2048, 5000, 20000):
+            try:
+                ext.Ext(blob[:length])
+            except ext.ExtError:
+                pass
+        for trial in range(150):
+            damaged = bytearray(blob[:40 * 1024])
+            for _ in range(6):
+                damaged[rng.randrange(1024, 40 * 1024)] = rng.randrange(256)
+            try:
+                fs = ext.Ext(bytes(damaged))
+                for node in fs.files().values():
+                    try:
+                        fs.read_file(node)
+                    except ext.ExtError:
+                        pass
+            except ext.ExtError:
+                pass
+
+
+class RealExtTest(unittest.TestCase):
+    """OpenWrt 23.05.5 x86-64, as downloaded, and the unblob ext samples."""
+
+    DIRECTORY = os.path.join(ROOT, "corpus")
+
+    def load(self, name):
+        path = os.path.join(self.DIRECTORY, name)
+        if not os.path.exists(path):
+            self.skipTest(f"{name} missing; run python scripts/fetch-corpus.py")
+        with open(path, "rb") as f:
+            return f.read()
+
+    def test_every_file_matches_the_same_release_in_squashfs(self):
+        """1,069 files, compared byte for byte with the same release built as
+        SquashFS - a reader checked against another reader, on real data."""
+        gunzip = lambda b: zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(b)
+        disk = gunzip(self.load("ext/openwrt-23.05.5-x86-64-generic-ext4-combined.img.gz"))
+        squash = squashfs.SquashFS(gunzip(self.load(
+            "ext/openwrt-23.05.5-x86-64-generic-squashfs-rootfs.img.gz")), 0)
+        table = container.parse_partition_table(disk)
+        self.assertEqual(len(table["partitions"]), 2)
+        rootfs = ext.Ext(disk, table["partitions"][1]["offset"])
+        ours, theirs = rootfs.files(), squash.files()
+        self.assertEqual(set(ours), set(theirs))
+        self.assertEqual(len(ours), 1069)
+        for path in ours:
+            self.assertEqual(rootfs.read_file(ours[path]),
+                             squash.read_file(theirs[path]), path)
+
+    def test_the_gzipped_release_image_gives_its_packages(self):
+        data = self.load("ext/openwrt-23.05.5-x86-64-generic-ext4-combined.img.gz")
+        result = core.run_analysis(data, image_input.detect_and_load(data), "x86.img.gz")
+        self.assertEqual(result["rootfs"]["os_release"]["version"], "23.05.5")
+        self.assertEqual(len(result["packages"]), 150)
+        self.assertIn("x86-64", result["rootfs"]["binaries"]["architecture"])
+
+    def test_the_unblob_samples_read(self):
+        expected = ["/apple.txt", "/banana.txt", "/cherry.txt"]
+        for name in ("formats/ext2_1024.bin", "formats/ext3_2048.bin",
+                     "formats/ext4_4096.bin"):
+            fs = ext.Ext(self.load(name))
+            self.assertEqual(sorted(fs.files()), expected, name)
+            self.assertEqual(fs.read_file(fs.files()["/apple.txt"]), b"apple\n")
+        at = self.load("formats/ext2_at_1024.bin")
+        self.assertEqual(ext.find_offsets(at), [1024])
+
+    def test_broken_symlinks_warn_and_never_raise(self):
+        fs = ext.Ext(self.load("formats/ext2_badsymlinks.bin"))
+        links = {p: n.get("target") for p, n in fs.walk()}
+        self.assertEqual(links["/long_fastlink"], "a" * 59)
+        self.assertEqual(len(links["/long_link"]), 1023)
+        self.assertEqual(links["/high_link"], "a" * 62)      # size field says 4 GiB
+        self.assertTrue(fs.warnings)
+
+
+class YAFFSTest(unittest.TestCase):
+    """YAFFS is a log on raw NAND with no superblock: the geometry is found by
+    trial, the newest chunk wins, and deleted objects stay deleted."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.image = fixture("yaffs2_rootfs.bin")
+        cls.fs = yaffs.YAFFS(cls.image)
+        cls.files = cls.fs.files()
+
+    def test_the_geometry_is_found_not_assumed(self):
+        g = self.fs.geometry
+        self.assertEqual((g.version, g.page, g.spare, g.tag_offset, g.order),
+                         (2, 2048, 64, 2, ">"))
+
+    def test_a_deleted_binary_is_not_listed_or_scanned(self):
+        """Its chunks are still on the flash; its header now sits in the
+        deleted directory. Listing it would put software in the SBOM that is
+        not on the device."""
+        self.assertIn(b"SSH-2.0-dropbear_2019.78", self.image)
+        self.assertNotIn("/bin/dropbear", self.files)
+        names = {c["name"] for c in analyze("yaffs2_rootfs.bin")["bom"]["components"]}
+        self.assertNotIn("dropbear", names)
+        self.assertIn("busybox", names)
+
+    def test_the_newest_copy_of_a_chunk_wins(self):
+        release = self.fs.read_file(self.files["/etc/os-release"])
+        self.assertIn(b"HiLinux 2.0.4", release)
+        self.assertNotIn(b"VendorOS", release)
+
+    def test_a_file_across_chunks_reads_whole(self):
+        busybox = self.fs.read_file(self.files["/bin/busybox"])
+        self.assertEqual(len(busybox), self.files["/bin/busybox"]["size"])
+        self.assertGreater(len(busybox), 2048)
+
+    def test_symlinks_keep_their_target(self):
+        links = {p: n.get("target") for p, n in self.fs.walk() if n["type"] == "symlink"}
+        self.assertEqual(links, {"/bin/sh": "busybox"})
+
+    def test_the_pipeline_reads_it_as_a_rootfs(self):
+        result = analyze("yaffs2_rootfs.bin")
+        self.assertEqual(result["rootfs"]["os_release"]["version"], "2.0.4")
+        self.assertEqual([p["name"] for p in result["packages"]], ["lighttpd"])
+        self.assertIn("MIPS", result["rootfs"]["binaries"]["architecture"])
+
+    def test_random_data_is_not_yaffs(self):
+        noise = bytes(random.Random(5).randrange(256) for _ in range(64 * 1024))
+        self.assertEqual([], yaffs.find_offsets(noise))
+        with self.assertRaises(yaffs.YAFFSError):
+            yaffs.YAFFS(noise)
+
+    def test_a_damaged_image_never_raises_anything_else(self):
+        rng = random.Random(13)
+        for length in (0, 100, 2112, 5000, 20000):
+            try:
+                yaffs.YAFFS(self.image[:length])
+            except yaffs.YAFFSError:
+                pass
+        for trial in range(150):
+            damaged = bytearray(self.image)
+            for _ in range(8):
+                damaged[rng.randrange(len(damaged))] = rng.randrange(256)
+            try:
+                fs = yaffs.YAFFS(bytes(damaged))
+                for node in fs.files().values():
+                    try:
+                        fs.read_file(node)
+                    except yaffs.YAFFSError:
+                        pass
+            except yaffs.YAFFSError:
+                pass
+
+
 class LZOTest(unittest.TestCase):
     """A decompressor can only be tested against a compressor that is not
     itself. The reference streams come from lzokay, an independent C++
@@ -3268,6 +3509,40 @@ class RealFormatSampleTest(unittest.TestCase):
         self.assertTrue(payload)
         self.assertTrue(any((s.get("opacity") or {}).get("opaque")
                             for s in payload), [s["label"] for s in payload])
+
+    def test_every_yaffs_geometry_reads_identically(self):
+        """Seven of unblob's 79 YAFFS samples are fetched: YAFFS2 at three
+        page sizes, both byte orders, both tag positions, a 16-byte spare
+        that cuts the tags short, and YAFFS1 in both byte orders."""
+        expected = {"/fruits/apple.txt": b"apple\n", "/fruits/cherry.txt": b"cherry\n"}
+        for name, geometry in (
+                ("yaffs2_2048_64_le.bin", (2, 2048, 64, 2, "<")),
+                ("yaffs2_4096_128_be.bin", (2, 4096, 128, 0, ">")),
+                ("yaffs2_16384_16_le.bin", (2, 16384, 16, 2, "<"))):
+            fs = yaffs.YAFFS(self.sample(name))
+            g = fs.geometry
+            self.assertEqual((g.version, g.page, g.spare, g.tag_offset, g.order),
+                             geometry, name)
+            files = fs.files()
+            for path, content in expected.items():
+                self.assertEqual(fs.read_file(files[path]), content, name)
+        for name in ("yaffs1_le.bin", "yaffs1_be.bin"):
+            fs = yaffs.YAFFS(self.sample(name))
+            self.assertEqual(fs.geometry.version, 1)
+            self.assertEqual(sorted(fs.files()),
+                             ["/dir/apple.txt", "/dir/banana.txt", "/dir/cherry.txt"])
+
+    def test_yaffs_links_and_a_damaged_parent(self):
+        fs = yaffs.YAFFS(self.sample("yaffs1_links.bin"))
+        listing = {p: n for p, n in fs.walk()}
+        self.assertEqual(fs.read_file(listing["/hardlink"]), b"content\n")
+        self.assertEqual(listing["/symlink2"]["target"], "dir/hardlink")
+        # A parent field pointing at a file: unblob drops that entry, and so
+        # must we - a path through a file is not a path.
+        fs = yaffs.YAFFS(self.sample("yaffs2_malformed_be.bin"))
+        self.assertNotIn("/fruits/banana.txt", fs.files())
+        self.assertFalse([p for p in fs.files() if p.startswith("/fruits/apple.txt/")])
+        self.assertIn("/fruits/apple.txt", fs.files())
 
     def test_ubi_volumes_are_reassembled_and_named(self):
         image = ubi.read_image(self.sample("ubi_fruits.bin"))

@@ -41,6 +41,7 @@ import zlib
 
 import elf
 import esp32
+import ext
 import fit
 import cpio
 import cramfs
@@ -50,6 +51,7 @@ import ubi
 import ubifs
 import uefi
 import vendor_container
+import yaffs
 
 # A decompressed region is capped so a crafted image cannot exhaust memory.
 MAX_EXPANDED = 256 * 1024 * 1024
@@ -60,7 +62,8 @@ MAX_SEGMENTS = 64
 # was handed. Catching the specific type is how a second filesystem turns into
 # a traceback instead of a warning.
 FILESYSTEM_ERRORS = (squashfs.SquashFSError, cramfs.CramFSError,
-                     jffs2.JFFS2Error, ubifs.UBIFSError, cpio.CPIOError)
+                     jffs2.JFFS2Error, ubifs.UBIFSError, cpio.CPIOError,
+                     ext.ExtError, yaffs.YAFFSError)
 
 UIMAGE_MAGIC = 0x27051956
 UIMAGE_HEADER_SIZE = 64
@@ -523,7 +526,95 @@ def _fit_segments(data, image, say, warnings, claim):
     return segments
 
 
-def walk(data, verbose=False, log=None, _inside_ubi=False):
+STRUCTURAL_KINDS = ("filesystem", "unread-filesystem", "boot-header",
+                    "vendor-header", "kernel", "fit-image", "device-tree",
+                    "image-metadata", "firmware-volume", "partition-table")
+
+
+def _nested_segments(expanded, offset, label, verbose, log, warnings,
+                     inside_ubi, depth):
+    """The segments inside an expanded region, or None if it holds none.
+
+    A disk image shipped gzipped - OpenWrt's x86 images, many appliance
+    updates - expands to a partition table and filesystems. Scanned as one
+    blob of strings it yields noise; walked, it yields its root filesystem.
+    Only one level down, and only used when the walk finds structure there.
+    """
+    inner, inner_warnings = walk(expanded, verbose, log, _inside_ubi=inside_ubi,
+                                 _depth=depth + 1)
+    if not any(s["kind"] in STRUCTURAL_KINDS for s in inner):
+        return None
+    warnings.extend(f"{label}: {w}" for w in inner_warnings)
+    for segment in inner:
+        if segment["content"] is None and segment["kind"] not in (
+                "filesystem", "unread-filesystem"):
+            segment["content"] = expanded[segment["offset"]:
+                                          segment["offset"] + segment["length"]]
+            segment["expanded"] = False
+        segment["expanded_offset"] = segment["offset"]
+        segment["label"] = (f"{segment['label']} (in the {label}, at "
+                            f"0x{segment['offset']:x} once expanded)")
+        segment["offset"] = offset
+    return inner
+
+
+SECTOR = 512
+MBR_TYPES = {0x83: "Linux", 0x82: "Linux swap", 0x0B: "FAT32", 0x0C: "FAT32 (LBA)",
+             0x06: "FAT16", 0x0E: "FAT16 (LBA)", 0x07: "NTFS/exFAT", 0xEF: "EFI system",
+             0xEE: "GPT protective", 0x05: "extended", 0x0F: "extended (LBA)"}
+
+
+def parse_partition_table(data):
+    """An MBR (and a GPT behind it, if protective) at the start of `data`.
+
+    Checked strictly, because 0x55AA at byte 510 is also how a FAT boot
+    sector ends: every entry must be empty or well-formed, and every
+    partition must start after sector 0, not overlap another, and lie inside
+    the image. Returns {kind, partitions, length} or None.
+    """
+    if len(data) < SECTOR * 2 or data[510:512] != b"\x55\xaa":
+        return None
+    partitions, spans = [], []
+    for index in range(4):
+        entry = data[446 + index * 16:462 + index * 16]
+        if entry == b"\0" * 16:
+            continue
+        boot, kind = entry[0], entry[4]
+        start, count = struct.unpack_from("<II", entry, 8)
+        if boot not in (0, 0x80) or kind == 0 or start == 0 or count == 0:
+            return None
+        if (start + count) * SECTOR > len(data) + SECTOR:
+            return None
+        spans.append((start, start + count))
+        partitions.append({"index": index + 1, "type": kind,
+                           "name": MBR_TYPES.get(kind, f"type 0x{kind:02x}"),
+                           "offset": start * SECTOR, "length": count * SECTOR})
+    if not partitions:
+        return None
+    spans.sort()
+    if any(a[1] > b[0] for a, b in zip(spans, spans[1:])):
+        return None
+    table = {"kind": "MBR", "partitions": partitions, "length": SECTOR}
+    if any(p["type"] == 0xEE for p in partitions) and data[512:520] == b"EFI PART":
+        entries_lba, count, size = struct.unpack_from("<QII", data, 512 + 72)
+        gpt = []
+        if 128 <= size <= 1024 and count <= 256:
+            for index in range(count):
+                at = entries_lba * SECTOR + index * size
+                entry = data[at:at + size]
+                if len(entry) < 128 or entry[:16] == b"\0" * 16:
+                    continue
+                first, last = struct.unpack_from("<QQ", entry, 32)
+                name = entry[56:128].decode("utf-16-le", "replace").split("\0")[0]
+                gpt.append({"index": index + 1, "type": entry[:16].hex(),
+                            "name": name or "unnamed", "offset": first * SECTOR,
+                            "length": (last - first + 1) * SECTOR})
+            table = {"kind": "GPT", "partitions": gpt,
+                     "length": (entries_lba * SECTOR + count * size)}
+    return table
+
+
+def walk(data, verbose=False, log=None, _inside_ubi=False, _depth=0):
     """Segment a firmware image. Returns (segments, warnings).
 
     Segments are returned in image order. Each carries `content` - the bytes
@@ -591,6 +682,20 @@ def walk(data, verbose=False, log=None, _inside_ubi=False):
             content=data[start:], expanded=False,
             openwrt_metadata=trailer["metadata"]))
         claim(start, len(data))
+
+    # --- 0.65 A partition table: an eMMC dump or a disk image --------------
+    table = parse_partition_table(data)
+    if table:
+        described = ", ".join(f"{p['name']} at 0x{p['offset']:x}"
+                              for p in table["partitions"])
+        say(f"container: {table['kind']} partition table, "
+            f"{len(table['partitions'])} partition(s): {described}")
+        segments.append(_segment(
+            "partition-table", 0, table["length"],
+            f"{table['kind']} partition table ({len(table['partitions'])} "
+            "partition(s))", content=data[:table["length"]], expanded=False,
+            partition_table=table))
+        claim(0, table["length"])
 
     # --- 0.7 FIT images: a boot container that documents itself ------------
     for offset in fit.find_offsets(data):
@@ -717,6 +822,47 @@ def walk(data, verbose=False, log=None, _inside_ubi=False):
         if len(segments) >= MAX_SEGMENTS:
             break
 
+    # ext2/3/4 - the rootfs wherever firmware lives on a block device.
+    for offset in ext.find_offsets(data):
+        if any(s <= offset < e for s, e in covered):
+            continue
+        try:
+            image = ext.Ext(data, offset)
+        except ext.ExtError:
+            continue
+        end = min(len(data), offset + image.size)
+        say(f"container: {image.version} at 0x{offset:x}, "
+            f"{image.block_size}-byte blocks, {image.size} bytes"
+            + (f", volume {image.volume_name!r}" if image.volume_name else ""))
+        for note in image.warnings:
+            say(f"container:   {note}")
+        segments.append(_segment(
+            "filesystem", offset, end - offset,
+            f"{image.version}" + (f" '{image.volume_name}'" if image.volume_name
+                                  else ""),
+            content=None, filesystem=image))
+        claim(offset, end)
+        if len(segments) >= MAX_SEGMENTS:
+            break
+
+    # YAFFS: raw NAND pages with their spare areas, geometry found by trial.
+    for offset in yaffs.find_offsets(data):
+        if any(s <= offset < e for s, e in covered):
+            continue
+        try:
+            image = yaffs.YAFFS(data, offset)
+        except yaffs.YAFFSError:
+            continue
+        say(f"container: {image.geometry.label()} at 0x{offset:x}, "
+            f"{len(image.objects)} objects, {image.end - offset} bytes")
+        segments.append(_segment(
+            "filesystem", offset, image.end - offset,
+            f"YAFFS{image.geometry.version} ({image.byte_order})",
+            content=None, filesystem=image))
+        claim(offset, image.end)
+        if len(segments) >= MAX_SEGMENTS:
+            break
+
     # JFFS2 has no superblock: a stream is wherever nodes with valid header
     # CRCs begin, and it ends where the last of them does. On a device dump it
     # is usually the writable overlay sitting after a read-only rootfs.
@@ -758,6 +904,11 @@ def walk(data, verbose=False, log=None, _inside_ubi=False):
                             archive = cpio.CPIO(expanded)
                         except cpio.CPIOError:
                             archive = None
+                    nested = None
+                    if archive is None and _depth == 0:
+                        nested = _nested_segments(
+                            expanded, at, f"{algorithm} region at 0x{at:x}",
+                            verbose, log, warnings, _inside_ubi, _depth)
                     if archive is not None:
                         say(f"container:   an initramfs, {len(archive.entries)} "
                             "entries")
@@ -765,6 +916,10 @@ def walk(data, verbose=False, log=None, _inside_ubi=False):
                             archive, at, len(data) - at,
                             f"initramfs (cpio, {algorithm})",
                             algorithm=algorithm))
+                    elif nested:
+                        say(f"container:   the expanded data is itself an image: "
+                            f"{len(nested)} segment(s) inside")
+                        segments.extend(nested)
                     else:
                         segments.append(_segment(
                             "compressed", at, len(data) - at,
