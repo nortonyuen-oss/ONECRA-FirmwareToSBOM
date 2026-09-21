@@ -14,6 +14,8 @@ this is meant for local, single-user use.
 """
 
 import base64
+import csv
+import hashlib
 import time
 import threading
 import collections
@@ -22,9 +24,11 @@ import os
 import socket
 import re
 import sys
+import urllib.parse
 import uuid
 import io
 import webbrowser
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -44,8 +48,14 @@ PORT = int(os.environ.get("FW2SBOM_PORT", "8765"))
 # seconds after the upload; without a bound, a service left running all week
 # would hold every analysis anyone ever ran. Entries expire by age and the
 # oldest are dropped once the store is full.
-SBOM_STORE_MAX_ENTRIES = 32
+#
+# Bounded by bytes as well as count: a batch of fifty images must not push the
+# first result out before the page collects it, and a count alone cannot tell
+# a 20 KB microcontroller SBOM from a 5 MB router one.
+SBOM_STORE_MAX_ENTRIES = 1000
+SBOM_STORE_MAX_BYTES = 512 * 1024 * 1024
 SBOM_STORE_TTL_SECONDS = 3600
+BUNDLE_MAX_IDS = 500
 _SBOM_STORE = collections.OrderedDict()
 _SBOM_STORE_LOCK = threading.Lock()
 
@@ -57,6 +67,11 @@ _JOBS = collections.OrderedDict()
 _JOBS_LOCK = threading.Lock()
 JOBS_MAX = 32
 JOBS_TTL_SECONDS = 3600
+
+# One analysis at a time. An analysis holds the image and everything expanded
+# out of it; two 500 MB flash dumps side by side is how a laptop runs out of
+# memory. A second upload waits its turn, and the page says so.
+ANALYSIS_SLOTS = threading.BoundedSemaphore(1)
 
 
 def _job_new():
@@ -95,6 +110,14 @@ def _publish(result):
         "spdx": result["spdx_json"], "spdx_name": result["spdx_filename"],
         "xlsx": result["evidence_xlsx"],
         "xlsx_name": result["evidence_filename"],
+        "summary": {
+            "firmware": result["firmware_filename"],
+            "sha256": result["sha256"],
+            "size": result["file_size_bytes"],
+            "architecture": result["architecture"] or "",
+            "components": len(result["components"]),
+            "opaque": result["opaque_count"],
+        },
     })
     return {
         "components": result["components"],
@@ -112,6 +135,8 @@ def _publish(result):
         "spdx_filename": result["spdx_filename"],
         "evidence_url": f"/evidence/{sbom_id}",
         "evidence_filename": result["evidence_filename"],
+        "sbom_id": sbom_id,
+        "opaque_count": result["opaque_count"],
     }
 
 
@@ -119,16 +144,28 @@ def _run_job(job_id, filename, data, vendor_uploads):
     """The worker thread. Every outcome ends in done=True - a job that dies
     without saying so leaves the page polling a bar that never moves."""
     progress = core.Progress(lambda state: _job_update(job_id, state=state))
+    if not ANALYSIS_SLOTS.acquire(blocking=False):
+        waiting = progress.state()
+        waiting["stage"] = "queued"
+        _job_update(job_id, state=waiting)
+        ANALYSIS_SLOTS.acquire()
     try:
         result = analyze_bytes(filename, data, vendor_uploads, progress)
+        del data                                 # the image, not the results
         _job_update(job_id, result=_publish(result), done=True,
                     state=progress.state())
     except Exception as e:                      # reported, never swallowed
         _job_update(job_id, error=f"analysis failed: {e}", done=True)
+    finally:
+        ANALYSIS_SLOTS.release()
+
+
+def _entry_bytes(entry):
+    return sum(len(entry.get(key) or b"") for key in ("json", "spdx", "xlsx"))
 
 
 def _store_put(sbom_id, entry):
-    """Insert one result, expiring old entries and capping the total."""
+    """Insert one result, expiring old entries and capping count and bytes."""
     now = time.time()
     entry["stored_at"] = now
     with _SBOM_STORE_LOCK:
@@ -136,8 +173,12 @@ def _store_put(sbom_id, entry):
                        if now - v["stored_at"] > SBOM_STORE_TTL_SECONDS]:
             del _SBOM_STORE[old_id]
         _SBOM_STORE[sbom_id] = entry
-        while len(_SBOM_STORE) > SBOM_STORE_MAX_ENTRIES:
-            _SBOM_STORE.popitem(last=False)
+        total = sum(_entry_bytes(v) for v in _SBOM_STORE.values())
+        while len(_SBOM_STORE) > 1 and (
+                len(_SBOM_STORE) > SBOM_STORE_MAX_ENTRIES
+                or total > SBOM_STORE_MAX_BYTES):
+            _old_id, old = _SBOM_STORE.popitem(last=False)
+            total -= _entry_bytes(old)
 
 
 def _store_get(sbom_id):
@@ -334,6 +375,33 @@ PAGE_TEMPLATE = """<!doctype html>
   .conflict b { color: var(--heading); }
   .conflict .v { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; }
   .not-observed { color: var(--muted); font-size: .82rem; margin: .4rem 0 0; line-height: 1.6; }
+  #drop .pick-folder {
+    background: none; border: none; color: var(--accent); cursor: pointer;
+    font: inherit; font-size: .85rem; text-decoration: underline; padding: 0;
+  }
+  #batch { display: none; }
+  #batch.show { display: block; }
+  #batch .batch-head { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center; justify-content: space-between; margin-bottom: .75rem; }
+  #batch .batch-head b { color: var(--heading); }
+  #batch-summary { font-size: .85rem; color: var(--muted); font-variant-numeric: tabular-nums; }
+  #bundle {
+    background: var(--accent); color: var(--accent-fg); border: none; border-radius: 8px;
+    padding: .5rem .9rem; font: inherit; font-size: .85rem; cursor: pointer; text-decoration: none;
+  }
+  #bundle[aria-disabled="true"] { opacity: .45; pointer-events: none; }
+  .batch-wrap { overflow-x: auto; }
+  #batch-table td { vertical-align: top; }
+  #batch-table td.num { font-variant-numeric: tabular-nums; text-align: right; }
+  #batch-table .fname { word-break: break-all; }
+  #batch-table .state { font-size: .85rem; white-space: nowrap; }
+  #batch-table .state.err { color: var(--err); white-space: normal; }
+  #batch-table .state.ok { color: var(--high); }
+  #batch-table .links a, #batch-table .links button {
+    font-size: .8rem; margin-right: .5rem; color: var(--accent); background: none;
+    border: none; padding: 0; cursor: pointer; font-family: inherit; white-space: nowrap;
+  }
+  #batch-table tr.viewing td { background: var(--accent-soft); }
+  .batch-note { font-size: .8rem; color: var(--muted); margin: .5rem 0 0; }
   .disclaimer { margin-top: 1.5rem; font-size: .78rem; color: var(--muted); line-height: 1.5; }
   footer { margin-top: 2rem; font-size: .78rem; color: var(--muted); }
 </style>
@@ -352,8 +420,10 @@ PAGE_TEMPLATE = """<!doctype html>
   <div class="wrap">
     <div id="drop">
       <p><strong>拖曳 firmware 檔案到這裡</strong></p>
-      <p class="hint">任何副檔名皆可（本機分析，檔案不會寫入磁碟、也不會外傳）</p>
-      <input type="file" id="file-input" accept="*/*">
+      <p class="hint">任何副檔名皆可；可一次拖入多個檔案或整個資料夾（本機分析，檔案不會寫入磁碟、也不會外傳）</p>
+      <p class="hint"><button type="button" class="pick-folder" id="pick-folder">或選擇整個資料夾</button></p>
+      <input type="file" id="file-input" accept="*/*" multiple>
+      <input type="file" id="folder-input" webkitdirectory multiple hidden>
     </div>
 
     <div id="vendor-zone">
@@ -386,6 +456,20 @@ PAGE_TEMPLATE = """<!doctype html>
       </div>
     </div>
     <div id="status"></div>
+
+    <div class="card" id="batch">
+      <div class="batch-head">
+        <div><b>批次分析</b> <span id="batch-summary"></span></div>
+        <a id="bundle" href="#" aria-disabled="true">全部下載（ZIP）</a>
+      </div>
+      <div class="batch-wrap">
+        <table id="batch-table">
+          <thead><tr><th>檔案</th><th>狀態</th><th>元件</th><th>無法分析</th><th>下載</th></tr></thead>
+          <tbody id="batch-body"></tbody>
+        </table>
+      </div>
+      <p class="batch-note" id="batch-note">一次分析一個檔案，依序進行。ZIP 內含每個檔案的 CycloneDX、SPDX、證據報告，以及一份 batch-summary.csv。結果保留一小時。</p>
+    </div>
 
     <div class="card" id="result">
       <div class="meta" id="meta"></div>
@@ -483,6 +567,7 @@ function levelClass(level) {
 // so any estimate would be a guess dressed as a measurement.
 
 const STAGES = {
+  queued: '排隊等候其他分析完成',
   upload: '上傳檔案',
   reading: '辨識格式、去除封包框',
   architecture: '判定指令集',
@@ -597,7 +682,7 @@ function upload(url, form, onProgress) {
   });
 }
 
-async function watch(job, run) {
+async function watch(job, run, onFraction) {
   while (run === currentRun) {
     const res = await fetch(job.progress_url, { cache: 'no-store' });
     const body = await res.json();
@@ -605,8 +690,9 @@ async function watch(job, run) {
     if (run !== currentRun) return null;
     const state = body.state || {};
     step = Math.min(TOTAL_STEPS, (state.step || 0) + 1);
-    drawBar(UPLOAD_SHARE + (100 - UPLOAD_SHARE) * (state.percent || 0) / 100,
-            state.stage, state.detail);
+    const shown = UPLOAD_SHARE + (100 - UPLOAD_SHARE) * (state.percent || 0) / 100;
+    drawBar(shown, state.stage, state.detail);
+    if (onFraction) onFraction(shown, state.stage);
     if (body.done) {
       if (body.error) throw new Error(body.error);
       return body.result;
@@ -616,6 +702,24 @@ async function watch(job, run) {
   return null;                    // a newer file superseded this one
 }
 
+async function analyse(file, run, withVendor, onFraction) {
+  const fd = new FormData();
+  fd.append('file', file, file.name);
+  if (withVendor) {
+    for (const vendorFile of vendorFiles) {
+      fd.append('vendor', vendorFile, vendorFile.name);
+    }
+  }
+  const job = await upload('/analyze/start', fd, function (fraction) {
+    if (run === currentRun) {
+      drawBar(UPLOAD_SHARE * fraction, 'upload', null);
+      if (onFraction) onFraction(UPLOAD_SHARE * fraction);
+    }
+  });
+  if (run !== currentRun) return null;
+  return await watch(job, run, onFraction);
+}
+
 async function handleFile(file) {
   if (!file) return;
   // A new file - or a vendor SBOM added mid-run - supersedes whatever was
@@ -623,22 +727,13 @@ async function handleFile(file) {
   const run = ++currentRun;
   setStatus('');
   card.classList.remove('show');
+  batchCard.classList.remove('show');
   startProgress();
-
   lastFirmware = file;
-  const fd = new FormData();
-  fd.append('file', file, file.name);
-  for (const vendorFile of vendorFiles) {
-    fd.append('vendor', vendorFile, vendorFile.name);
-  }
 
   let data;
   try {
-    const job = await upload('/analyze/start', fd, function (fraction) {
-      if (run === currentRun) drawBar(UPLOAD_SHARE * fraction, 'upload', null);
-    });
-    if (run !== currentRun) return;
-    data = await watch(job, run);
+    data = await analyse(file, run, true, null);
     if (data === null) return;
   } catch (e) {
     if (run !== currentRun) return;
@@ -647,8 +742,11 @@ async function handleFile(file) {
     return;
   }
   stopProgress('done');
+  renderResult(data, file.name);
+}
 
-  setStatus(data.components.length + ' 個 component 已識別（' + file.name + '）');
+function renderResult(data, fileName) {
+  setStatus(data.components.length + ' 個 component 已識別（' + fileName + '）');
   meta.innerHTML =
     '<span><b>檔案大小:</b> ' + data.file_size_bytes + ' bytes</span>' +
     '<span><b>字串數:</b> ' + data.n_strings + '</span>' +
@@ -718,6 +816,163 @@ async function handleFile(file) {
   card.classList.add('show');
 }
 
+// --- Batch ---------------------------------------------------------------
+//
+// Files are analysed one after another, never side by side: the server runs
+// one analysis at a time anyway, and a queue the page can show is better
+// than several uploads racing for the same memory.
+
+const batchCard = document.getElementById('batch');
+const batchBody = document.getElementById('batch-body');
+const batchSummary = document.getElementById('batch-summary');
+const batchNote = document.getElementById('batch-note');
+const bundleLink = document.getElementById('bundle');
+let batchRows = [];
+
+function drawBatchSummary() {
+  const done = batchRows.filter(function (r) { return r.data; }).length;
+  const failed = batchRows.filter(function (r) { return r.error; }).length;
+  batchSummary.textContent = batchRows.length + ' 個檔案 · 完成 ' + done +
+    (failed ? ' · 失敗 ' + failed : '');
+  const ids = batchRows.filter(function (r) { return r.data; })
+    .map(function (r) { return r.data.sbom_id; });
+  if (ids.length) {
+    bundleLink.href = '/bundle?ids=' + ids.join(',');
+    bundleLink.setAttribute('aria-disabled', 'false');
+  } else {
+    bundleLink.href = '#';
+    bundleLink.setAttribute('aria-disabled', 'true');
+  }
+}
+
+function drawRow(row) {
+  const state = row.tr.querySelector('.state');
+  const links = row.tr.querySelector('.links');
+  if (row.data) {
+    state.className = 'state ok';
+    state.textContent = '完成';
+    row.tr.querySelector('.n-comp').textContent = row.data.components.length;
+    row.tr.querySelector('.n-opaque').textContent = row.data.opaque_count || 0;
+    links.innerHTML =
+      '<a href="' + row.data.download_url + '" download="' + escapeHtml(row.data.download_filename) + '">CycloneDX</a>' +
+      '<a href="' + row.data.spdx_url + '" download="' + escapeHtml(row.data.spdx_filename) + '">SPDX</a>' +
+      '<a href="' + row.data.evidence_url + '" download="' + escapeHtml(row.data.evidence_filename) + '">Excel</a>' +
+      '<button type="button">查看</button>';
+    links.querySelector('button').addEventListener('click', function () {
+      batchRows.forEach(function (r) { r.tr.classList.remove('viewing'); });
+      row.tr.classList.add('viewing');
+      renderResult(row.data, row.file.name);
+    });
+  } else if (row.error) {
+    state.className = 'state err';
+    state.textContent = '錯誤：' + row.error;
+  } else if (row.active) {
+    state.className = 'state';
+    state.textContent = (row.stage === 'queued' ? '排隊中' : '分析中 ' + Math.floor(row.percent || 0) + '%');
+  } else {
+    state.className = 'state';
+    state.textContent = '等待中';
+  }
+}
+
+async function handleBatch(files) {
+  const run = ++currentRun;
+  setStatus('');
+  card.classList.remove('show');
+  batchBody.innerHTML = '';
+  batchRows = files.map(function (file) {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td class="fname">' + escapeHtml(file.webkitRelativePath || file.name) + '</td>' +
+      '<td class="state"></td><td class="num n-comp"></td><td class="num n-opaque"></td>' +
+      '<td class="links"></td>';
+    batchBody.appendChild(tr);
+    return { file: file, tr: tr };
+  });
+  batchNote.textContent = '一次分析一個檔案，依序進行。ZIP 內含每個檔案的 CycloneDX、SPDX、證據報告，以及一份 batch-summary.csv。結果保留一小時。' +
+    (vendorFiles.length ? '廠商 SBOM 只用於單一檔案分析，批次時不會套用。' : '');
+  batchRows.forEach(drawRow);
+  drawBatchSummary();
+  batchCard.classList.add('show');
+
+  for (let i = 0; i < batchRows.length; i++) {
+    if (run !== currentRun) return;
+    const row = batchRows[i];
+    row.active = true;
+    drawRow(row);
+    startProgress();
+    try {
+      row.data = await analyse(row.file, run, false, function (percent, stage) {
+        row.percent = percent;
+        row.stage = stage;
+        drawRow(row);
+      });
+      if (row.data === null) return;
+      stopProgress('done');
+    } catch (e) {
+      if (run !== currentRun) return;
+      row.error = e.message;
+      stopProgress('failed', '錯誤：' + e.message);
+    }
+    row.active = false;
+    drawRow(row);
+    drawBatchSummary();
+    progressStage.textContent = '第 ' + (i + 1) + ' / ' + batchRows.length + ' 個：' + row.file.name;
+  }
+  const ok = batchRows.filter(function (r) { return r.data; }).length;
+  // The bar ends on the batch, not on whichever file happened to be last -
+  // a failed last file must not make the whole batch read as failed.
+  progressBox.classList.remove('failed', 'done');
+  progressBox.classList.add(ok === batchRows.length ? 'done' : 'failed');
+  drawBar(100, 'done', null);
+  progressStage.textContent = '批次完成：' + ok + ' / ' + batchRows.length + ' 個檔案產生了 SBOM';
+  progressDetail.textContent = batchRows.length - ok ? (batchRows.length - ok) + ' 個失敗，原因見下表' : '';
+  progressMeta.textContent = '';
+  setStatus('批次完成：' + ok + ' / ' + batchRows.length + ' 個檔案產生了 SBOM', ok < batchRows.length);
+}
+
+function handleFiles(files) {
+  const list = Array.from(files || []).filter(function (f) { return f && f.size !== undefined; });
+  if (!list.length) return;
+  if (list.length === 1) handleFile(list[0]);
+  else handleBatch(list);
+}
+
+// A dropped folder arrives as a directory entry; walk it for its files.
+function readEntry(entry, out) {
+  return new Promise(function (resolve) {
+    if (entry.isFile) {
+      entry.file(function (file) { out.push(file); resolve(); }, function () { resolve(); });
+    } else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      const all = [];
+      (function more() {
+        reader.readEntries(function (batch) {
+          if (!batch.length) {
+            Promise.all(all.map(function (e) { return readEntry(e, out); })).then(resolve);
+            return;
+          }
+          all.push.apply(all, batch);
+          more();
+        }, function () { resolve(); });
+      })();
+    } else {
+      resolve();
+    }
+  });
+}
+
+async function filesFromDrop(dataTransfer) {
+  const items = dataTransfer.items ? Array.from(dataTransfer.items) : [];
+  const entries = items.map(function (item) {
+    return item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
+  }).filter(Boolean);
+  if (!entries.length) return Array.from(dataTransfer.files || []);
+  const out = [];
+  await Promise.all(entries.map(function (e) { return readEntry(e, out); }));
+  out.sort(function (a, b) { return a.name.localeCompare(b.name); });
+  return out;
+}
+
 function renderVendor(data) {
   vendorNotice.classList.remove('show');
   vendorNotice.innerHTML = '';
@@ -778,16 +1033,21 @@ vendorZone.addEventListener('drop', (e) => {
   }
 });
 
+const folderInput = document.getElementById('folder-input');
 drop.addEventListener('click', () => input.click());
-input.addEventListener('change', (e) => handleFile(e.target.files[0]));
+document.getElementById('pick-folder').addEventListener('click', (e) => {
+  e.stopPropagation();
+  folderInput.click();
+});
+input.addEventListener('change', (e) => handleFiles(e.target.files));
+folderInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
 ['dragenter', 'dragover'].forEach(evt =>
   drop.addEventListener(evt, (e) => { e.preventDefault(); drop.classList.add('drag'); }));
 ['dragleave', 'drop'].forEach(evt =>
   drop.addEventListener(evt, (e) => { e.preventDefault(); drop.classList.remove('drag'); }));
-drop.addEventListener('drop', (e) => {
-  const f = e.dataTransfer.files && e.dataTransfer.files[0];
-  handleFile(f);
+drop.addEventListener('drop', async (e) => {
+  handleFiles(await filesFromDrop(e.dataTransfer));
 });
 </script>
 </body>
@@ -798,6 +1058,129 @@ PAGE = (PAGE_TEMPLATE
         .replace("__LOGO_DATA_URI__", LOGO_DATA_URI)
         .replace("__ICON_DATA_URI__", ICON_DATA_URI)
         .replace("__TOOL_VERSION__", core.TOOL_VERSION))
+
+
+class MultipartError(ValueError):
+    pass
+
+
+STREAM_CHUNK = 1024 * 1024
+MAX_PART_HEADERS = 16 * 1024
+
+
+def _disposition(header_blob):
+    m = re.search(r'Content-Disposition:\s*form-data;\s*(.*)', header_blob,
+                  re.IGNORECASE)
+    if not m:
+        return None, None
+    params = {}
+    for kv in m.group(1).split(";"):
+        kv = kv.strip()
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            params[k.strip()] = v.strip().strip('"')
+    return params.get("name"), params.get("filename")
+
+
+def stream_multipart(stream, length, boundary, chunk=STREAM_CHUNK):
+    """Parse a multipart/form-data body as it arrives, without holding it.
+
+    The old path read the whole request into memory and then split and
+    sliced it - four or five copies of a 500 MB flash dump before analysis
+    had even begun. This reads `length` bytes from `stream` a chunk at a time
+    and appends each part's content straight into its own buffer, so the
+    firmware exists once. Nothing is written to disk: the page promises the
+    customer that, and a temporary file is still a copy of their firmware on
+    a disk they did not choose.
+
+    Returns the same {field: [value, ...]} shape as parse_multipart.
+    """
+    delimiter = b"\r\n--" + boundary
+    fields = {}
+    remaining = length
+    # Pretend a CRLF precedes the first boundary, so every boundary - the
+    # first included - is found by the same search.
+    buf = bytearray(b"\r\n")
+    state = "preamble"
+    part_name = part_file = None
+    content = None
+
+    def read_more():
+        nonlocal remaining
+        if remaining <= 0:
+            return False
+        block = stream.read(min(chunk, remaining))
+        if not block:
+            raise MultipartError("the upload ended before its declared length")
+        remaining -= len(block)
+        buf.extend(block)
+        return True
+
+    def finish_part():
+        if part_name is None:
+            return
+        # BytesIO rather than bytearray: getvalue() hands over its buffer
+        # without copying it, where bytes(bytearray) makes a second full copy
+        # - 107 MiB against 207 MiB at the peak, for a 100 MiB upload.
+        value = content.getvalue()
+        if part_file is not None:
+            fields.setdefault(part_name, []).append((part_file, value))
+        else:
+            fields.setdefault(part_name, []).append(
+                value.decode("utf-8", errors="replace"))
+
+    while True:
+        if state == "preamble":
+            at = buf.find(delimiter)
+            if at == -1:
+                del buf[:max(0, len(buf) - len(delimiter))]
+                if not read_more():
+                    raise MultipartError("no multipart boundary in the upload")
+                continue
+            del buf[:at + len(delimiter)]
+            state = "after-boundary"
+        elif state == "after-boundary":
+            while len(buf) < 2 and read_more():
+                pass
+            if buf[:2] == b"--":
+                # The closing boundary. Whatever follows is epilogue, but it
+                # is still on the socket: left there, a keep-alive connection
+                # would read it as the start of the next request.
+                while remaining > 0:
+                    block = stream.read(min(chunk, remaining))
+                    if not block:
+                        break
+                    remaining -= len(block)
+                return fields
+            end = buf.find(b"\r\n\r\n")
+            if end == -1:
+                if len(buf) > MAX_PART_HEADERS:
+                    raise MultipartError("part headers are implausibly long")
+                if not read_more():
+                    raise MultipartError("the upload ended inside part headers")
+                continue
+            header_blob = bytes(buf[:end]).decode("utf-8", errors="replace")
+            del buf[:end + 4]
+            part_name, part_file = _disposition(header_blob)
+            content = io.BytesIO()
+            state = "content"
+        else:                                          # content
+            at = buf.find(delimiter)
+            if at == -1:
+                # Keep enough of the tail to catch a boundary split across
+                # two reads; everything before it is content.
+                keep = len(delimiter) - 1
+                if len(buf) > keep:
+                    content.write(memoryview(buf)[:len(buf) - keep])
+                    del buf[:len(buf) - keep]
+                if not read_more():
+                    raise MultipartError("the upload ended inside a part")
+                continue
+            content.write(memoryview(buf)[:at])
+            del buf[:at + len(delimiter)]
+            finish_part()
+            part_name = part_file = content = None
+            state = "after-boundary"
 
 
 def parse_multipart(body, boundary):
@@ -842,6 +1225,59 @@ def parse_multipart(body, boundary):
             fields.setdefault(name, []).append(
                 content.decode("utf-8", errors="replace"))
     return fields
+
+
+def build_bundle(entries, missing=()):
+    """A zip of every deliverable in a batch, plus a summary spreadsheet.
+
+    Names are made unique the way a person would: two images both called
+    firmware.bin get firmware_SBOM.cdx.json and firmware (2)_SBOM.cdx.json,
+    not one silently overwriting the other.
+    """
+    out = io.BytesIO()
+    used = set()
+
+    def unique(name):
+        stem, ext = name, ""
+        for suffix in ("_SBOM.cdx.json", "_SBOM.spdx.json", "_Evidence.xlsx"):
+            if name.endswith(suffix):
+                stem, ext = name[:-len(suffix)], suffix
+        candidate, n = name, 2
+        while candidate in used:
+            candidate = f"{stem} ({n}){ext}"
+            n += 1
+        used.add(candidate)
+        return candidate
+
+    rows = []
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as bundle:
+        for _sbom_id, entry in entries:
+            names = {}
+            for key in ("json", "spdx", "xlsx"):
+                if entry.get(key) is None:
+                    continue
+                names[key] = unique(entry[key + "_name"])
+                body = entry[key]
+                bundle.writestr(names[key], body.encode("utf-8")
+                                if isinstance(body, str) else body)
+            summary = entry.get("summary") or {}
+            rows.append([summary.get("firmware", ""), summary.get("sha256", ""),
+                         summary.get("size", ""), summary.get("architecture", ""),
+                         summary.get("components", ""), summary.get("opaque", ""),
+                         names.get("json", ""), names.get("spdx", ""),
+                         names.get("xlsx", "")])
+        table = io.StringIO()
+        writer = csv.writer(table, lineterminator="\r\n")
+        writer.writerow(["firmware", "sha256", "bytes", "architecture",
+                         "components", "opaque regions", "CycloneDX", "SPDX",
+                         "evidence"])
+        writer.writerows(rows)
+        for sbom_id in missing:
+            writer.writerow([f"(result {sbom_id} had expired and is not included)"])
+        # A byte-order mark so Excel reads the UTF-8 - the file names in it
+        # are often not ASCII.
+        bundle.writestr("batch-summary.csv", "\ufeff" + table.getvalue())
+    return out.getvalue()
 
 
 def summarise(bom):
@@ -959,8 +1395,14 @@ def analyze_bytes(filename, data, vendor_uploads=None, progress=None):
     evidence = io.BytesIO()
     evidence_report.build_workbook(context, bom).save(evidence)
     summary = summarise(bom)
+    opaque_count = sum(
+        1 for c in bom.get("components", [])
+        if {"name": "fw2sbom:opaque", "value": "true"} in c.get("properties", []))
     progress.finish()
     return {
+        "firmware_filename": os.path.basename(name),
+        "sha256": hashlib.sha256(delivered).hexdigest(),
+        "opaque_count": opaque_count,
         "sbom_json": json.dumps(bom, indent=2),
         "sbom_filename": sbom_filename,
         "spdx_json": json.dumps(spdx, indent=2),
@@ -1017,6 +1459,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"state": job["state"], "done": job["done"],
                                  "error": job["error"],
                                  "result": job["result"]})
+        elif self.path.startswith("/bundle?"):
+            self._send_bundle(self.path, write_body)
         elif self.path.startswith("/download/"):
             self._send_attachment(self.path[len("/download/"):], "json",
                                   "application/json", write_body)
@@ -1030,6 +1474,27 @@ class Handler(BaseHTTPRequestHandler):
                 "spreadsheetml.sheet", write_body)
         else:
             self.send_error(404, "not found")
+
+    def _send_bundle(self, path, write_body):
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(path).query)
+        ids = [i for i in ",".join(query.get("ids", [])).split(",")
+               if re.fullmatch(r"[0-9a-f]{32}", i)][:BUNDLE_MAX_IDS]
+        entries = [(i, _store_get(i)) for i in ids]
+        missing = [i for i, e in entries if e is None]
+        entries = [(i, e) for i, e in entries if e is not None]
+        if not entries:
+            self.send_error(404, "none of those results are still held; "
+                                 "they expire an hour after analysis")
+            return
+        body = build_bundle(entries, missing)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/zip")
+        self.send_header("Content-Disposition",
+                         'attachment; filename="fw2sbom-batch.zip"')
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        if write_body:
+            self.wfile.write(body)
 
     def _send_attachment(self, sbom_id, key, content_type, write_body):
         entry = _store_get(sbom_id)
@@ -1069,11 +1534,12 @@ class Handler(BaseHTTPRequestHandler):
         if length <= 0 or length > max_upload:
             self._send_json({"error": "missing file or upload too large"}, 400)
             return
-        body = self.rfile.read(length)
-
+        # Parsed as it arrives: the firmware is held once, in memory, and
+        # never written to disk.
         try:
-            fields = parse_multipart(body, boundary)
-        except Exception as e:
+            fields = stream_multipart(self.rfile, length, boundary)
+        except (MultipartError, OSError) as e:
+            self.close_connection = True
             self._send_json({"error": f"malformed upload: {e}"}, 400)
             return
 
@@ -1101,7 +1567,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
-            result = analyze_bytes(filename, data, vendor_uploads)
+            with ANALYSIS_SLOTS:
+                result = analyze_bytes(filename, data, vendor_uploads)
         except Exception as e:
             self._send_json({"error": f"analysis failed: {e}"}, 500)
             return

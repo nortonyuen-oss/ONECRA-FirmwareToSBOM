@@ -1,6 +1,6 @@
 # 專案狀態
 
-快照日期:**2026-09-21** · 版本 **v1.21.0**
+快照日期:**2026-09-21** · 版本 **v1.22.0**
 
 這份是「現在站在哪裡」的單頁摘要。逐個 release 的細節在 [RELEASE.md](RELEASE.md),
 完整的分階段計劃與缺口分析在 roadmap 文件。
@@ -62,6 +62,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 | `v1.19.0` | UBI / UBIFS;rootfs 依內容選擇;讀不到的單一檔案改記為 opaque 元件 |
 | `v1.20.0` | U-Boot FIT(hash 驗證)、initramfs(cpio,含 kernel 內建)、OpenWrt 映像 metadata |
 | `v1.21.0` | ext2/3/4、YAFFS2/1、gzip 磁碟映像再走訪一層、MBR / GPT;CPython hash 已釘住 |
+| `v1.22.0` | **Phase 5**:批次分析(CLI `--batch`、網頁多檔 / 資料夾、ZIP)、上傳串流解析、分析排隊 |
 | `v1.7.0` | **Phase 2 第一階段**:容器走訪、解壓、SquashFS 4.0 reader、opkg / dpkg / apk 套件資料庫、發行版識別、真實韌體 corpus 測試 |
 
 ### 工程現況
@@ -70,7 +71,7 @@ fw2sbom 從 firmware 二進位映像產生 **CycloneDX 1.6 / SPDX 2.3** SBOM,每
 |---|---|
 | 程式碼 | 約 18,300 行(含測試與腳本),21 個模組 + 6 個簽章包(36 個簽章) |
 | 依賴 | 無。Python 3.9+ 標準函式庫 |
-| 測試 | 320 個。25 個合成 fixture + 公開格式樣本 + 真實韌體 corpus(OpenWrt 4 份、GL.iNet、3 份 ESP32、OVMF) |
+| 測試 | 336 個。25 個合成 fixture + 公開格式樣本 + 真實韌體 corpus(OpenWrt 4 份、GL.iNet、3 份 ESP32、OVMF) |
 | Schema 驗證 | CycloneDX 1.6 與 SPDX 2.3 皆對官方 schema 驗證 |
 | CI | Ubuntu + Windows × Python 3.9 / 3.13;另有真實韌體 job 與可重現打包驗證 |
 | 交付 | Portable zip,byte-reproducible,hash 記錄在 RELEASE.md |

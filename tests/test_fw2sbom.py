@@ -3124,6 +3124,257 @@ class YAFFSTest(unittest.TestCase):
                 pass
 
 
+class StreamingUploadTest(unittest.TestCase):
+    """The upload is parsed as it arrives, into one buffer, never to disk."""
+
+    BOUNDARY = b"----fw2sbomStreamTest"
+
+    def body(self, parts):
+        out = b""
+        for name, filename, data in parts:
+            out += b"--" + self.BOUNDARY + b"\r\n"
+            if filename:
+                out += (f'Content-Disposition: form-data; name="{name}"; '
+                        f'filename="{filename}"\r\nContent-Type: '
+                        f'application/octet-stream\r\n\r\n').encode()
+            else:
+                out += f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode()
+            out += data + b"\r\n"
+        return out + b"--" + self.BOUNDARY + b"--\r\n"
+
+    def test_it_agrees_with_the_whole_body_parser(self):
+        """Every chunk size, including one byte, so a boundary is split across
+        reads at every possible position - and content that almost contains
+        the boundary."""
+        rng = random.Random(3)
+        for trial in range(60):
+            parts = []
+            for _ in range(rng.randrange(1, 4)):
+                data = bytes(rng.randrange(256) for _ in range(rng.choice([0, 1, 9, 700, 5000])))
+                if rng.random() < 0.4:
+                    data += b"\r\n--" + self.BOUNDARY[:rng.randrange(len(self.BOUNDARY))]
+                parts.append((rng.choice(["file", "vendor"]),
+                              rng.choice([None, "fw.bin"]), data))
+            body = self.body(parts)
+            expected = service.parse_multipart(body, self.BOUNDARY)
+            for chunk in (1, 3, 17, 4096):
+                with self.subTest(trial=trial, chunk=chunk):
+                    self.assertEqual(service.stream_multipart(
+                        io.BytesIO(body), len(body), self.BOUNDARY, chunk=chunk), expected)
+
+    def test_the_firmware_is_held_once(self):
+        """The old path held the request, then its parts, then their slices:
+        four or five copies before analysis began."""
+        payload = random.Random(4).randbytes(16 * 1024 * 1024)
+        body = self.body([("file", "big.bin", payload)])
+        stream = io.BytesIO(body)
+        del payload
+        import tracemalloc
+        tracemalloc.start()
+        fields = service.stream_multipart(stream, len(body), self.BOUNDARY)
+        _current, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        self.assertEqual(len(fields["file"][0][1]), 16 * 1024 * 1024)
+        self.assertLess(peak, 16 * 1024 * 1024 * 1.3)
+
+    def test_a_truncated_upload_is_refused(self):
+        body = self.body([("file", "fw.bin", b"x" * 5000)])
+        for cut in (10, 200, len(body) - 10):
+            with self.subTest(cut=cut):
+                with self.assertRaises(service.MultipartError):
+                    service.stream_multipart(io.BytesIO(body[:cut]), len(body),
+                                             self.BOUNDARY, chunk=64)
+
+    def test_the_epilogue_is_read_off_the_socket(self):
+        """Left unread, it would be taken as the next request on a keep-alive
+        connection."""
+        body = self.body([("file", "fw.bin", b"abc")]) + b"trailing epilogue\r\n"
+        stream = io.BytesIO(body)
+        service.stream_multipart(stream, len(body), self.BOUNDARY, chunk=8)
+        self.assertEqual(stream.read(), b"")
+
+    def test_the_page_still_promises_no_disk(self):
+        self.assertIn("檔案不會寫入磁碟", service.PAGE)
+        with open(service.__file__, encoding="utf-8") as f:
+            self.assertNotIn("tempfile", f.read())
+
+
+class BatchServiceTest(unittest.TestCase):
+    """Several files through the service: queued, stored, bundled."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.server = service.Server(("127.0.0.1", 0), service.Handler)
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+
+    def url(self, path):
+        return f"http://127.0.0.1:{self.port}{path}"
+
+    def start(self, name, blob):
+        boundary = "fw2sbombatch"
+        body = (f"--{boundary}\r\nContent-Disposition: form-data; "
+                f'name="file"; filename="{name}"\r\n\r\n').encode()
+        body += blob + f"\r\n--{boundary}--\r\n".encode()
+        request = urllib.request.Request(
+            self.url("/analyze/start"), data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return json.loads(response.read())
+
+    def poll(self, progress_url, limit=120):
+        states, deadline = [], time.time() + limit
+        while time.time() < deadline:
+            with urllib.request.urlopen(self.url(progress_url), timeout=30) as r:
+                body = json.loads(r.read())
+            states.append(body["state"]["stage"])
+            if body["done"]:
+                return body, states
+            time.sleep(0.05)
+        self.fail("never finished")
+
+    def test_a_second_analysis_waits_its_turn(self):
+        """One analysis at a time: two large images side by side is how a
+        laptop runs out of memory. The waiting one says it is waiting."""
+        service.ANALYSIS_SLOTS.acquire()
+        try:
+            started = self.start("fw.bin", fixture("cramfs_rootfs.bin"))
+            deadline = time.time() + 10
+            stage = None
+            while time.time() < deadline and stage != "queued":
+                with urllib.request.urlopen(self.url(started["progress_url"]), timeout=30) as r:
+                    stage = json.loads(r.read())["state"]["stage"]
+                time.sleep(0.05)
+            self.assertEqual(stage, "queued")
+        finally:
+            service.ANALYSIS_SLOTS.release()
+        final, _states = self.poll(started["progress_url"])
+        self.assertIsNone(final["error"])
+
+    def test_a_batch_downloads_as_one_zip(self):
+        ids = []
+        for name, fx in (("router.bin", "router_uimage.bin"),
+                         ("router.bin", "cramfs_rootfs.bin"),       # same name twice
+                         ("chip.bin", "esp32_app.bin")):
+            final, _ = self.poll(self.start(name, fixture(fx))["progress_url"])
+            ids.append(final["result"]["sbom_id"])
+        with urllib.request.urlopen(self.url("/bundle?ids=" + ",".join(ids)), timeout=60) as r:
+            self.assertEqual(r.headers["Content-Type"], "application/zip")
+            archive = zipfile.ZipFile(io.BytesIO(r.read()))
+        names = archive.namelist()
+        self.assertIn("router_SBOM.cdx.json", names)
+        self.assertIn("router (2)_SBOM.cdx.json", names)    # not overwritten
+        self.assertIn("chip_Evidence.xlsx", names)
+        summary = archive.read("batch-summary.csv").decode("utf-8-sig").splitlines()
+        self.assertEqual(len(summary), 4)                   # header + three
+        self.assertTrue(summary[0].startswith("firmware,sha256"))
+
+    def test_a_bundle_of_nothing_held_is_a_404(self):
+        with self.assertRaises(urllib.error.HTTPError) as caught:
+            urllib.request.urlopen(self.url("/bundle?ids=" + "0" * 32), timeout=30)
+        self.assertEqual(caught.exception.code, 404)
+        caught.exception.close()
+
+
+class ResultStoreTest(unittest.TestCase):
+
+    def setUp(self):
+        service._SBOM_STORE.clear()
+
+    def tearDown(self):
+        service._SBOM_STORE.clear()
+
+    def test_the_store_is_bounded_by_bytes_not_only_count(self):
+        """A count alone cannot tell a 20 KB microcontroller SBOM from a 5 MB
+        router one; fifty router results must not exhaust memory, and a batch
+        of small ones must not evict its own first result."""
+        original = service.SBOM_STORE_MAX_BYTES
+        try:
+            service.SBOM_STORE_MAX_BYTES = 10_000
+            for i in range(5):
+                service._store_put(f"{i:032x}", {"json": "x" * 3000, "spdx": "",
+                                                 "xlsx": b""})
+            held = list(service._SBOM_STORE)
+            self.assertEqual(held, [f"{i:032x}" for i in (2, 3, 4)])
+        finally:
+            service.SBOM_STORE_MAX_BYTES = original
+
+    def test_fifty_small_results_are_all_kept(self):
+        for i in range(50):
+            service._store_put(f"{i:032x}", {"json": "{}", "spdx": "{}", "xlsx": b""})
+        self.assertEqual(len(service._SBOM_STORE), 50)
+
+
+class CliBatchTest(unittest.TestCase):
+    """fw2sbom --batch DIR: every file, one bad one costing only itself."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dir = tempfile.mkdtemp(prefix="fw2sbom-batch-")
+        os.makedirs(os.path.join(cls.dir, "sub"))
+        for name in ("router_uimage.bin", "esp32_app.bin"):
+            shutil.copy(os.path.join(FIXTURE_DIR, name), cls.dir)
+        shutil.copy(os.path.join(FIXTURE_DIR, "router_uimage.bin"),
+                    os.path.join(cls.dir, "sub"))
+        open(os.path.join(cls.dir, "empty.bin"), "wb").close()
+        cls.out = os.path.join(cls.dir, "fw2sbom-output")
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            cls.code = core.main(["--batch", cls.dir, "--recursive"])
+        with open(os.path.join(cls.out, "batch-summary.json"), encoding="utf-8") as f:
+            cls.summary = json.load(f)["files"]
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.dir, ignore_errors=True)
+
+    def row(self, name):
+        return next(r for r in self.summary if r["file"] == name)
+
+    def test_one_bad_file_fails_alone_and_the_exit_code_says_so(self):
+        self.assertEqual(self.code, 3)
+        self.assertEqual(self.row("empty.bin")["status"], "error")
+        self.assertEqual(self.row("esp32_app.bin")["status"], "ok")
+        self.assertEqual(len(self.summary), 4)
+
+    def test_every_good_file_gets_both_formats_and_evidence(self):
+        row = self.row("esp32_app.bin")
+        for key in ("cyclonedx", "spdx", "evidence"):
+            self.assertTrue(os.path.exists(os.path.join(self.out, row[key])), key)
+        self.assertEqual(len(row["sha256"]), 64)
+
+    def test_two_files_with_one_name_do_not_overwrite_each_other(self):
+        a = self.row("router_uimage.bin")["cyclonedx"]
+        b = self.row(os.path.join("sub", "router_uimage.bin"))["cyclonedx"]
+        self.assertNotEqual(a, b)
+        self.assertTrue(os.path.exists(os.path.join(self.out, a)))
+        self.assertTrue(os.path.exists(os.path.join(self.out, b)))
+
+    def test_a_second_run_does_not_analyse_the_first_runs_output(self):
+        before = sorted(os.listdir(self.out))
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            core.main(["--batch", self.dir, "--recursive"])
+        self.assertEqual(sorted(os.listdir(self.out)), before)
+
+    def test_the_summary_opens_in_a_spreadsheet(self):
+        with open(os.path.join(self.out, "batch-summary.csv"), "rb") as f:
+            raw = f.read()
+        self.assertTrue(raw.startswith(b"\xef\xbb\xbf"))          # Excel's BOM
+        self.assertTrue(raw[3:].startswith(b"file,status,sha256"))
+
+    def test_single_file_options_are_refused_with_batch(self):
+        with mock.patch("sys.stderr", new=io.StringIO()):
+            with self.assertRaises(SystemExit):
+                core.main(["--batch", self.dir, "-o", "x.json"])
+            with self.assertRaises(SystemExit):
+                core.main([])
+
+
 class LZOTest(unittest.TestCase):
     """A decompressor can only be tested against a compressor that is not
     itself. The reference streams come from lzokay, an independent C++

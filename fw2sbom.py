@@ -30,6 +30,7 @@ marked as such in metadata. Runs on any Linux with Python 3.8+ (stdlib only).
 
 import argparse
 import collections
+import csv
 import hashlib
 import json
 import math
@@ -38,6 +39,7 @@ import re
 import shutil
 import struct
 import subprocess
+import time
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -53,7 +55,7 @@ import uefi
 import vendor_sbom
 
 TOOL_NAME = "fw2sbom"
-TOOL_VERSION = "1.21.0"
+TOOL_VERSION = "1.22.0"
 
 MAX_FILE_SIZE = 512 * 1024 * 1024  # refuse anything over 512 MiB
 MAX_EVIDENCE_PER_COMPONENT = 8     # cap evidence entries kept per component
@@ -2919,6 +2921,194 @@ def run_analysis(delivered, source, name, min_str_len=6, verbose=False,
     }
 
 
+# --------------------------------------------------------------------------- #
+# Batch
+# --------------------------------------------------------------------------- #
+
+# Files a batch never treats as firmware: our own deliverables (a second run
+# over the same folder must not analyse the first run's SBOMs) and the usual
+# operating-system clutter.
+BATCH_SKIP_SUFFIXES = ("_SBOM.cdx.json", "_SBOM.spdx.json", "_Evidence.xlsx",
+                       ".cdx.json", ".spdx.json")
+BATCH_SKIP_NAMES = ("batch-summary.csv", "batch-summary.json", "Thumbs.db",
+                    "desktop.ini", ".DS_Store")
+
+
+def batch_inputs(directory, recursive=False, exclude=None):
+    """Every file in `directory` a batch should analyse, in a stable order."""
+    exclude = os.path.abspath(exclude) if exclude else None
+    found = []
+    for root, dirs, files in os.walk(directory):
+        if exclude and os.path.abspath(root).startswith(exclude):
+            dirs[:] = []
+            continue
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".")
+                         and not (exclude and os.path.abspath(
+                             os.path.join(root, d)) == exclude))
+        for name in sorted(files):
+            if name.startswith(".") or name in BATCH_SKIP_NAMES:
+                continue
+            if name.endswith(BATCH_SKIP_SUFFIXES):
+                continue
+            found.append(os.path.join(root, name))
+        if not recursive:
+            break
+    return found
+
+
+def batch_stems(paths, directory):
+    """An output stem per input, unique even when two inputs share a name.
+
+    firmware.bin and firmware.hex, or sub1/fw.bin and sub2/fw.bin, would
+    otherwise write over each other's SBOM - silently, and the later one
+    would look like the only one.
+    """
+    rel = [os.path.relpath(p, directory) for p in paths]
+    plain = [os.path.splitext(os.path.basename(r))[0] for r in rel]
+    stems = []
+    for r, stem in zip(rel, plain):
+        if plain.count(stem) == 1:
+            stems.append(stem)
+        else:
+            stems.append(r.replace(os.sep, "__").replace("/", "__"))
+    return stems
+
+
+def analyze_to_files(path, stem, out_dir, fmt="both", pretty=False,
+                     evidence=True, min_str_len=6):
+    """Analyse one file and write its deliverables; never exits the process.
+
+    Returns a summary row. Errors raise ValueError with a message meant for
+    the summary, so one bad file costs the batch that file and nothing else.
+    """
+    if not os.path.isfile(path):
+        raise ValueError("not a file")
+    size = os.path.getsize(path)
+    if size == 0:
+        raise ValueError("the file is empty")
+    if size > MAX_FILE_SIZE:
+        raise ValueError(f"{size} bytes is over the {MAX_FILE_SIZE}-byte limit")
+    with open(path, "rb") as f:
+        delivered = f.read()
+    try:
+        source = image_input.detect_and_load(delivered)
+    except image_input.InputFormatError as e:
+        raise ValueError(f"cannot read this file: {e}")
+    result = run_analysis(delivered, source, path, min_str_len=min_str_len)
+    bom = result["bom"]
+    base = os.path.join(out_dir, stem)
+    written = {}
+
+    def write_json(target, document):
+        with open(target, "w", encoding="utf-8") as f:
+            json.dump(document, f, indent=2 if pretty else None)
+            f.write("\n")
+        return os.path.basename(target)
+
+    if fmt in ("cyclonedx", "both"):
+        written["cyclonedx"] = write_json(base + "_SBOM.cdx.json", bom)
+    if fmt in ("spdx", "both"):
+        written["spdx"] = write_json(
+            base + "_SBOM.spdx.json",
+            spdx_report.build_spdx(bom, path, TOOL_NAME, TOOL_VERSION))
+    if evidence:
+        context = build_evidence_context(
+            os.path.basename(path), source["data"], result["payload"],
+            result["arm_info"], result["container"], result["opacity"],
+            result["hits"], result["standards"],
+            written.get("cyclonedx") or written.get("spdx") or "")
+        evidence_report.write_evidence_workbook(base + "_Evidence.xlsx", context, bom)
+        written["evidence"] = os.path.basename(base + "_Evidence.xlsx")
+
+    components = bom.get("components", [])
+    opaque = sum(1 for c in components
+                 if {"name": "fw2sbom:opaque", "value": "true"}
+                 in c.get("properties", []))
+    rootfs = result["rootfs"] or {}
+    architecture = result["arm_info"]["label"] or (
+        (rootfs.get("binaries") or {}).get("architecture") or "")
+    release = (rootfs.get("os_release") or {}).get("description", "")
+    return {"components": len(components) - opaque, "opaque": opaque,
+            "architecture": architecture, "distribution": release,
+            "format": source["format"], "sha256": hashlib.sha256(delivered).hexdigest(),
+            "bytes": size, "outputs": written}
+
+
+BATCH_COLUMNS = ("file", "status", "sha256", "bytes", "format", "architecture",
+                 "distribution", "components", "opaque", "seconds",
+                 "cyclonedx", "spdx", "evidence", "error")
+
+
+def run_batch(args):
+    """Analyse every file in a directory; one bad file does not stop the rest.
+
+    Writes each file's deliverables into the output directory, then a
+    batch-summary.csv (opens in a spreadsheet) and batch-summary.json. The
+    exit code is 0 when every file produced an SBOM and 3 when any did not,
+    so a CI job can tell "all good" from "look at the summary".
+    """
+    directory = args.batch
+    if not os.path.isdir(directory):
+        die(f"--batch expects a directory: {directory}")
+    out_dir = args.out_dir or os.path.join(directory, "fw2sbom-output")
+    try:
+        os.makedirs(out_dir, exist_ok=True)
+    except OSError as e:
+        die(f"cannot create output directory {out_dir}: {e}")
+    paths = batch_inputs(directory, args.recursive, exclude=out_dir)
+    if not paths:
+        die(f"no files to analyse in {directory}")
+    stems = batch_stems(paths, directory)
+    print(f"[fw2sbom] batch: {len(paths)} file(s) from {directory} -> {out_dir}",
+          file=sys.stderr)
+
+    rows = []
+    for index, (path, stem) in enumerate(zip(paths, stems), 1):
+        relative = os.path.relpath(path, directory)
+        started = time.perf_counter()
+        row = {"file": relative}
+        try:
+            summary = analyze_to_files(path, stem, out_dir, fmt=args.format,
+                                       pretty=args.pretty,
+                                       evidence=not args.no_evidence,
+                                       min_str_len=args.min_str_len)
+        except (ValueError, OSError) as e:
+            row.update(status="error", error=str(e))
+        except Exception as e:                   # a bug, but not the batch's end
+            row.update(status="error", error=f"analysis failed: {e}")
+        else:
+            outputs = summary.pop("outputs")
+            row.update(status="ok", **summary, **outputs)
+        row["seconds"] = round(time.perf_counter() - started, 1)
+        rows.append(row)
+        state = (f"{row['components']} component(s)"
+                 + (f", {row['opaque']} opaque" if row.get("opaque") else "")
+                 if row["status"] == "ok" else f"ERROR {row['error']}")
+        print(f"[fw2sbom] [{index}/{len(paths)}] {relative}: {state} "
+              f"({row['seconds']}s)", file=sys.stderr)
+
+    csv_path = os.path.join(out_dir, "batch-summary.csv")
+    json_path = os.path.join(out_dir, "batch-summary.json")
+    try:
+        # utf-8-sig: Excel reads the file names correctly only with the BOM.
+        with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=BATCH_COLUMNS, extrasaction="ignore")
+            writer.writeheader()
+            writer.writerows(rows)
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump({"tool": TOOL_NAME, "version": TOOL_VERSION,
+                       "directory": os.path.abspath(directory),
+                       "files": rows}, f, indent=2)
+            f.write("\n")
+    except OSError as e:
+        die(f"cannot write the batch summary: {e}")
+
+    failed = sum(1 for r in rows if r["status"] != "ok")
+    print(f"[fw2sbom] batch done: {len(rows) - failed} of {len(rows)} file(s) "
+          f"produced an SBOM; summary -> {csv_path}", file=sys.stderr)
+    return 3 if failed else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(
         prog=TOOL_NAME,
@@ -2926,7 +3116,17 @@ def main(argv=None):
                     "Cortex-M / Zephyr-style firmware .bin via binary fingerprinting.",
         epilog="Example: %(prog)s zephyr.bin -o zephyr.sbom.json --pretty -v",
     )
-    ap.add_argument("input", help="firmware image (.bin) to analyze")
+    ap.add_argument("input", nargs="?",
+                    help="firmware image (.bin) to analyze")
+    ap.add_argument("--batch", metavar="DIR",
+                    help="analyse every file in DIR instead of one input; "
+                         "deliverables go to --out-dir (default DIR/fw2sbom-output) "
+                         "with a batch-summary.csv and .json. Exit code 3 if any "
+                         "file failed.")
+    ap.add_argument("--recursive", action="store_true",
+                    help="with --batch, include subdirectories")
+    ap.add_argument("--no-evidence", action="store_true",
+                    help="with --batch, skip the Excel evidence workbooks")
     ap.add_argument("-o", "--output", default=None,
                     help="output SBOM path (default: <input>.cdx.json)")
     ap.add_argument("-d", "--out-dir", metavar="DIR",
@@ -2969,6 +3169,14 @@ def main(argv=None):
                     help="verbose progress on stderr")
     ap.add_argument("--version", action="version", version=f"{TOOL_NAME} {TOOL_VERSION}")
     args = ap.parse_args(argv)
+    if bool(args.batch) == bool(args.input):
+        ap.error("give either one input file or --batch DIR")
+    if args.batch and (args.vendor_sbom or args.output or args.evidence
+                       or args.firmware_version or args.dump_strings
+                       or args.dump_payload):
+        ap.error("--batch writes one set of deliverables per file; -o, "
+                 "--evidence, --vendor-sbom, --firmware-version and the dump "
+                 "options apply to a single input only")
 
     if args.min_str_len < 3:
         die("--min-str-len must be >= 3 (shorter values produce mostly noise)")
@@ -2979,6 +3187,11 @@ def main(argv=None):
         die(str(e))
     log(f"signature database: {len(signatures)} signature(s) "
         f"from pack(s) {', '.join(SIGNATURE_PACKS)}", args.verbose)
+
+    if args.batch:
+        if args.format == "cyclonedx" and "--format" not in (argv or sys.argv):
+            args.format = "both"                 # a batch is for handing over
+        return run_batch(args)
 
     vendor_documents = load_vendor_sboms(args.vendor_sbom, args.verbose)
 
