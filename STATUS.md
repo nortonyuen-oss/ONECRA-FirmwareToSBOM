@@ -184,7 +184,6 @@ zip,雜湊與頁面公佈的一致;解壓後用套件內的直譯器跑真實 ro
 
 | 項目 | 說明 |
 |---|---|
-| CPython hash pin | `scripts/python-embed.sha256` 仍為空。下次有網時跑 `build-portable.ps1 -PinHash` 並對照 python.org |
 | 真實 CCTV 韌體樣本 | 有樣本才能決定 Phase 2 剩餘項目的優先次序 |
 | 真實客戶 ESP32 韌體 | 目前只用公開的 Tasmota 映像驗證過。客戶的 build 多半會填滿 app descriptor(專案名稱、應用版本),那條路徑值得用真檔跑一次 |
 | **真實 PC BIOS dump** | 最需要的一份樣本。OVMF 是虛擬機韌體,沒有 Intel flash descriptor、沒有 ME 區、也沒有 AMI / Insyde / Phoenix 的廠商模組。descriptor 那段目前只照規格寫,未經真檔驗證 |

@@ -12,3 +12,17 @@
 # No entries yet -- the v1.4.1 package was built from an interpreter that was
 # already unpacked on the build machine, so its original archive was not
 # available to hash. The next `build-portable.ps1 -PinHash` run fills this in.
+
+# 3.12.7 amd64, pinned 2026-09-21. Checked three ways before pinning:
+#   1. MD5 4c0a5a44d4ca1d0bc76fe08ea8b76adc, as listed on the python.org
+#      release page, matches the download.
+#   2. python.org's Sigstore bundle for this file (python-3.12.7-embed-amd64.zip
+#      .sigstore) states this SHA-256 as the signed digest, signer
+#      thomas@python.org (the 3.12 release manager) via accounts.google.com;
+#      the Rekor transparency-log entry 135667535 records the same hash. The
+#      bundle's signature itself was not verified cryptographically (that needs
+#      the sigstore tool).
+#   3. All 31 .exe/.dll/.pyd inside carry valid Authenticode signatures, from
+#      the Python Software Foundation (vcruntime140*.dll: Microsoft), checked
+#      with Windows' own Get-AuthenticodeSignature.
+3.12.7-amd64  0d57bb6cb078b74d23dbfe91f77d6780d45bed328911609f1f7ee2ba1606bf44
