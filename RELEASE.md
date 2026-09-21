@@ -34,6 +34,80 @@ timestamp,所以嗰啲 exe 嘅 hash 從來只係「嗰一次 build 嘅紀錄」,
 
 ---
 
+## v1.21.0
+
+| | |
+|---|---|
+| Tag | `v1.21.0` |
+| 程式碼 commit | `800f3f17db28dc1dbe9aaa2005fb28c481768d23` |
+| Build 日期 | 2026-09-21 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方),**SHA-256 已釘住並驗證** |
+
+### Portable 版(唯一交付形式)
+
+| | |
+|---|---|
+| 檔案 | `fw2sbom-portable-1.21.0.zip`(GitHub Release asset) |
+| 大小 | 11,314,869 bytes |
+| SHA-256 | `5d86ca7cc3f54cff2808f0aa08b0afcba9b3cc03351f7f53ca51d0a1dfbc14b8` |
+| 內容 | 67 個檔案(多咗 `ext.py`、`yaffs.py`) |
+| Reproducible | 是(fresh clone 重新 build,hash 一致) |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `0b80b3ca2328175b506f899258ce5cd00595afb09a702d1046eed221f146a30e` |
+| `container.py` | `7680f069764984311702c35c2567ba75f6d1e1550257cbed9baf531a4063d3c3` |
+| `ext.py` | `46c436521966022f29da7b29c9c985ef3e96485704bb9293bdd53b6ed9f5c347` |
+| `yaffs.py` | `efec1415b11492fd65818c5ce5fa30a1daa9030cb53d8192115f8d959bffa0de` |
+
+其餘檔案與 v1.20.0 相同。
+
+### 新增:ext2 / ext3 / ext4
+
+區塊裝置上嘅韌體(eMMC 型 NVR、閘道器、x86 設備)rootfs 幾乎都係 ext4。`ext.py`
+讀 block map(到 triple indirect)同 extent tree、hole、未初始化 extent、htree 目錄、
+fast / slow symlink、inline data。fscrypt 加密檔案逐個記為 opaque 元件;journal
+唔重播,「需要 recovery」嘅會有警告。
+
+**驗證:OpenWrt 23.05.5 x86-64 官方映像 rootfs 分區 1,069 個檔案,逐個同同一版本嘅
+SquashFS 比對,13.5 MB 零差異。**
+
+### 新增:YAFFS2 / YAFFS1
+
+較舊 NAND 裝置(攝影機、DVR、機上盒)用嘅檔案系統。映像冇記錄自己嘅幾何(頁大小、
+spare、tag 位置、位元組序、版本),所以逐一嘗試,揀讀落係一致檔案系統嗰組,
+**從不假設**。最新 chunk 勝出;移入 deleted / unlinked 目錄嘅物件唔列出;parent
+指向檔案嘅損壞項目捨棄。
+
+**驗證:unblob 79 個 YAFFS 樣本全部讀出,同 unblob 預期輸出逐個相符。**
+
+### 新增:壓縮磁碟映像再走訪一層;MBR / GPT
+
+OpenWrt x86 映像係成個磁碟映像再 gzip。以前解壓出嚟嘅 126 MB 只當一大嚿字串掃;
+而家會再走訪一層(只一層,而且要喺入面搵到結構先採用),分區表會讀出同標示。
+嗰個 `.img.gz` 而家直接得到 150 個套件同 x86-64 架構。
+
+### 工程:CPython hash 已釘住
+
+`scripts/python-embed.sha256` 一直係空,每次 build 都警告直譯器未驗證。而家已釘住
+3.12.7 amd64,釘之前用三個方法核對:python.org 公佈嘅 MD5、python.org Sigstore
+bundle 聲明嘅 SHA-256(簽署人 thomas@python.org,Rekor 記錄一致)、壓縮檔入面 31 個
+binary 嘅 Authenticode 簽章全部有效。CI 喺乾淨環境落載同驗證通過。
+
+### 測試
+
+320 個(由 293 增加)。新增 `ExtTest` 13 項、`RealExtTest` 4 項、`YAFFSTest` 8 項,
+`RealFormatSampleTest` 加咗兩項 YAFFS。用 3.14、3.13 同套件自帶嘅 3.12.7 行過。
+所有舊映像嘅輸出除版本號外完全不變。
+
+### 仍未做
+
+ROMFS、F2FS;TP-Link / HiSilicon 等廠商檔頭;ext3/4 與 UBIFS journal 重播。
+
+---
+
 ## v1.20.0
 
 | | |

@@ -154,9 +154,37 @@
 
     <article class="rel">
       <div class="stamp">
-        <span class="ver">1.20.0</span>
+        <span class="ver">1.21.0</span>
         <span class="date">2026-09-21</span>
         <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>讀得懂 ext4 與 YAFFS —— eMMC 設備與舊款 NAND 攝影機</h2>
+        <p>
+          韌體放在 eMMC 等區塊裝置上時(NVR、閘道器、x86 設備),root filesystem 幾乎都是
+          <strong>ext4</strong>。現在 ext2 / ext3 / ext4 都讀得出來;加密的檔案會逐個標示為
+          無法分析,而不是默默略過。以 OpenWrt 官方 x86 映像驗證:1,069 個檔案與同版本的
+          SquashFS 逐位元組比對,<strong>零差異</strong>。
+        </p>
+        <p>
+          較舊的 NAND 攝影機、DVR、機上盒常用 <strong>YAFFS</strong>。這種映像不記錄自己的
+          格式參數,所以會逐一嘗試、找出讀得通的那一組。公開的 79 個測試樣本全部讀出。
+        </p>
+        <p>
+          整個磁碟映像再用 gzip 壓縮的更新檔(例如 OpenWrt 的 x86 映像)現在會解開後
+          <strong>再往裡面讀一層</strong>,分區表與各分區的檔案系統都會被找到。
+        </p>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,314,869 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">5d86ca7cc3f54cff2808f0aa08b0afcba9b3cc03351f7f53ca51d0a1dfbc14b8</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
+        <span class="ver">1.20.0</span>
+        <span class="date">2026-09-21</span>
       </div>
       <div>
         <h2>讀得懂 FIT 與 initramfs —— 新一代 router 與攝影機的開機映像</h2>
