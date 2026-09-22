@@ -434,7 +434,8 @@ shasum -a 256 fw2sbom-portable-1.22.0.zip</pre>
           一份公開 EDK2 映像,36 組簽章一個都沒命中 —— 所以清單來自結構:
           每個模組帶著自己的名字,名字被剝掉的還有 GUID。實測該映像
           <strong>123 個模組、119 個有名字</strong>,其中 112 個藏在一層
-          1.4 MB→16 MB 的壓縮後面。Management Engine 區照實報成未列舉。
+          1.4 MB→16 MB 的壓縮後面。<strong>CPU microcode</strong> 也逐一列出(CPUID 與
+          revision,即 Intel 安全公告比對的依據)。Management Engine 區照實報成未列舉。
           <strong>Flash descriptor 那段目前只照公開規格寫,尚未對真實廠商 dump
           驗證。</strong>
         </div>
