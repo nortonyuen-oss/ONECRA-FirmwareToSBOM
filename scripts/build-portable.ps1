@@ -85,6 +85,7 @@ $PayloadFromRoot = @(
     'cpio.py',
     'ext.py',
     'yaffs.py',
+    'microcode.py',
     'onecra_logo.png',
     'onecra_icon.png'
 )

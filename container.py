@@ -46,6 +46,7 @@ import fit
 import cpio
 import cramfs
 import jffs2
+import microcode
 import squashfs
 import ubi
 import ubifs
@@ -614,6 +615,37 @@ def parse_partition_table(data):
     return table
 
 
+def _microcode_segments(data, say, covered=(), parent=None):
+    """A segment for every Intel microcode update in `data`.
+
+    Microcode is encrypted, so judged by its bytes it reads as an opaque
+    region - in a real BIOS, a false "could not be analysed". Recognised by
+    its header, it is a component with a CPUID and a revision, which is what
+    CPU advisories are written against.
+    """
+    segments = []
+    for update in microcode.scan(data):
+        start, end = update["offset"], update["offset"] + update["size"]
+        if any(s <= start < e for s, e in covered):
+            continue
+        label = (f"Intel microcode {update['fms']} revision "
+                 f"0x{update['revision']:x} ({update['date']})")
+        say(f"container: {label}, CPUID 0x{update['cpuid']:x}, "
+            f"platforms 0x{update['platforms']:x}"
+            + (f", plus {len(update['extended'])} more CPUID(s)"
+               if update["extended"] else ""))
+        if parent is None:
+            segments.append(_segment("microcode", start, end - start, label,
+                                     content=data[start:end], expanded=False,
+                                     microcode=update))
+        else:
+            segments.append(_segment(
+                "microcode", parent["offset"], end - start,
+                f"{label} (inside {parent['label']})",
+                content=data[start:end], expanded=False, microcode=update))
+    return segments
+
+
 def walk(data, verbose=False, log=None, _inside_ubi=False, _depth=0):
     """Segment a firmware image. Returns (segments, warnings).
 
@@ -632,6 +664,10 @@ def walk(data, verbose=False, log=None, _inside_ubi=False, _depth=0):
     firmware = uefi.detect(data)
     if firmware:
         segments = _uefi_segments(data, firmware, say)
+        segments.extend(_microcode_segments(data, say))
+        for expanded in [s for s in segments if s["kind"] == "uefi-expanded"]:
+            segments.extend(_microcode_segments(expanded["content"], say,
+                                                parent=expanded))
         segments.sort(key=lambda seg: seg["offset"])
         return segments, warnings
 
@@ -943,6 +979,15 @@ def walk(data, verbose=False, log=None, _inside_ubi=False, _depth=0):
         segments.append(_cpio_segment(
             archive, segment["offset"], segment["length"],
             f"initramfs (cpio) inside {segment['label']}"))
+
+    # --- 3.7 CPU microcode, anywhere not already read as a filesystem -------
+    microcode_found = _microcode_segments(data, say, covered)
+    for segment in microcode_found:
+        claim(segment["offset"], segment["offset"] + segment["length"])
+    for segment in [s for s in segments if s.get("expanded") and s["content"]]:
+        microcode_found.extend(_microcode_segments(segment["content"], say,
+                                                   parent=segment))
+    segments.extend(microcode_found)
 
     # --- 4. Whatever is left ------------------------------------------------
     segments.sort(key=lambda s: s["offset"])

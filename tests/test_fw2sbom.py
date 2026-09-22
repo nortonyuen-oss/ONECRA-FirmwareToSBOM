@@ -46,6 +46,7 @@ import cramfs                                           # noqa: E402
 import image_input                                      # noqa: E402
 import jffs2                                            # noqa: E402
 import lzo                                              # noqa: E402
+import microcode                                        # noqa: E402
 import elf                                              # noqa: E402
 import esp32                                            # noqa: E402
 import ext                                              # noqa: E402
@@ -505,7 +506,7 @@ class SbomStructureTest(unittest.TestCase):
            "jffs2_rootfs.bin", "cramfs_jffs2_flash.bin", "ubifs_rootfs.bin",
            "ubi_flash.bin", "fit_initramfs.bin", "fit_sysupgrade.bin",
            "kernel_initramfs.bin", "ext2_rootfs.bin", "ext4_disk.img.gz",
-           "yaffs2_rootfs.bin")
+           "yaffs2_rootfs.bin", "bios_microcode.bin")
 
     def test_is_valid_cyclonedx_16_json(self):
         for name in self.ALL:
@@ -3373,6 +3374,82 @@ class CliBatchTest(unittest.TestCase):
                 core.main(["--batch", self.dir, "-o", "x.json"])
             with self.assertRaises(SystemExit):
                 core.main([])
+
+
+class MicrocodeTest(unittest.TestCase):
+    """CPU microcode: the component CPU advisories are matched on."""
+
+    def test_the_cpuid_decodes_to_intels_own_file_names(self):
+        for signature, name in ((0x806EC, "06-8e-0c"), (0x50654, "06-55-04"),
+                                (0xB06A2, "06-ba-02"), (0x90672, "06-97-02"),
+                                (0xF29, "0f-02-09"), (0x106A5, "06-1a-05")):
+            self.assertEqual(microcode.decode_cpuid(signature)[3], name, hex(signature))
+
+    def test_updates_in_a_bios_become_components(self):
+        names = {c["name"]: c for c in analyze("bios_microcode.bin")["bom"]["components"]}
+        first = names["intel-microcode-06-8e-0c"]
+        self.assertEqual(first["version"], "0xf4")
+        self.assertEqual(first["supplier"]["name"], "Intel")
+        self.assertNotIn("purl", first)
+        props = {p["name"]: p["value"] for p in first["properties"]}
+        self.assertEqual(props["fw2sbom:cpuid"], "0x806ec")
+        self.assertEqual(props["fw2sbom:microcode_date"], "2023-02-23")
+        second = {p["name"]: p["value"] for p in names["intel-microcode-06-97-02"]["properties"]}
+        self.assertEqual(second["fw2sbom:microcode_also_cpuid"], "0x90672, 0x90675, 0xb06f2")
+
+    def test_a_bad_checksum_is_not_an_update(self):
+        """The third update's checksum is off by one. Twelve words that look
+        like a header are not one unless the whole update sums to zero."""
+        names = [c["name"] for c in analyze("bios_microcode.bin")["bom"]["components"]]
+        self.assertNotIn("intel-microcode-06-55-04", names)
+
+    def test_encrypted_microcode_is_not_reported_as_opaque(self):
+        """Microcode is encrypted by design. Judged by entropy it is an opaque
+        region; recognised by its header it is a component."""
+        result = analyze("bios_microcode.bin")
+        opaque = core.opaque_segments(result["segments"])
+        self.assertEqual([s["label"] for s in opaque], ["flash region: management-engine"])
+        kinds = [s["kind"] for s in result["segments"]]
+        self.assertEqual(kinds.count("microcode"), 2)
+
+    def test_no_microcode_is_found_where_there_is_none(self):
+        for name in ("uefi_flash.bin", "router_uimage.bin", "random_flat.bin",
+                     "opaque_encrypted.bin", "cortexm_rtos.bin"):
+            self.assertEqual([], microcode.scan(fixture(name)), name)
+
+    def test_damaged_headers_never_raise(self):
+        blob = bytearray(fixture("bios_microcode.bin")[0x310000:0x318000])
+        rng = random.Random(17)
+        for trial in range(200):
+            damaged = bytearray(blob)
+            for _ in range(6):
+                damaged[rng.randrange(0x60, 0x100)] = rng.randrange(256)
+            microcode.scan(bytes(damaged))
+
+
+class RealMicrocodeTest(unittest.TestCase):
+    """Updates from Intel's public repository, release microcode-20260812."""
+
+    EXPECTED = {
+        "06-55-04": (0x50654, 0x2007006, "2023-03-06", []),
+        "06-8e-0c": (0x806EC, 0x100, "2024-11-17", []),
+        "06-97-02": (0x90672, 0x3E, "2025-10-12",
+                     [0x90672, 0x90675, 0xB06F2, 0xB06F5, 0xB06F6, 0xB06F7]),
+        "06-ba-02": (0xB06A2, 0x6134, "2025-10-08", [0xB06A2, 0xB06A3, 0xB06A8]),
+    }
+
+    def test_every_header_reads_as_intel_publishes_it(self):
+        for name, (cpuid, revision, date, extended) in self.EXPECTED.items():
+            path = os.path.join(ROOT, "corpus", "microcode", name)
+            if not os.path.exists(path):
+                self.skipTest("microcode samples missing; run python scripts/fetch-corpus.py")
+            with open(path, "rb") as f:
+                updates = microcode.scan(f.read())
+            self.assertEqual(len(updates), 1, name)
+            update = updates[0]
+            self.assertEqual((update["cpuid"], update["revision"], update["date"],
+                              update["fms"]), (cpuid, revision, date, name))
+            self.assertEqual([e["cpuid"] for e in update["extended"]], extended)
 
 
 class LZOTest(unittest.TestCase):

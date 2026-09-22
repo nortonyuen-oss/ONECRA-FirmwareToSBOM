@@ -681,6 +681,24 @@ Intel flash descriptor  → descriptor / BIOS / Management Engine / GbE / 平台
   會**明確報告為讀不到**,而不是略過 —— 略過會讓清單靜靜變短,那正是這個工具最
   不該做的事。
 
+### CPU microcode
+
+BIOS 會帶著主機板支援的每一顆處理器的 microcode,而 Intel 的安全公告正是以
+microcode 版本來寫的(「CPUID 806EC,於 microcode 0xF4 修正」)。只列出 BIOS 模組、
+沒有 microcode 的 SBOM,漏掉的正是 CPU 漏洞要比對的那個元件。
+
+- 讀的是 Intel 在 SDM 公開的 **48 bytes 檔頭**:revision、日期、CPUID、平台旗標、
+  大小,以及 extended signature table(同一個更新適用的其他 CPUID)。更新本體是
+  加密的,不讀、也讀不了。
+- 每個更新成為一個元件,名稱依 Intel 自己的檔名慣例(`intel-microcode-06-8e-0c`),
+  版本是 revision(`0xf4`)。不產生 purl —— microcode 不屬於任何套件生態系。
+- **辨識很嚴格**:兩個版本欄位都要是 1、日期要是真的 BCD 日期、大小要是整 KB 且
+  互相一致,而且整個更新以 32-bit 相加要等於零(處理器自己檢查的那個 checksum)。
+- microcode 本來就是加密的,以熵值判斷會被當成「無法分析」的區段;以檔頭辨識後
+  它是一個元件,不再產生錯誤的 opaque 紀錄。
+- 用 Intel 公開 repository 的真實更新驗證(release `microcode-20260812`,含
+  extended signature table)。AMD 的 microcode 格式不同,尚未支援。
+
 ### 驗證狀態
 
 firmware volume / file / section / LZMA 這條路是對著公開的 EDK2 OVMF build 開發
@@ -1057,6 +1075,7 @@ fw2sbom/
 ├── cpio.py                 # initramfs(newc cpio,多 archive、hard link)
 ├── ext.py                  # 唯讀 ext2/3/4 reader(block map、extent、inline data)
 ├── yaffs.py                # YAFFS2 / YAFFS1 reader(幾何逐一嘗試判斷)
+├── microcode.py            # Intel CPU microcode 檔頭(CPUID、revision、checksum)
 ├── vendor_container.py     # TRX / CHK / SHRS / BNEG / FRM 廠商外層檔頭
 ├── image_input.py          # ELF / Intel HEX / S-record / UF2 讀入成平坦映像
 ├── vendor_sbom.py          # 讀入廠商 SBOM 並與分析結果對帳

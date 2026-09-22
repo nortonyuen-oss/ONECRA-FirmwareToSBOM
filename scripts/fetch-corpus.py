@@ -301,6 +301,35 @@ CORPUS = [
         "sha256": "5a875b71da819a189dd9c21386851cb95095931b549ce3181051ecd3f4d2afa2",
         "note": "YAFFS2 with a file whose parent field points at another file.",
     },
+    # --- Intel CPU microcode (Intel's public repository, pinned release) ---- #
+    #
+    # Real updates, to check the header reader against Intel's own files. The
+    # licence permits redistribution in binary form; they are fetched, not
+    # committed, like everything else here.
+    {
+        "path": "microcode/06-55-04",
+        "url": "https://raw.githubusercontent.com/intel/Intel-Linux-Processor-Microcode-Data-Files/microcode-20260812/intel-ucode/06-55-04",
+        "sha256": "b75a5431e28a23dc2d663bc19fe5f24541d85b6e142e6583a8f25dd95190003d",
+        "note": "Intel microcode 06-55-04: Skylake-SP / Cascade Lake.",
+    },
+    {
+        "path": "microcode/06-8e-0c",
+        "url": "https://raw.githubusercontent.com/intel/Intel-Linux-Processor-Microcode-Data-Files/microcode-20260812/intel-ucode/06-8e-0c",
+        "sha256": "6f60c60e426e29c872dd1d35bf9f35cac2366cb3fc9053d7622fafe1b689728b",
+        "note": "Intel microcode 06-8e-0c: Whiskey Lake / Comet Lake mobile.",
+    },
+    {
+        "path": "microcode/06-97-02",
+        "url": "https://raw.githubusercontent.com/intel/Intel-Linux-Processor-Microcode-Data-Files/microcode-20260812/intel-ucode/06-97-02",
+        "sha256": "331e26dd94309aa9419342a66f9b07e7338e9080fe8372bc1335dc670d1bb1b0",
+        "note": "Intel microcode 06-97-02: Alder Lake: one update, an extended table naming six CPUIDs.",
+    },
+    {
+        "path": "microcode/06-ba-02",
+        "url": "https://raw.githubusercontent.com/intel/Intel-Linux-Processor-Microcode-Data-Files/microcode-20260812/intel-ucode/06-ba-02",
+        "sha256": "68cc5565b794befa115da4064a2e995a048a56899d1766b450cd35f43c6c7eca",
+        "note": "Intel microcode 06-ba-02: Raptor Lake: extended table of three.",
+    },
 ]
 
 TIMEOUT = 300

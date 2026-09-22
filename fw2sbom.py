@@ -1106,6 +1106,42 @@ def summarise_opacity(segments, whole_image):
     return summary
 
 
+def microcode_components(segments):
+    """Intel microcode updates, one component per distinct update.
+
+    The same update often appears twice - in the flash and again inside an
+    expanded volume - and is one component. Named the way Intel names its
+    own files (intel-microcode-06-8e-0c), with the revision as the version,
+    because that pair is what Intel's advisories cite. No purl: microcode is
+    not a package in any ecosystem.
+    """
+    found, seen = [], set()
+    for segment in segments:
+        update = segment.get("microcode")
+        if not update:
+            continue
+        key = (update["cpuid"], update["revision"], update["platforms"])
+        if key in seen:
+            continue
+        seen.add(key)
+        also = ", ".join(f"0x{e['cpuid']:x}" for e in update["extended"]
+                         if e["cpuid"] != update["cpuid"])
+        found.append({
+            "name": f"intel-microcode-{update['fms']}",
+            "version": f"0x{update['revision']:x}",
+            "update": update,
+            "confidence": 0.97,
+            "evidence": (f"microcode update header at offset "
+                         f"0x{update['offset']:x} in {segment['label']}: "
+                         f"revision 0x{update['revision']:x}, CPUID "
+                         f"0x{update['cpuid']:x}, platform flags "
+                         f"0x{update['platforms']:x}, dated {update['date']}; "
+                         "the update's checksum verifies"
+                         + (f"; also applies to CPUID {also}" if also else "")),
+        })
+    return found
+
+
 def structural_components(segments):
     """Components read from a format's own structures rather than from strings.
 
@@ -1114,7 +1150,8 @@ def structural_components(segments):
     is not an image where "static component identification is not possible",
     whatever the entropy of the Management Engine sitting beside them said.
     """
-    return uefi_components(segments) + espressif_components(segments)
+    return (uefi_components(segments) + espressif_components(segments)
+            + microcode_components(segments))
 
 
 def reconcile_opacity(opacity, hits, standards, verbose=False):
@@ -1378,9 +1415,10 @@ def judge_segments(segments, payload, architecture=None, verbose=False,
         report(done / total, {"kind": "judge", "index": index + 1,
                               "count": len(segments), "label": segment["label"]})
         done += sizes[index]
-        if segment["kind"] == "filesystem":
+        if segment["kind"] in ("filesystem", "microcode"):
             # Read structurally; entropy of the compressed image says nothing
-            # about whether its contents were enumerable.
+            # about whether its contents were enumerable. Microcode is
+            # encrypted by design and identified by its header.
             segment["opacity"] = None
             continue
         if segment.get("unread_reason"):
@@ -2374,6 +2412,46 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         components.append(comp)
         dep_refs.append(ref)
 
+    # CPU microcode: what Intel's advisories are written against.
+    for index, item in enumerate(microcode_components(segments or []), 1):
+        update = item["update"]
+        ref = f"microcode-{index}-{update['cpuid']:x}-{update['revision']:x}"
+        properties = [
+            {"name": "fw2sbom:confidence", "value": "0.97"},
+            {"name": "fw2sbom:confidence_level", "value": "high"},
+            {"name": "fw2sbom:evidence_class", "value": "cpu-microcode"},
+            {"name": "fw2sbom:cpuid", "value": f"0x{update['cpuid']:x}"},
+            {"name": "fw2sbom:microcode_platform_flags",
+             "value": f"0x{update['platforms']:x}"},
+            {"name": "fw2sbom:microcode_date", "value": update["date"]},
+            {"name": "fw2sbom:version_source", "value": "microcode-header"},
+        ]
+        if update["extended"]:
+            properties.append({"name": "fw2sbom:microcode_also_cpuid",
+                               "value": ", ".join(f"0x{e['cpuid']:x}"
+                                                  for e in update["extended"])})
+        components.append({
+            "type": "firmware",
+            "bom-ref": ref,
+            "supplier": {"name": "Intel"},
+            "name": item["name"],
+            "version": item["version"],
+            "description": (f"Intel CPU microcode update for family "
+                            f"{update['family']:x}h model {update['model']:x}h "
+                            f"stepping {update['stepping']:x}, {update['size']} bytes"),
+            "evidence": {
+                "identity": [{
+                    "field": "name", "confidence": 0.97,
+                    "methods": [{"technique": "binary-analysis", "confidence": 0.97,
+                                 "value": item["evidence"]}],
+                }],
+                "occurrences": [{"location": fname,
+                                 "additionalContext": f"offset 0x{update['offset']:x}"}],
+            },
+            "properties": properties,
+        })
+        dep_refs.append(ref)
+
     # What an Espressif image states about itself: the framework version and
     # the application name come out of a struct, not a regex.
     for index, item in enumerate(espressif_components(segments), 1):
@@ -3316,6 +3394,7 @@ def main(argv=None):
     declared = sum(len(e["components"]) for e in vendor)
     total += len(espressif_components(segments))
     total += len(uefi_components(segments))
+    total += len(microcode_components(segments))
     if evidence_path:
         context = build_evidence_context(
             os.path.basename(args.input), data, payload, arm_info, container,
@@ -3419,6 +3498,10 @@ def main(argv=None):
         print(f"[fw2sbom]   {item['name']:<22} version={v:<12} "
               f"confidence=0.97 (high) [declared in the image header]",
               file=sys.stderr)
+    for item in microcode_components(segments):
+        print(f"[fw2sbom]   {item['name']:<22} version={item['version']:<12} "
+              f"confidence=0.97 (high) [CPU microcode header, "
+              f"{item['update']['date']}]", file=sys.stderr)
     if opacity["opaque"]:
         print(f"[fw2sbom] payload is OPAQUE ({opacity['verdict']}) - static component "
               "identification is not possible:", file=sys.stderr)

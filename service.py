@@ -788,6 +788,7 @@ function renderResult(data, fileName) {
         c.evidence_class === 'vendor-sbom' ? '廠商聲明' :
         c.evidence_class === 'esp-idf-app-descriptor' ? '映像自述' :
         c.evidence_class === 'uefi-module' ? 'UEFI 模組' :
+        c.evidence_class === 'cpu-microcode' ? '處理器微碼' :
         c.evidence_class === 'os-release-file' ? '發行版' :
         c.evidence_class === 'package-database' ? '套件資料庫' : '';
       tr.innerHTML =

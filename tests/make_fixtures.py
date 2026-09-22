@@ -695,6 +695,59 @@ def build_uefi_flash():
     return bytes(flash)
 
 
+# --- CPU microcode ----------------------------------------------------------- #
+#
+# The header is Intel's published format; the body is filler, not Intel's
+# code, since the body is encrypted and never read anyway. One update has an
+# extended signature table, and one has a checksum that is off by one - which
+# must be rejected, because that sum is the only thing separating a header
+# from twelve words that happen to look like one.
+
+MICROCODE_FFS_GUID = bytes.fromhex("36b27d1956f8244990f8cdf12fb875f3")
+
+
+def microcode_update(r, revision, date, cpuid, platforms, kilobytes,
+                     extended=(), corrupt=False):
+    ext = b""
+    if extended:
+        entries = b"".join(struct.pack("<III", sig, flags, 0) for sig, flags in extended)
+        ext_header = struct.pack("<II", len(extended), 0) + b"\x00" * 12
+        ext = ext_header + entries
+        ext_sum = sum(struct.unpack(f"<{len(ext) // 4}I", ext))
+        ext = ext[:4] + struct.pack("<I", (-ext_sum) & 0xFFFFFFFF) + ext[8:]
+    total = kilobytes * 1024
+    data_size = total - 48 - len(ext)
+    body = filler(r, data_size)
+    header = struct.pack("<9I", 1, revision, date, cpuid, 0, 1, platforms,
+                         data_size, total) + b"\x00" * 12
+    blob = bytearray(header + body + ext)
+    checksum = (-sum(struct.unpack(f"<{total // 4}I", bytes(blob)))) & 0xFFFFFFFF
+    struct.pack_into("<I", blob, 16, (checksum + (1 if corrupt else 0)) & 0xFFFFFFFF)
+    return bytes(blob)
+
+
+def microcode_blobs(r):
+    return [
+        microcode_update(r, 0xF4, 0x02232023, 0x806EC, 0x94, 4),
+        microcode_update(r, 0x2B, 0x05142024, 0x90672, 0x07, 6,
+                         extended=[(0x90672, 0x07), (0x90675, 0x07), (0xB06F2, 0x07)]),
+        microcode_update(r, 0x99, 0x01012024, 0x50654, 0xB7, 3, corrupt=True),
+    ]
+
+
+@fixture("bios_microcode.bin")
+def build_bios_microcode():
+    """The SPI flash of uefi_flash.bin, with a microcode volume added to the
+    BIOS region the way board firmware carries it: a raw FFS file holding
+    one update after another."""
+    flash = bytearray(build_uefi_flash())
+    volume = uefi_volume(FFS2_GUID, [
+        uefi_file(MICROCODE_FFS_GUID, 0x01, microcode_blobs(rng("microcode")))],
+        total=0x10000)
+    flash[0x310000:0x310000 + len(volume)] = volume
+    return bytes(flash)
+
+
 # --- CramFS ---------------------------------------------------------------- #
 #
 # Built here rather than downloaded because the published CramFS samples hold
