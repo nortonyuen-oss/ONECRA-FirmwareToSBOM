@@ -154,9 +154,39 @@
 
     <article class="rel">
       <div class="stamp">
+        <span class="ver">1.23.0</span>
+        <span class="date">2026-09-22</span>
+        <span class="tag current">目前版本</span>
+      </div>
+      <div>
+        <h2>BIOS 裡的 CPU microcode 也列進 SBOM</h2>
+        <p>
+          PC BIOS 帶著主機板支援的每一顆處理器的 <strong>microcode</strong>,而 Intel 的
+          安全公告正是以 microcode 版本來寫的。現在每個 microcode 更新都成為 SBOM 裡的
+          一個元件,帶著它的 CPUID 與版本 —— 正是 CPU 漏洞比對需要的兩項資訊。
+        </p>
+        <div class="fixed">
+          <div class="h">修正:BIOS 裡的 microcode 不再被當成「無法分析」</div>
+          <p>
+            microcode 本來就是加密的,以前單看位元組會把它誤判成無法分析的區段。現在以它
+            的結構辨識,正確列為元件。
+          </p>
+        </div>
+        <p>
+          每份 SBOM 也多了一行<strong>格式描述</strong>,例如「U-Boot FIT image + SquashFS
+          4.0 (xz)」,由實際解析到的結構寫成;Windows 版以前這一欄一直是空的。
+        </p>
+        <div class="pkg">
+          <span><span class="k">大小</span> <span class="v">11,327,559 bytes</span></span>
+          <span><span class="k">SHA-256</span> <span class="v">7495096a68830b3366040346bc18bbe5302f2f53fa211503592b1fd3bd6ced3c</span></span>
+        </div>
+      </div>
+    </article>
+
+    <article class="rel">
+      <div class="stamp">
         <span class="ver">1.22.0</span>
         <span class="date">2026-09-21</span>
-        <span class="tag current">目前版本</span>
       </div>
       <div>
         <h2>一次處理一整批韌體</h2>

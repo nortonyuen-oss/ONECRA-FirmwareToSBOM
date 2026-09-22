@@ -34,6 +34,66 @@ timestamp,所以嗰啲 exe 嘅 hash 從來只係「嗰一次 build 嘅紀錄」,
 
 ---
 
+## v1.23.0
+
+| | |
+|---|---|
+| Tag | `v1.23.0` |
+| 程式碼 commit | `c4a080aa9dc7d5c8aa11c594c751a34bd763bcfc` |
+| Build 日期 | 2026-09-22 |
+| CPython | 3.12.7 embeddable, amd64(python.org 官方),SHA-256 已釘住並驗證 |
+
+### Portable 版(唯一交付形式)
+
+| | |
+|---|---|
+| 檔案 | `fw2sbom-portable-1.23.0.zip`(GitHub Release asset) |
+| 大小 | 11,327,559 bytes |
+| SHA-256 | `7495096a68830b3366040346bc18bbe5302f2f53fa211503592b1fd3bd6ced3c` |
+| 內容 | 68 個檔案(多咗 `microcode.py`) |
+| Reproducible | 是(fresh clone 重新 build,hash 一致) |
+
+### 包入面屬於我哋嘅檔案
+
+| 檔案 | SHA-256 |
+|---|---|
+| `fw2sbom.py` | `3313dd3fe394859fa77a6c8b70b4b9f4f45880f1c5f21b975f52902e2d4545a2` |
+| `container.py` | `059df6d4f406757ddaac2d123bc619801f0a0de37d98d12cf19d94afa5239a9e` |
+| `service.py` | `42fa051ff5baf1838f09821f51bb7a2e1d22c0915ab941e1661917e3f1b5154e` |
+| `microcode.py` | `21497a5e36770a1679a181b00e3fa9a353cb0e8ee52df2b47e3a15cd29777f7a` |
+
+其餘檔案與 v1.22.0 相同。
+
+### 新增:Intel CPU microcode
+
+BIOS 帶住主機板支援嘅每粒 CPU 嘅 microcode,而 Intel 嘅安全公告正正係用 microcode
+版本寫(「CPUID 806EC,喺 microcode 0xF4 修正」)。以前 SBOM 列咗 BIOS 模組但冇
+microcode,漏咗 CPU 漏洞要比對嘅嗰個元件。
+
+- 讀 Intel 喺 SDM 公開嘅 48 bytes header:revision、日期、CPUID、平台旗標、extended
+  signature table。更新本體係加密嘅,唔讀。
+- 每個更新一個元件,名跟 Intel 自己嘅檔名(`intel-microcode-06-8e-0c`),版本係
+  revision,冇 purl。
+- **辨識好嚴格**,整個更新 checksum 要等於零;喺 OVMF、router 同所有 fixture 零誤判。
+- **修正一個誤判**:microcode 本身加密,以前喺真實 BIOS 會被當成「無法分析」嘅區段。
+- 用 Intel 公開 repository(release `microcode-20260812`)4 個真實更新驗證,兩個有
+  extended signature table。AMD microcode 未支援。
+
+### 新增:格式描述 `fw2sbom:detected_format`
+
+portable 版喺 Windows 行,冇 `file(1)`,所以 `fw2sbom:file_magic` 對客戶嚟講一直係空;
+網頁嗰個 file(1) 欄位亦從來冇出現過。而家由實際解析到嘅結構寫一句描述,例如
+「U-Boot FIT image + SquashFS 4.0 (xz) + OpenWrt image metadata」。獨立成欄,唔冒充
+`file(1)`;CLI 會印出,網頁會顯示。
+
+### 測試
+
+346 個(由 336 增加)。新增 `MicrocodeTest`、`RealMicrocodeTest`、`DetectedFormatTest`。
+用 3.14、3.13 同套件自帶嘅 3.12.7 行過。舊映像嘅輸出只係多咗 `detected_format` 一個
+property,其他不變。
+
+---
+
 ## v1.22.0
 
 | | |
