@@ -125,6 +125,7 @@ def _publish(result):
         "cortex_m": result["cortex_m"],
         "architecture": result["architecture"],
         "file_size_bytes": result["file_size_bytes"],
+        "detected_format": result["detected_format"],
         "container": result["container"],
         "opacity": result["opacity"],
         "vendor": result["vendor"],
@@ -757,7 +758,7 @@ function renderResult(data, fileName) {
        data.container.records + '，framing ' + data.container.framing_width + 'B + payload ' +
        data.container.payload_width + 'B（已去框，' + data.container.payload_bytes +
        ' bytes）</span>' : '') +
-    (data.file_magic ? '<span><b>file(1):</b> ' + data.file_magic + '</span>' : '');
+    (data.detected_format ? '<span><b>格式:</b> ' + escapeHtml(data.detected_format) + '</span>' : '');
 
   const notice = document.getElementById('notice');
   notice.classList.remove('show');
@@ -1423,6 +1424,7 @@ def analyze_bytes(filename, data, vendor_uploads=None, progress=None):
             if rootfs_architecture else None),
         "file_size_bytes": len(delivered),
         "input_format": source["format"],
+        "detected_format": core.detected_format(source, result["segments"]),
         "reassembled": source["converted"],
         "container": container,
         "opacity": opacity,

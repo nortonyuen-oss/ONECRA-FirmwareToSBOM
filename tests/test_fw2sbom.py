@@ -3452,6 +3452,41 @@ class RealMicrocodeTest(unittest.TestCase):
             self.assertEqual([e["cpuid"] for e in update["extended"]], extended)
 
 
+class DetectedFormatTest(unittest.TestCase):
+    """What the file is, from what was parsed - the portable package has no
+    file(1), so fw2sbom:file_magic was always empty where customers run it."""
+
+    EXPECTED = {
+        "router_uimage.bin": "U-Boot legacy uImage (Linux/mips, gzip) + SquashFS 4.0 (xz)",
+        "fit_sysupgrade.bin": "U-Boot FIT image + CramFS + OpenWrt image metadata",
+        "kernel_initramfs.bin": "U-Boot legacy uImage (Linux/arm64, lzma) + "
+                                "initramfs (cpio, built into the kernel)",
+        "ubi_flash.bin": "UBI + CramFS + UBIFS",
+        "ext4_disk.img.gz": "gzip-compressed image + MBR partition table + "
+                            "ext2 'kernel' + ext4 'rootfs'",
+        "bios_microcode.bin": "Intel flash descriptor + UEFI firmware (3 firmware "
+                              "volume(s)) + 2 Intel microcode update(s)",
+        "cortexm_rtos.bin": "raw binary",
+    }
+
+    def test_each_image_is_described_by_its_structures(self):
+        for name, expected in self.EXPECTED.items():
+            with self.subTest(fixture=name):
+                props = {p["name"]: p["value"] for p in
+                         analyze(name)["bom"]["metadata"]["component"]["properties"]}
+                self.assertEqual(props["fw2sbom:detected_format"], expected)
+
+    def test_it_is_never_passed_off_as_file1(self):
+        props = [p["name"] for p in
+                 analyze("router_uimage.bin")["bom"]["metadata"]["component"]["properties"]]
+        self.assertNotIn("fw2sbom:file_magic", props)       # file(1) was not run
+
+    def test_the_page_shows_it(self):
+        result = service.analyze_bytes("fw.bin", fixture("fit_sysupgrade.bin"))
+        self.assertEqual(result["detected_format"], self.EXPECTED["fit_sysupgrade.bin"])
+        self.assertIn("data.detected_format", service.PAGE)
+
+
 class LZOTest(unittest.TestCase):
     """A decompressor can only be tested against a compressor that is not
     itself. The reference streams come from lzokay, an independent C++

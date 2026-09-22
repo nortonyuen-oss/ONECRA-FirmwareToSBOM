@@ -15,7 +15,12 @@ dependencies).
 0.5 **容器走訪與解壓** — uImage 檔頭、壓縮區段、SquashFS 檔案系統;每個區段
    各自分析,rootfs 內的套件資料庫直接讀出(見下方〈Linux 裝置韌體〉)
 1. **Binary fingerprint 與指令集判定**
-   - `file(1)` / libmagic 判讀(若系統有 `file` 指令,Kali 預設有)
+   - `file(1)` / libmagic 判讀(若系統有 `file` 指令,Kali 預設有),記為
+     `fw2sbom:file_magic`
+   - **格式描述** `fw2sbom:detected_format`:由 fw2sbom 實際解析到的結構寫成,例如
+     「U-Boot FIT image + SquashFS 4.0 (xz) + OpenWrt image metadata」。Windows 上
+     沒有 `file(1)`,portable 版的 `file_magic` 一向是空的;這一項兩個平台都有,
+     而且獨立成欄,不冒充 `file(1)` 的結果
    - SHA-256 / SHA-1 / MD5 hash
    - **ARM Cortex-M**:initial SP 是否指向典型 SRAM(0x2000xxxx 等)、reset
      vector 是否設 Thumb bit、slots 2–15 是否為合理 exception vectors

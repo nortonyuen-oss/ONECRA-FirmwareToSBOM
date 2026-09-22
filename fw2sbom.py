@@ -1944,6 +1944,70 @@ def packages_to_components(rootfs):
 # CycloneDX 1.6 output
 # --------------------------------------------------------------------------- #
 
+def detected_format(source, segments):
+    """What the file is, in one line, from the structures fw2sbom parsed.
+
+    file(1) gives this on Linux, and the portable package runs on Windows,
+    where there is no file(1) - so fw2sbom:file_magic was always empty for
+    the customers who use the package. Rather than imitate libmagic, this
+    describes what the analysis actually found and read: "U-Boot FIT image +
+    SquashFS 4.0 (xz) + OpenWrt image metadata" says more than a magic
+    number does. It is its own property, never passed off as file(1)'s.
+    """
+    parts = []
+
+    def add(text):
+        if text and text not in parts:
+            parts.append(text)
+
+    if source and source.get("converted"):
+        add(f"{source['format']} (reassembled)")
+    segments = segments or []
+    nested = next((s for s in segments if "expanded_offset" in s), None)
+    if nested:
+        match = re.search(r"in the (\w+) region", nested["label"])
+        add(f"{match.group(1) if match else 'compressed'}-compressed image")
+    if any(s.get("region") for s in segments):
+        add("Intel flash descriptor")
+    volumes = sum(1 for s in segments if s["kind"] == "firmware-volume")
+    if volumes:
+        add(f"UEFI firmware ({volumes} firmware volume(s))")
+    for segment in segments:
+        kind, label = segment["kind"], segment["label"]
+        short = label.split(" (in the ")[0]
+        if segment.get("espressif"):
+            add(f"Espressif image ({segment['espressif'].get('chip') or 'ESP32'})")
+        elif segment.get("fit"):
+            add("U-Boot FIT image")
+        elif segment.get("uimage") and kind == "boot-header":
+            header = segment["uimage"]
+            add(f"U-Boot legacy uImage ({header['os']}/{header['architecture']}, "
+                f"{header['compression'] or 'uncompressed'})")
+        elif kind == "vendor-header":
+            add(short)
+        elif kind == "partition-table":
+            add(short.split(" (")[0])
+        elif kind == "filesystem" and "initramfs" in short:
+            add("initramfs (cpio, built into the kernel)" if "inside" in short
+                else "initramfs (cpio)")
+        elif kind in ("filesystem", "unread-filesystem"):
+            if kind == "unread-filesystem":
+                short = short.split(":")[-1].split(",")[0].strip() + " (not readable)"
+            if "UBI volume" in short:
+                add("UBI")
+                short = short.split(": ", 1)[-1].split(" (at ")[0]
+            add(short.split(" (little-endian)")[0].split(" (big-endian)")[0]
+                if short.startswith(("CramFS", "JFFS2", "YAFFS")) else short)
+        elif kind == "image-metadata":
+            add("OpenWrt image metadata")
+    updates = sum(1 for s in segments if s["kind"] == "microcode")
+    if updates:
+        add(f"{updates} Intel microcode update(s)")
+    if not parts and source:
+        add(source["format"])
+    return " + ".join(parts[:6]) or None
+
+
 def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_strings,
                container=None, opacity=None, payload=None, standards=None,
                firmware_version=None, segments=None, rootfs=None, packages=None,
@@ -1970,6 +2034,9 @@ def build_sbom(input_path, data, file_magic, arm_info, hits, min_str_len, n_stri
         fw_props.append({"name": "fw2sbom:vector_table_detail", "value": d})
     if file_magic:
         fw_props.append({"name": "fw2sbom:file_magic", "value": file_magic})
+    described = detected_format(source, segments)
+    if described:
+        fw_props.append({"name": "fw2sbom:detected_format", "value": described})
     if source and source.get("converted"):
         # Every offset in the evidence below refers to the image we rebuilt,
         # not to the delivered file. Saying so is the difference between a
@@ -3440,6 +3507,9 @@ def main(argv=None):
                  else "not expanded")
         print(f"[fw2sbom] segment 0x{segment['offset']:08x} "
               f"{segment['label']} ({state})", file=sys.stderr)
+    described = detected_format(source, segments)
+    if described:
+        print(f"[fw2sbom] format: {described}", file=sys.stderr)
     if rootfs and rootfs.get("os_release"):
         release = rootfs["os_release"]
         print(f"[fw2sbom] distribution: {release['description']}", file=sys.stderr)
